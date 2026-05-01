@@ -1,38 +1,48 @@
 "use client";
 
-import { FormEvent, Suspense, useEffect, useState } from "react";
-import { signInWithEmailAndPassword } from "firebase/auth";
-import Link from "next/link";
+import { FormEvent, useEffect, useState } from "react";
+import { createUserWithEmailAndPassword } from "firebase/auth";
+import { doc, serverTimestamp, setDoc } from "firebase/firestore";
 import { useRouter } from "next/navigation";
-import { auth } from "@/lib/firebase";
 import { useAuthProfile } from "@/lib/auth";
+import { auth, db } from "@/lib/firebase";
 
-function LoginPageContent() {
+export default function RegisterAdminPage() {
   const router = useRouter();
   const { profile, isLoading } = useAuthProfile();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [name, setName] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
 
   useEffect(() => {
-    if (!profile) return;
-    if (profile.role === "staff") {
-      router.replace("/clock");
-      return;
+    if (profile?.role === "admin" || profile?.role === "manager") {
+      router.replace("/admin");
     }
-    router.replace("/admin");
+    if (profile?.role === "staff") {
+      router.replace("/clock");
+    }
   }, [profile, router]);
 
-  const login = async (event: FormEvent<HTMLFormElement>) => {
+  const register = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setIsSubmitting(true);
     setErrorMessage("");
+
     try {
-      await signInWithEmailAndPassword(auth, email.trim(), password);
+      const credential = await createUserWithEmailAndPassword(auth, email.trim(), password);
+      await setDoc(doc(db, "users", credential.user.uid), {
+        name: name.trim(),
+        email: email.trim(),
+        role: "admin",
+        storeId: null,
+        createdAt: serverTimestamp(),
+      });
+      router.replace("/admin");
     } catch (error) {
-      console.error("login failed", error);
-      setErrorMessage("ログインに失敗しました");
+      console.error("admin registration failed", error);
+      setErrorMessage("登録に失敗しました");
     } finally {
       setIsSubmitting(false);
     }
@@ -45,8 +55,8 @@ function LoginPageContent() {
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src="/logo-placeholder.png" alt="logo" style={styles.logo} />
         </div>
-        <h1 style={styles.title}>ログイン</h1>
-        <form onSubmit={login} style={styles.form}>
+        <h1 style={styles.title}>初回管理者登録</h1>
+        <form onSubmit={register} style={styles.form}>
           <label style={styles.label}>
             メールアドレス
             <input
@@ -64,31 +74,28 @@ function LoginPageContent() {
               type="password"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
-              autoComplete="current-password"
+              autoComplete="new-password"
+              required
+              style={styles.input}
+            />
+          </label>
+          <label style={styles.label}>
+            氏名
+            <input
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              autoComplete="name"
               required
               style={styles.input}
             />
           </label>
           {errorMessage && <p style={styles.error}>{errorMessage}</p>}
           <button type="submit" disabled={isSubmitting || isLoading} style={styles.button}>
-            {isSubmitting ? "ログイン中" : "ログイン"}
+            {isSubmitting ? "登録中" : "登録"}
           </button>
         </form>
-        <div style={styles.registerLinkWrap}>
-          <Link href="/register-admin" style={styles.registerLink}>
-            初回管理者登録
-          </Link>
-        </div>
       </section>
     </main>
-  );
-}
-
-export default function LoginPage() {
-  return (
-    <Suspense fallback={<main style={styles.page}>読み込み中</main>}>
-      <LoginPageContent />
-    </Suspense>
   );
 }
 
@@ -160,15 +167,5 @@ const styles = {
     color: "#B42318",
     fontSize: 13,
     fontWeight: 700,
-  },
-  registerLinkWrap: {
-    marginTop: 18,
-    textAlign: "center",
-  },
-  registerLink: {
-    color: "#3BAED6",
-    fontSize: 14,
-    fontWeight: 800,
-    textDecoration: "none",
   },
 } satisfies Record<string, React.CSSProperties>;
