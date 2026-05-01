@@ -1,0 +1,85 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── ヘルパー関数 ────────────────────────────────────────────────────────
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // users/{uid} ドキュメントを取得（同一リクエスト内でキャッシュされる）
+    function profile() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && profile().role == 'admin';
+    }
+
+    function isManager() {
+      return isSignedIn() && profile().role == 'manager';
+    }
+
+    // manager の担当 storeId
+    function myStoreId() {
+      return profile().storeId;
+    }
+
+    // ── users ────────────────────────────────────────────────────────────────
+    // 本人と admin のみ読み書き可
+    match /users/{uid} {
+      allow read:  if request.auth.uid == uid || isAdmin();
+      allow write: if request.auth.uid == uid || isAdmin();
+    }
+
+    // ── stores ───────────────────────────────────────────────────────────────
+    // 読み取り：誰でも可（未認証の QR 打刻ページで storeId 指定読み込みが必要）
+    // 書き込み：admin（全店舗）、manager（自分の storeId のみ）
+    match /stores/{storeId} {
+      allow read:  if true;
+      allow write: if isAdmin()
+                   || (isManager() && myStoreId() == storeId);
+    }
+
+    // ── employees ────────────────────────────────────────────────────────────
+    // 読み取り：誰でも可（QR 打刻ページで従業員ドロップダウン表示に必要）
+    // 作成：admin（全店舗）、manager（自店舗のみ）
+    // 更新：admin（全店舗）、manager（自店舗のデータのみ・他店舗への移動不可）
+    // 削除：admin のみ（論理削除の updateDoc は update ルールで許可済み）
+    match /employees/{employeeId} {
+      allow read: if true;
+      allow create: if isAdmin()
+                    || (isManager() && request.resource.data.storeId == myStoreId());
+      allow update: if isAdmin()
+                    || (isManager()
+                        && resource.data.storeId == myStoreId()
+                        && request.resource.data.storeId == myStoreId());
+      allow delete: if isAdmin();
+    }
+
+    // ── clockLogs ────────────────────────────────────────────────────────────
+    // 作成：誰でも可（未認証の QR 打刻）。storeId が文字列であることを最低限検証。
+    // 読み取り：admin（全店舗）、manager（自店舗のみ）
+    // 更新（打刻修正・論理削除）：admin（全店舗）、manager（自店舗のみ）
+    // 物理削除：admin のみ
+    match /clockLogs/{logId} {
+      allow create: if request.resource.data.storeId is string
+                    && request.resource.data.storeId.size() > 0;
+      allow read:   if isAdmin()
+                    || (isManager() && resource.data.storeId == myStoreId());
+      allow update: if isAdmin()
+                    || (isManager() && resource.data.storeId == myStoreId());
+      allow delete: if isAdmin();
+    }
+
+    // ── auditLogs ────────────────────────────────────────────────────────────
+    // 打刻修正時に admin / manager が作成する監査ログ
+    // 読み取り・更新・削除は admin のみ
+    match /auditLogs/{logId} {
+      allow create: if isAdmin() || isManager();
+      allow read:   if isAdmin();
+      allow update, delete: if isAdmin();
+    }
+  }
+}
