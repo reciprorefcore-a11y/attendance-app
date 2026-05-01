@@ -30,6 +30,7 @@ type StoreDoc = {
   gpsRadiusMeters?: number;
   helpWage?: number;
   active?: boolean;
+  gpsEnabled?: boolean;
 };
 
 type EmployeeDoc = {
@@ -130,7 +131,8 @@ function ClockPageContent() {
   // ─── 店舗・従業員データ取得 ──────────────────────────────────────────────
 
   useEffect(() => {
-    if (isAuthLoading) return;
+    // When storeId comes from the URL, proceed without waiting for auth
+    if (!storeId && isAuthLoading) return;
     if (!effectiveStoreId) return;
 
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -213,7 +215,7 @@ function ClockPageContent() {
     );
 
     return unsubscribe;
-  }, [effectiveStoreId, isAuthLoading, profile?.name, user?.uid]);
+  }, [effectiveStoreId, isAuthLoading, storeId, profile?.name, user?.uid]);
 
   // ─── 従業員が変わったら PIN をリセット ──────────────────────────────────
 
@@ -267,6 +269,13 @@ function ClockPageContent() {
 
   useEffect(() => {
     if (!store) return;
+    if (store.gpsEnabled === false) {
+      setGps({
+        latitude: null, longitude: null, distanceMeters: null, isOutsideGps: false,
+        message: "GPS打刻チェック無効",
+      });
+      return;
+    }
     const lat = storeLatitude(store);
     const lng = storeLongitude(store);
     const radius = storeRadius(store);
@@ -437,7 +446,7 @@ function ClockPageContent() {
           <p style={styles.error}>店舗情報が見つかりません</p>
         )}
         {effectiveStoreId && isLoading && <p style={styles.info}>読み込み中</p>}
-        {isAuthLoading && <p style={styles.info}>ログイン確認中</p>}
+        {isAuthLoading && !storeId && <p style={styles.info}>ログイン確認中</p>}
         {errorMessage && <p style={styles.error}>{errorMessage}</p>}
         {currentStore && employees.length === 0 && !isLoading && !errorMessage && (
           <p style={styles.error}>有効な従業員がいません</p>

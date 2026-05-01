@@ -21,6 +21,7 @@ export type Store = {
   helpHourlyWage?: number | null;
   active?: boolean;
   isActive?: boolean;
+  gpsEnabled?: boolean;
 };
 
 export type Employee = {
@@ -41,6 +42,9 @@ export type Employee = {
   pin?: string;
   phone?: string;
   memo?: string;
+  isDeleted?: boolean;
+  transportationCost?: number;
+  transportationType?: "daily" | "monthly";
 };
 
 export type WageHistory = {

@@ -47,6 +47,9 @@ type TimecardRow = {
   longitude?: number | null;
   isOutsideGps?: boolean;
   isManualEdited?: boolean;
+  isDeleted?: boolean;
+  deletedAt?: Timestamp | null;
+  deletedBy?: string | null;
 };
 
 type EmployeeRow = Employee & { id: string };
@@ -176,38 +179,6 @@ const productionCheckEmployee = {
   baseWage: 1250,
   status: "active",
 };
-
-const monthlyHeaders = [
-  "所属店舗コード",
-  "所属店舗名",
-  "社員コード",
-  "氏名",
-  "日付",
-  "出勤",
-  "退勤",
-  "労働時間",
-  "加算帯1",
-  "加算帯2",
-  "加算帯3",
-  "超過時間",
-  "深夜時間",
-  "休憩時間",
-  "ヘルプ時間",
-  "休出時間",
-  "勤務区分",
-  "時間手当",
-  "その他手当1",
-  "その他手当2",
-  "日交通費",
-  "定期代",
-  "食事代",
-  "靴代",
-  "駐車場代",
-  "ユニフォーム",
-  "適用時給",
-  "概算給与",
-  "GPS範囲外",
-];
 
 function localMonth() {
   const date = new Date();
@@ -414,31 +385,40 @@ function buildMonthlyRows(
   const [year, month] = targetMonth.split("-").map(Number);
   const lastDay = new Date(year, month, 0).getDate();
   const outputEmployees = employees.filter(
-    (employee) => storeFilter === "all" || employee.storeId === storeFilter,
+    (employee) => employee.isDeleted !== true && (storeFilter === "all" || employee.storeId === storeFilter),
   );
+
+  const newMonthlyHeaders = [
+    "所属店舗ｺｰﾄﾞ", "所属店舗名", "社員ｺｰﾄﾞ", "氏名", "日付",
+    "出勤", "退勤", "労働時間", "加算帯1", "加算帯2", "加算帯3", "超過時間",
+    "深夜時間", "休憩時間", "ﾍﾙﾌﾟ時間", "休出時間", "勤務区分", "時間手当",
+    "その他手当1", "その他手当2", "日交通費", "定期代", "食事代", "靴代",
+    "駐車場代", "ユニフォーム", "その他",
+  ];
+
   const bodyRows: (string | number)[][] = [];
-  const total = rows.reduce(
-    (sum, row) => ({
-      workMinutes: sum.workMinutes + row.workMinutes,
-      nightMinutes: sum.nightMinutes + row.nightMinutes,
-      breakMinutes: sum.breakMinutes + row.breakMinutes,
-      wageAmount: sum.wageAmount + row.wageAmount,
-    }),
-    { workMinutes: 0, nightMinutes: 0, breakMinutes: 0, wageAmount: 0 },
-  );
 
   for (const employee of outputEmployees) {
     const store = stores.find((item) => item.id === employee.storeId) ?? null;
+    // Find rows for this employee STRICTLY by employeeId
+    const employeeRows = rows.filter((r) => r.employeeKey === employee.id);
+
+    let totalWork = 0, totalNight = 0, totalBreak = 0, totalWage = 0;
+
     for (let day = 1; day <= lastDay; day += 1) {
       const date = `${targetMonth}-${String(day).padStart(2, "0")}`;
-      const row =
-        rows.find(
-          (item) =>
-            item.date === date &&
-            (item.employeeKey === employee.id ||
-              item.employeeCode === employee.employeeCode ||
-              item.employeeName === employee.name),
-        ) ?? null;
+      const row = employeeRows.find((r) => r.date === date) ?? null;
+
+      if (row) {
+        totalWork += row.workMinutes;
+        totalNight += row.nightMinutes;
+        totalBreak += row.breakMinutes;
+        totalWage += row.wageAmount;
+      }
+
+      const dailyCost = employee.transportationType === "daily" ? (employee.transportationCost ?? 0) : 0;
+      const monthlyCost = employee.transportationType === "monthly" ? (employee.transportationCost ?? 0) : 0;
+
       bodyRows.push([
         employee.storeId,
         store ? getStoreName(store) : employee.storeId,
@@ -448,67 +428,36 @@ function buildMonthlyRows(
         row ? formatTime(row.clockIn) : "",
         row ? formatTime(row.clockOut) : "",
         row ? formatMinutes(row.workMinutes) : "",
-        "",
-        "",
-        "",
-        "",
+        "", "", "", "",
         row ? formatMinutes(row.nightMinutes) : "",
         row ? formatMinutes(row.breakMinutes) : "",
-        "",
-        "",
+        "", "",
         row && row.workMinutes > 0 ? "通常" : "",
         row?.wageAmount || "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        row?.hourlyWageSnapshot ?? "",
-        row?.wageAmount || "",
-        row?.isOutsideGps ? "範囲外" : "",
+        "", "",
+        row && dailyCost > 0 ? dailyCost : "",
+        day === 1 && monthlyCost > 0 ? monthlyCost : "",
+        "", "", "", "", "",
       ]);
     }
+
+    // "合 計" row for this employee
+    bodyRows.push([
+      "", "", "", "合 計", "", "", "",
+      formatMinutes(totalWork),
+      "", "", "", "",
+      formatMinutes(totalNight),
+      formatMinutes(totalBreak),
+      "", "", "",
+      totalWage || "",
+      "", "", "", "", "", "", "", "", "",
+    ]);
   }
 
   return [
-    [`${year}.${month} 勤怠`],
     [`対象年月：${year}年${String(month).padStart(2, "0")}月`],
-    monthlyHeaders,
+    newMonthlyHeaders,
     ...bodyRows,
-    [
-      "",
-      "",
-      "",
-      "合計",
-      "",
-      "",
-      "",
-      formatMinutes(total.workMinutes),
-      "",
-      "",
-      "",
-      "",
-      formatMinutes(total.nightMinutes),
-      formatMinutes(total.breakMinutes),
-      "",
-      "",
-      "",
-      total.wageAmount || "",
-      "",
-      "",
-      "",
-      "",
-      "",
-      "",
-      "",
-      "",
-      "",
-      total.wageAmount || "",
-      "",
-    ],
   ];
 }
 
@@ -539,6 +488,8 @@ export default function AdminPage() {
     storeId: "",
     baseWage: "",
     status: "active",
+    transportationCost: "",
+    transportationType: "daily" as "daily" | "monthly",
   });
   const [storeEditingId, setStoreEditingId] = useState("");
   const [storeForm, setStoreForm] = useState({
@@ -550,6 +501,7 @@ export default function AdminPage() {
     gpsRadiusMeters: "100",
     helpWage: "",
     active: true,
+    gpsEnabled: true,
   });
   const [logoUploadState, setLogoUploadState] = useState<{
     isUploading: boolean;
@@ -637,6 +589,7 @@ export default function AdminPage() {
   const filteredTimecards = useMemo(
     () =>
       timecards.filter((row) => {
+        if (row.isDeleted) return false;
         const date = logDate(row);
         if (!date || !dateKey(date).startsWith(targetMonth)) return false;
         return storeFilter === "all" || row.storeId === storeFilter;
@@ -725,12 +678,29 @@ export default function AdminPage() {
     }
   };
 
+  const deleteTimecard = async (row: TimecardRow) => {
+    const confirmed = window.confirm("この打刻を削除しますか？");
+    if (!confirmed) return;
+    try {
+      await updateDoc(doc(db, "clockLogs", row.id), {
+        isDeleted: true,
+        deletedAt: serverTimestamp(),
+        deletedBy: user?.uid ?? "admin",
+      });
+      setMessage("打刻を削除しました。");
+      await load();
+    } catch (error) {
+      console.error("timecard delete failed", error);
+      setMessage("打刻の削除に失敗しました。");
+    }
+  };
+
   const downloadExcel = async () => {
     const XLSX = await import("xlsx");
     const rows = buildMonthlyRows(attendanceRows, targetMonth, employees, stores, storeFilter);
     const worksheet = XLSX.utils.aoa_to_sheet(rows);
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "勤怠");
+    XLSX.utils.book_append_sheet(workbook, worksheet, "temp");
     const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "array" });
     const blob = new Blob([buffer], {
       type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -786,6 +756,8 @@ export default function AdminPage() {
       storeId: nextStoreId,
       baseWage: Number(employeeForm.baseWage) || 0,
       status: employeeForm.status as "active" | "inactive",
+      transportationCost: Number(employeeForm.transportationCost) || 0,
+      transportationType: employeeForm.transportationType,
     };
     try {
       if (employeeEditingId) {
@@ -794,7 +766,7 @@ export default function AdminPage() {
         await addDoc(collection(db, "employees"), payload);
       }
       setEmployeeEditingId("");
-      setEmployeeForm({ name: "", nameKana: "", employeeCode: "", pin: "", storeId: "", baseWage: "", status: "active" });
+      setEmployeeForm({ name: "", nameKana: "", employeeCode: "", pin: "", storeId: "", baseWage: "", status: "active", transportationCost: "", transportationType: "daily" });
       setMessage("従業員を保存しました。");
       await load();
     } catch (error) {
@@ -813,8 +785,23 @@ export default function AdminPage() {
       storeId: employee.storeId,
       baseWage: String(getEmployeeBaseWage(employee) || ""),
       status: employee.status === "inactive" ? "inactive" : "active",
+      transportationCost: String(employee.transportationCost || ""),
+      transportationType: employee.transportationType ?? "daily",
     });
     setActiveTab("employees");
+  };
+
+  const deleteEmployee = async (employee: EmployeeRow) => {
+    const confirmed = window.confirm(`${employee.name} を削除しますか？この操作は取り消せません。`);
+    if (!confirmed) return;
+    try {
+      await updateDoc(doc(db, "employees", employee.id), { isDeleted: true });
+      setMessage("従業員を削除しました。");
+      await load();
+    } catch (error) {
+      console.error("employee delete failed", error);
+      setMessage("従業員の削除に失敗しました。");
+    }
   };
 
   const saveStore = async (event: FormEvent<HTMLFormElement>) => {
@@ -836,11 +823,12 @@ export default function AdminPage() {
       gpsRadiusMeters: Number(storeForm.gpsRadiusMeters) || 100,
       helpWage: storeForm.helpWage ? Number(storeForm.helpWage) : null,
       active: storeForm.active,
+      gpsEnabled: storeForm.gpsEnabled,
     };
     try {
       await setDoc(doc(db, "stores", nextStoreId), payload, { merge: true });
       setStoreEditingId("");
-      setStoreForm({ id: "", name: "", logoUrl: "", latitude: "", longitude: "", gpsRadiusMeters: "100", helpWage: "", active: true });
+      setStoreForm({ id: "", name: "", logoUrl: "", latitude: "", longitude: "", gpsRadiusMeters: "100", helpWage: "", active: true, gpsEnabled: true });
       setMessage("店舗を保存しました。");
       await load();
     } catch (error) {
@@ -861,6 +849,7 @@ export default function AdminPage() {
       gpsRadiusMeters: String(getStoreRadius(store) || "100"),
       helpWage: String(getStoreHelpWage(store) || ""),
       active: store.active !== false,
+      gpsEnabled: store.gpsEnabled !== false,
     });
     setActiveTab("stores");
   };
@@ -1279,7 +1268,7 @@ export default function AdminPage() {
                   type="button"
                   onClick={() => {
                     setEmployeeEditingId("");
-                    setEmployeeForm({ name: "", nameKana: "", employeeCode: "", pin: "", storeId: "", baseWage: "", status: "active" });
+                    setEmployeeForm({ name: "", nameKana: "", employeeCode: "", pin: "", storeId: "", baseWage: "", status: "active", transportationCost: "", transportationType: "daily" });
                   }}
                   style={styles.secondaryButton}
                 >
@@ -1344,20 +1333,29 @@ export default function AdminPage() {
                   <option value="inactive">inactive</option>
                 </select>
               </label>
+              <label style={styles.label}>交通費（円）<input type="number" value={employeeForm.transportationCost} onChange={(e) => setEmployeeForm({ ...employeeForm, transportationCost: e.target.value })} style={styles.input} /></label>
+              <label style={styles.label}>交通費種別
+                <select value={employeeForm.transportationType} onChange={(e) => setEmployeeForm({ ...employeeForm, transportationType: e.target.value as "daily" | "monthly" })} style={styles.input}>
+                  <option value="daily">日割り</option>
+                  <option value="monthly">定期代</option>
+                </select>
+              </label>
               <button type="submit" style={styles.button}>{employeeEditingId ? "更新" : "登録"}</button>
             </form>
-            <DataTable headers={["社員コード", "氏名", "ひらがな", "所属店舗", "status", "基本時給", "操作"]}>
-              {employees.map((employee) => (
+            <DataTable headers={["社員コード", "氏名", "ひらがな", "所属店舗", "状態", "基本時給", "交通費", "操作"]}>
+              {employees.filter(e => e.isDeleted !== true).map((employee) => (
                 <tr key={employee.id}>
                   <td style={styles.td}>{employee.employeeCode}</td>
                   <td style={styles.td}>{employee.name}</td>
                   <td style={styles.td}>{employee.nameKana}</td>
                   <td style={styles.td}>{storeNameById(employee.storeId)}</td>
-                  <td style={styles.td}>{employee.status === "inactive" ? "inactive" : "active"}</td>
+                  <td style={styles.td}><span style={employee.status === "active" ? styles.activeBadge : styles.inactiveBadge}>{employee.status === "active" ? "有効" : "無効"}</span></td>
                   <td style={styles.td}>{getEmployeeBaseWage(employee)}</td>
+                  <td style={styles.td}>{employee.transportationCost ? `${employee.transportationCost}円/${employee.transportationType === "monthly" ? "月" : "日"}` : ""}</td>
                   <td style={styles.td}>
                     <button type="button" onClick={() => editEmployee(employee)} style={styles.linkButton}>編集</button>
                     <button type="button" onClick={async () => { await updateDoc(doc(db, "employees", employee.id), { status: "inactive" }); await load(); }} style={styles.linkButton}>無効化</button>
+                    <button type="button" onClick={() => deleteEmployee(employee)} style={{...styles.linkButton, color: "#B91C1C", borderColor: "#FCA5A5", background: "#FEF2F2"}}>削除</button>
                   </td>
                 </tr>
               ))}
@@ -1419,6 +1417,12 @@ export default function AdminPage() {
                   <option value="false">inactive</option>
                 </select>
               </label>
+              <label style={styles.label}>GPS打刻チェック
+                <select value={storeForm.gpsEnabled ? "true" : "false"} onChange={(e) => setStoreForm({ ...storeForm, gpsEnabled: e.target.value === "true" })} style={styles.input}>
+                  <option value="true">ON（GPS確認あり）</option>
+                  <option value="false">OFF（GPS確認なし）</option>
+                </select>
+              </label>
               <button type="submit" style={styles.button}>{storeEditingId ? "更新" : "登録"}</button>
             </form>
             <DataTable
@@ -1427,6 +1431,7 @@ export default function AdminPage() {
                 "storeId",
                 "緯度経度",
                 "GPS許可半径",
+                "GPS",
                 "ロゴ",
                 "QR打刻URL",
                 "QRコード",
@@ -1443,6 +1448,7 @@ export default function AdminPage() {
                     <td style={styles.td}>{store.id}</td>
                     <td style={styles.td}>{getStoreLat(store)}, {getStoreLng(store)}</td>
                     <td style={styles.td}>{getStoreRadius(store)}m</td>
+                    <td style={styles.td}><span style={store.gpsEnabled === false ? styles.inactiveBadge : styles.activeBadge}>{store.gpsEnabled === false ? "GPS無効" : "GPS有効"}</span></td>
                     <td style={styles.td}>
                       {store.logoUrl ? (
                         // eslint-disable-next-line @next/next/no-img-element
@@ -1524,9 +1530,8 @@ export default function AdminPage() {
                   <td style={styles.td}>{storeNameById(row.storeId)}</td>
                   <td style={styles.td}>{clockTypeLabels[normalizeClockType(row)] ?? normalizeClockType(row)}</td>
                   <td style={styles.td}>
-                    <button type="button" onClick={() => startEdit(row)} style={styles.linkButton}>
-                      修正
-                    </button>
+                    <button type="button" onClick={() => startEdit(row)} style={styles.linkButton}>修正</button>
+                    <button type="button" onClick={() => deleteTimecard(row)} style={{...styles.linkButton, marginLeft: 8, color: "#B91C1C", borderColor: "#FCA5A5", background: "#FEF2F2"}}>削除</button>
                   </td>
                 </tr>
               ))}
@@ -2079,5 +2084,23 @@ const styles = {
   empty: {
     margin: "16px 0 0",
     color: "#64748B",
+  },
+  activeBadge: {
+    display: "inline-flex",
+    padding: "2px 8px",
+    borderRadius: 999,
+    background: "#DCFCE7",
+    color: "#166534",
+    fontSize: 12,
+    fontWeight: 800,
+  },
+  inactiveBadge: {
+    display: "inline-flex",
+    padding: "2px 8px",
+    borderRadius: 999,
+    background: "#F1F5F9",
+    color: "#64748B",
+    fontSize: 12,
+    fontWeight: 800,
   },
 } satisfies Record<string, React.CSSProperties>;
