@@ -52,7 +52,7 @@ type TimecardRow = {
   deletedBy?: string | null;
 };
 
-type EmployeeRow = Employee & { id: string };
+type EmployeeRow = Employee & { id: string; hourlyWage?: number | null };
 type StoreRow = Store & { id: string };
 
 type AttendanceRow = {
@@ -221,11 +221,11 @@ function getStoreRadius(store: StoreRow) {
 }
 
 function getStoreHelpWage(store: StoreRow) {
-  return store.helpWage ?? "";
+  return store.helpHourlyWage ?? store.helpWage ?? "";
 }
 
 function getEmployeeBaseWage(employee: EmployeeRow) {
-  return employee.baseWage ?? employee.baseHourlyWage ?? "";
+  return employee.hourlyWage ?? employee.baseWage ?? employee.baseHourlyWage ?? 0;
 }
 
 function dateKey(date: Date) {
@@ -515,6 +515,10 @@ export default function AdminPage() {
   const [csvImportErrors, setCsvImportErrors] = useState<CsvEmployeeError[]>([]);
   const [csvImportSummary, setCsvImportSummary] = useState("");
   const [csvImporting, setCsvImporting] = useState(false);
+  const [wageEmpEditId, setWageEmpEditId] = useState("");
+  const [wageEmpInput, setWageEmpInput] = useState("");
+  const [wageStoreEditId, setWageStoreEditId] = useState("");
+  const [wageStoreInput, setWageStoreInput] = useState("");
 
   const isAdmin = profile?.role === "admin";
   const managerStoreId = profile?.role === "manager" ? profile.storeId : "";
@@ -852,6 +856,36 @@ export default function AdminPage() {
       gpsEnabled: store.gpsEnabled !== false,
     });
     setActiveTab("stores");
+  };
+
+  const saveEmployeeWage = async (employeeId: string) => {
+    const wage = Number(wageEmpInput);
+    if (!wageEmpInput.trim() || Number.isNaN(wage) || wage < 0) return;
+    try {
+      await updateDoc(doc(db, "employees", employeeId), { hourlyWage: wage });
+      setWageEmpEditId("");
+      setWageEmpInput("");
+      setMessage("時給を保存しました。");
+      await load();
+    } catch (err) {
+      console.error("employee wage save failed", err);
+      setMessage("時給の保存に失敗しました。");
+    }
+  };
+
+  const saveStoreHelpWage = async (storeId: string) => {
+    const wage = Number(wageStoreInput);
+    if (!wageStoreInput.trim() || Number.isNaN(wage) || wage < 0) return;
+    try {
+      await updateDoc(doc(db, "stores", storeId), { helpHourlyWage: wage });
+      setWageStoreEditId("");
+      setWageStoreInput("");
+      setMessage("ヘルプ時給を保存しました。");
+      await load();
+    } catch (err) {
+      console.error("store help wage save failed", err);
+      setMessage("ヘルプ時給の保存に失敗しました。");
+    }
   };
 
   const uploadStoreLogo = async (file: File) => {
@@ -1490,25 +1524,96 @@ export default function AdminPage() {
             <div style={styles.twoColumns}>
               <div>
                 <h3 style={styles.subTitle}>従業員 基本時給</h3>
-                <DataTable headers={["社員コード", "氏名", "基本時給"]}>
-                  {employees.map((employee) => (
-                    <tr key={employee.id}>
-                      <td style={styles.td}>{employee.employeeCode}</td>
-                      <td style={styles.td}>{employee.name}</td>
-                      <td style={styles.td}>{getEmployeeBaseWage(employee)}</td>
-                    </tr>
-                  ))}
+                <DataTable headers={["社員コード", "氏名", "基本時給", "操作"]}>
+                  {employees.map((employee) => {
+                    const wage = getEmployeeBaseWage(employee);
+                    const isUnset = !wage || Number(wage) === 0;
+                    const isEditing = wageEmpEditId === employee.id;
+                    return (
+                      <tr key={employee.id}>
+                        <td style={styles.td}>{employee.employeeCode}</td>
+                        <td style={styles.td}>{employee.name}</td>
+                        <td style={styles.td}>
+                          {isEditing ? (
+                            <input
+                              type="number"
+                              value={wageEmpInput}
+                              onChange={(e) => setWageEmpInput(e.target.value)}
+                              onKeyDown={(e) => { if (e.key === "Enter") saveEmployeeWage(employee.id); }}
+                              style={{ ...styles.input, width: 90, minHeight: 32, padding: "2px 8px", fontSize: 14 }}
+                              autoFocus
+                              min={0}
+                            />
+                          ) : (
+                            <span style={isUnset ? { color: "#B91C1C", fontWeight: 700 } : undefined}>
+                              {isUnset ? "未設定" : `${wage}円`}
+                            </span>
+                          )}
+                        </td>
+                        <td style={styles.td}>
+                          {isEditing ? (
+                            <>
+                              <button type="button" onClick={() => saveEmployeeWage(employee.id)} style={styles.linkButton}>保存</button>
+                              <button type="button" onClick={() => { setWageEmpEditId(""); setWageEmpInput(""); }} style={{ ...styles.linkButton, marginLeft: 8 }}>キャンセル</button>
+                            </>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => { setWageEmpEditId(employee.id); setWageEmpInput(isUnset ? "" : String(wage)); }}
+                              style={styles.linkButton}
+                            >
+                              編集
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </DataTable>
               </div>
               <div>
                 <h3 style={styles.subTitle}>店舗 ヘルプ時給</h3>
-                <DataTable headers={["店舗名", "ヘルプ時給"]}>
-                  {stores.map((store) => (
-                    <tr key={store.id}>
-                      <td style={styles.td}>{getStoreName(store)}</td>
-                      <td style={styles.td}>{getStoreHelpWage(store)}</td>
-                    </tr>
-                  ))}
+                <DataTable headers={["店舗名", "ヘルプ時給", "操作"]}>
+                  {stores.map((store) => {
+                    const wage = getStoreHelpWage(store);
+                    const isEditing = wageStoreEditId === store.id;
+                    return (
+                      <tr key={store.id}>
+                        <td style={styles.td}>{getStoreName(store)}</td>
+                        <td style={styles.td}>
+                          {isEditing ? (
+                            <input
+                              type="number"
+                              value={wageStoreInput}
+                              onChange={(e) => setWageStoreInput(e.target.value)}
+                              onKeyDown={(e) => { if (e.key === "Enter") saveStoreHelpWage(store.id); }}
+                              style={{ ...styles.input, width: 90, minHeight: 32, padding: "2px 8px", fontSize: 14 }}
+                              autoFocus
+                              min={0}
+                            />
+                          ) : (
+                            <span>{wage ? `${wage}円` : "—"}</span>
+                          )}
+                        </td>
+                        <td style={styles.td}>
+                          {isEditing ? (
+                            <>
+                              <button type="button" onClick={() => saveStoreHelpWage(store.id)} style={styles.linkButton}>保存</button>
+                              <button type="button" onClick={() => { setWageStoreEditId(""); setWageStoreInput(""); }} style={{ ...styles.linkButton, marginLeft: 8 }}>キャンセル</button>
+                            </>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => { setWageStoreEditId(store.id); setWageStoreInput(wage ? String(wage) : ""); }}
+                              style={styles.linkButton}
+                            >
+                              編集
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </DataTable>
               </div>
             </div>
