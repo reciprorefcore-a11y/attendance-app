@@ -290,7 +290,7 @@ function buildAttendanceRows(timecards: TimecardRow[]) {
     const date = logDate(row);
     if (!date) continue;
     const employeeKey = row.employeeId || row.employeeCode || row.employeeName || "unknown";
-    const key = `${dateKey(date)}:${row.storeId}:${employeeKey}`;
+    const key = `${dateKey(date)}:${employeeKey}`;
     groups.set(key, [...(groups.get(key) ?? []), row]);
   }
 
@@ -708,7 +708,7 @@ export default function AdminPage() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `fukuda_attendance_${targetMonth}_${storeFilter}.xlsx`;
+    link.download = `attendance_${targetMonth}.xlsx`;
     link.click();
     URL.revokeObjectURL(url);
   };
