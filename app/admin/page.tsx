@@ -1525,7 +1525,7 @@ export default function AdminPage() {
               <div>
                 <h3 style={styles.subTitle}>従業員 基本時給</h3>
                 <DataTable headers={["社員コード", "氏名", "基本時給", "操作"]}>
-                  {employees.map((employee) => {
+                  {employees.filter((e) => e.isDeleted !== true).map((employee) => {
                     const wage = getEmployeeBaseWage(employee);
                     const isUnset = !wage || Number(wage) === 0;
                     const isEditing = wageEmpEditId === employee.id;
