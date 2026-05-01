@@ -306,19 +306,19 @@ function ClockPageContent() {
     try {
       await addDoc(collection(db, "clockLogs"), {
         employeeId: employee.id,
-        employeeCode: employee.employeeCode,
-        employeeName: employee.name,
-        homeStoreId: employee.storeId,
-        homeStoreName,
+        employeeCode: employee.employeeCode ?? "",
+        employeeName: employee.name ?? "",
+        homeStoreId: employee.storeId ?? "",
+        homeStoreName: homeStoreName ?? "",
         workStoreId,
         workStoreName: workStore.name ?? "",
-        isHelp,
-        hourlyWageAtWork,
+        isHelp: !!isHelp,
+        hourlyWageAtWork: hourlyWageAtWork ?? 0,
         type,
         timestamp: serverTimestamp(),
-        latitude: gps.latitude,
-        longitude: gps.longitude,
-        isOutsideGps: gps.isOutsideGps,
+        latitude: gps.latitude ?? null,
+        longitude: gps.longitude ?? null,
+        isOutsideGps: !!gps.isOutsideGps,
       });
 
       setLastPunchType(type);
