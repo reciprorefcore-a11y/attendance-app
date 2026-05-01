@@ -433,7 +433,7 @@ function buildMonthlyRows(
         row ? formatMinutes(row.breakMinutes) : "",
         "", "",
         row && row.workMinutes > 0 ? "通常" : "",
-        row?.wageAmount || "",
+        "",
         "", "",
         row && dailyCost > 0 ? dailyCost : "",
         day === 1 && monthlyCost > 0 ? monthlyCost : "",
@@ -449,7 +449,7 @@ function buildMonthlyRows(
       formatMinutes(totalNight),
       formatMinutes(totalBreak),
       "", "", "",
-      totalWage || "",
+      "",
       "", "", "", "", "", "", "", "", "",
     ]);
   }
