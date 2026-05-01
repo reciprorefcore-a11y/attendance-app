@@ -1,6 +1,12 @@
+"use client";
+
 import Link from "next/link";
+import { useAuthProfile } from "@/lib/auth";
 
 export default function Home() {
+  const { user } = useAuthProfile();
+  const adminHref = user ? "/admin" : "/login";
+
   return (
     <main style={styles.page}>
       <section style={styles.panel}>
@@ -10,7 +16,7 @@ export default function Home() {
           <Link href="/clock?storeId=1" style={styles.primaryLink}>
             打刻画面
           </Link>
-          <Link href="/hq" style={styles.secondaryLink}>
+          <Link href={adminHref} style={styles.secondaryLink}>
             本部管理
           </Link>
         </div>

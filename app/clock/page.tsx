@@ -2,35 +2,30 @@
 
 import { Suspense, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
+import { useSearchParams } from "next/navigation";
+import { useAuthProfile } from "@/lib/auth";
 import { db } from "@/lib/firebase";
 import {
   addDoc,
   collection,
   doc,
-  getDoc,
   getDocs,
+  onSnapshot,
   query,
   serverTimestamp,
   where,
 } from "firebase/firestore";
-import { useSearchParams } from "next/navigation";
 
 type ClockType = "clock_in" | "clock_out" | "break_start" | "break_end";
 
 type StoreDoc = {
   name?: string;
-  storeName?: string;
   logoUrl?: string;
   latitude?: number;
-  lat?: number;
   longitude?: number;
-  lng?: number;
   gpsRadiusMeters?: number;
-  radiusMeter?: number;
   helpWage?: number;
-  helpHourlyWage?: number;
   active?: boolean;
-  isActive?: boolean;
 };
 
 type EmployeeDoc = {
@@ -59,14 +54,6 @@ const clockButtons: { type: ClockType; label: string; tone: "primary" | "dark" |
   { type: "break_end", label: "休憩終了", tone: "light" },
 ];
 
-const storeLogos: Record<string, string> = {
-  "1": "/assets/icon-akari.png",
-  "2": "/assets/icon-kushi.png",
-  "3": "/assets/icon-pes.png",
-  "4": "/assets/icon-gm.png",
-  "5": "/assets/icon-gm.png",
-};
-
 function calcDistance(lat1: number, lng1: number, lat2: number, lng2: number) {
   const radius = 6371000;
   const toRad = (value: number) => (value * Math.PI) / 180;
@@ -79,32 +66,34 @@ function calcDistance(lat1: number, lng1: number, lat2: number, lng2: number) {
 }
 
 function storeName(store: StoreDoc | null) {
-  return store?.name || store?.storeName || "タイムカード";
+  return store?.name ?? "";
 }
 
 function storeLatitude(store: StoreDoc | null) {
-  return store?.latitude ?? store?.lat ?? null;
+  return store?.latitude ?? null;
 }
 
 function storeLongitude(store: StoreDoc | null) {
-  return store?.longitude ?? store?.lng ?? null;
+  return store?.longitude ?? null;
 }
 
 function storeRadius(store: StoreDoc | null) {
-  return store?.gpsRadiusMeters ?? store?.radiusMeter ?? 0;
+  return store?.gpsRadiusMeters ?? 0;
 }
 
 function storeHelpWage(store: StoreDoc | null) {
-  return store?.helpWage ?? store?.helpHourlyWage ?? null;
+  return store?.helpWage ?? null;
 }
 
-function storeLogo(store: StoreDoc | null, storeId: string) {
-  return storeLogos[storeId] || store?.logoUrl || "/assets/logo-placeholder.png";
+function storeLogo(store: StoreDoc | null) {
+  return store?.logoUrl || "/assets/logo-placeholder.png";
 }
 
 function ClockPageContent() {
   const searchParams = useSearchParams();
   const storeId = searchParams.get("storeId") ?? "";
+  const { user, profile, isLoading: isAuthLoading } = useAuthProfile();
+  const effectiveStoreId = storeId || profile?.storeId || "";
   const [store, setStore] = useState<StoreDoc | null>(null);
   const [employees, setEmployees] = useState<EmployeeDoc[]>([]);
   const [employeeId, setEmployeeId] = useState("");
@@ -121,50 +110,91 @@ function ClockPageContent() {
   const [successMessage, setSuccessMessage] = useState("");
 
   useEffect(() => {
-    const load = async () => {
-      if (!storeId) {
-        setErrorMessage("店舗情報が見つかりません");
-        setIsLoading(false);
-        return;
-      }
+    if (isAuthLoading) return;
 
-      setIsLoading(true);
-      setErrorMessage("");
-      try {
-        const storeSnap = await getDoc(doc(db, "stores", storeId));
+    if (!effectiveStoreId) {
+      return;
+    }
+
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setIsLoading(true);
+    setErrorMessage("");
+    setSuccessMessage("");
+    setStore(null);
+    setEmployees([]);
+    setEmployeeId("");
+
+    const unsubscribe = onSnapshot(
+      doc(db, "stores", effectiveStoreId),
+      async (storeSnap) => {
         if (!storeSnap.exists()) {
           setErrorMessage("店舗情報が見つかりません");
           setStore(null);
+          setEmployees([]);
+          setEmployeeId("");
+          setIsLoading(false);
           return;
         }
 
         const nextStore = storeSnap.data() as StoreDoc;
-        if (nextStore.active === false || nextStore.isActive === false) {
+        if (nextStore.active === false) {
           setErrorMessage("この店舗は無効です");
+          setStore(null);
+          setEmployees([]);
+          setEmployeeId("");
+          setIsLoading(false);
+          return;
         }
-        setStore(nextStore);
 
-        const employeeSnapshot = await getDocs(
-          query(collection(db, "employees"), where("status", "==", "active")),
-        );
-        const rows = employeeSnapshot.docs
-          .map((employeeDoc) => ({
+        setStore(nextStore);
+        setErrorMessage("");
+
+        try {
+          const employeeSnapshot = await getDocs(
+            query(
+              collection(db, "employees"),
+              where("status", "==", "active"),
+              where("storeId", "==", effectiveStoreId),
+            ),
+          );
+          const rows = employeeSnapshot.docs
+            .map((employeeDoc) => ({
             id: employeeDoc.id,
             ...(employeeDoc.data() as Omit<EmployeeDoc, "id">),
           }))
-          .filter((employee) => employee.status === "active");
-        setEmployees(rows);
-        if (rows[0]) setEmployeeId(rows[0].id);
-      } catch (error) {
-        console.error("clock page fetch failed", error);
+            .filter(
+              (employee) =>
+                employee.status === "active" && employee.storeId === effectiveStoreId,
+            );
+          const signedInEmployee =
+            rows.find((employee) => employee.id === user?.uid) ??
+            rows.find((employee) => profile?.name && employee.name === profile.name) ??
+            null;
+          setEmployees(rows);
+          setEmployeeId((current) =>
+            rows.some((employee) => employee.id === current)
+              ? current
+              : signedInEmployee?.id ?? rows[0]?.id ?? "",
+          );
+        } catch (error) {
+          console.error("clock employees fetch failed", error);
+          setErrorMessage("従業員データの取得に失敗しました。");
+        } finally {
+          setIsLoading(false);
+        }
+      },
+      (error) => {
+        console.error("clock store subscription failed", error);
         setErrorMessage("データ取得に失敗しました。通信状態またはFirebase設定を確認してください。");
-      } finally {
+        setStore(null);
+        setEmployees([]);
+        setEmployeeId("");
         setIsLoading(false);
-      }
-    };
+      },
+    );
 
-    load();
-  }, [storeId]);
+    return unsubscribe;
+  }, [effectiveStoreId, isAuthLoading, profile?.name, user?.uid]);
 
   useEffect(() => {
     if (!store) return;
@@ -175,6 +205,8 @@ function ClockPageContent() {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setGps((current) => ({
         ...current,
+        distanceMeters: null,
+        isOutsideGps: false,
         message: "GPS取得不可のため位置未確認で打刻できます",
       }));
       return;
@@ -210,13 +242,14 @@ function ClockPageContent() {
     );
   }, [store]);
 
+  const currentStore = effectiveStoreId ? store : null;
   const selectedEmployee = useMemo(
     () => employees.find((employee) => employee.id === employeeId) ?? null,
     [employeeId, employees],
   );
 
   const punch = async (type: ClockType) => {
-    if (!storeId || !store) {
+    if (!effectiveStoreId || !currentStore) {
       setErrorMessage("店舗情報が見つかりません");
       return;
     }
@@ -225,7 +258,7 @@ function ClockPageContent() {
       return;
     }
 
-    const helpWage = storeHelpWage(store);
+    const helpWage = storeHelpWage(currentStore);
     const baseWage = selectedEmployee.baseWage ?? selectedEmployee.baseHourlyWage ?? 0;
     const hourlyWageSnapshot =
       typeof helpWage === "number" && helpWage > 0 ? helpWage : baseWage;
@@ -240,8 +273,8 @@ function ClockPageContent() {
         employeeId: selectedEmployee.id,
         employeeName: selectedEmployee.name,
         employeeCode: selectedEmployee.employeeCode,
-        storeId,
-        storeName: storeName(store),
+        storeId: effectiveStoreId,
+        storeName: storeName(currentStore),
         type,
         timestamp: serverTimestamp(),
         hourlyWageSnapshot,
@@ -260,7 +293,7 @@ function ClockPageContent() {
     }
   };
 
-  const logoSrc = storeLogo(store, storeId);
+  const logoSrc = storeLogo(currentStore);
 
   return (
     <main style={styles.page}>
@@ -269,8 +302,8 @@ function ClockPageContent() {
           <Image
             src={logoSrc}
             alt="店舗ロゴ"
-            width={140}
-            height={140}
+            width={180}
+            height={180}
             priority
             style={styles.heroLogo}
           />
@@ -279,64 +312,70 @@ function ClockPageContent() {
           <img src={logoSrc} alt="店舗ロゴ" style={styles.heroLogo} />
         )}
       </div>
-      <div style={styles.heroStoreName}>{storeName(store)}</div>
+      <div style={styles.heroStoreName}>{storeName(currentStore)}</div>
 
       <section style={styles.card}>
-        <p style={styles.subtitle}>QR打刻</p>
-
-        {isLoading && <p style={styles.info}>読み込み中</p>}
+        {!effectiveStoreId && !isAuthLoading && (
+          <p style={styles.error}>店舗情報が見つかりません</p>
+        )}
+        {effectiveStoreId && isLoading && <p style={styles.info}>読み込み中</p>}
+        {isAuthLoading && <p style={styles.info}>ログイン確認中</p>}
         {errorMessage && <p style={styles.error}>{errorMessage}</p>}
-        {employees.length === 0 && !isLoading && !errorMessage && (
+        {currentStore && employees.length === 0 && !isLoading && !errorMessage && (
           <p style={styles.error}>有効な従業員がいません</p>
         )}
         {successMessage && <p style={styles.success}>{successMessage}</p>}
 
-        <label style={styles.label}>
-          従業員
-          <select
-            value={employeeId}
-            onChange={(event) => {
-              setEmployeeId(event.target.value);
-              setSuccessMessage("");
-            }}
-            style={styles.select}
-          >
-            {employees.map((employee) => (
-              <option key={employee.id} value={employee.id}>
-                {employee.employeeCode} {employee.name}
-              </option>
-            ))}
-          </select>
-        </label>
+        {currentStore && (
+          <>
+            <label style={styles.label}>
+              従業員
+              <select
+                value={employeeId}
+                onChange={(event) => {
+                  setEmployeeId(event.target.value);
+                  setSuccessMessage("");
+                }}
+                style={styles.select}
+              >
+                {employees.map((employee) => (
+                  <option key={employee.id} value={employee.id}>
+                    {employee.employeeCode} {employee.name}
+                  </option>
+                ))}
+              </select>
+            </label>
 
-        <div style={gps.isOutsideGps ? styles.gpsWarning : styles.gpsBox}>
-          <p style={styles.gpsMain}>{gps.message}</p>
-          {gps.distanceMeters !== null && (
-            <p style={styles.gpsSub}>
-              距離 {Math.round(gps.distanceMeters)}m / 許可範囲 {storeRadius(store)}m
-            </p>
-          )}
-        </div>
+            <div style={styles.actions}>
+              {clockButtons.map((button) => (
+                <button
+                  key={button.type}
+                  type="button"
+                  onClick={() => punch(button.type)}
+                  disabled={isSubmitting || !selectedEmployee}
+                  style={
+                    button.tone === "primary"
+                      ? styles.primaryButton
+                      : button.tone === "dark"
+                        ? styles.darkButton
+                        : styles.lightButton
+                  }
+                >
+                  {button.label}
+                </button>
+              ))}
+            </div>
 
-        <div style={styles.actions}>
-          {clockButtons.map((button) => (
-            <button
-              key={button.type}
-              type="button"
-              onClick={() => punch(button.type)}
-              disabled={isSubmitting || !selectedEmployee || !store}
-              style={
-                button.tone === "primary"
-                  ? styles.primaryButton
-                  : button.tone === "dark"
-                    ? styles.darkButton
-                    : styles.lightButton
-              }
-            >
-              {button.label}
-            </button>
-          ))}
-        </div>
+            <div style={gps.isOutsideGps ? styles.gpsWarning : styles.gpsBox}>
+              <p style={styles.gpsMain}>{gps.message}</p>
+              {gps.distanceMeters !== null && (
+                <p style={styles.gpsSub}>
+                  距離 {Math.round(gps.distanceMeters)}m / 許可範囲 {storeRadius(currentStore)}m
+                </p>
+              )}
+            </div>
+          </>
+        )}
       </section>
     </main>
   );
@@ -362,15 +401,15 @@ const styles = {
   },
   logoHero: {
     marginBottom: 18,
-    width: 156,
-    height: 156,
+    width: 196,
+    height: 196,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
   },
   heroLogo: {
-    width: 140,
-    height: 140,
+    width: 180,
+    height: 180,
     objectFit: "contain",
   },
   heroStoreName: {

@@ -2,7 +2,10 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
-import { db, storage } from "@/lib/firebase";
+import { useRouter } from "next/navigation";
+import { signOut } from "firebase/auth";
+import { auth, db, storage } from "@/lib/firebase";
+import { useAuthProfile } from "@/lib/auth";
 import {
   Timestamp,
   addDoc,
@@ -88,12 +91,32 @@ const clockTypeLabels: Record<string, string> = {
   clockOut: "退勤",
 };
 const supportedLogoTypes = ["image/png", "image/jpeg", "image/svg+xml"];
-const storeLogos: Record<string, string> = {
-  "1": "/assets/icon-akari.png",
-  "2": "/assets/icon-kushi.png",
-  "3": "/assets/icon-pes.png",
-  "4": "/assets/icon-gm.png",
-  "5": "/assets/icon-gm.png",
+
+function buildClockUrl(storeId: string) {
+  return `/clock?storeId=${encodeURIComponent(storeId)}`;
+}
+
+function buildQrImageUrl(storeId: string, size = 160) {
+  return `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&data=${encodeURIComponent(
+    buildClockUrl(storeId),
+  )}`;
+}
+
+const productionCheckStores = [
+  ["1", { name: "焰 akari", logoUrl: "/assets/icon-akari.png", active: true }],
+  ["2", { name: "串羊力", logoUrl: "/assets/icon-kushi.png", active: true }],
+  ["3", { name: "Pescaria", logoUrl: "/assets/icon-pes.png", active: true }],
+  ["4", { name: "Graine Marche 綱島店", logoUrl: "/assets/icon-gm.png", active: true }],
+  ["5", { name: "Graine Marche 野毛店", logoUrl: "/assets/icon-gm.png", active: true }],
+] as const;
+
+const productionCheckEmployee = {
+  name: "開発テストユーザー",
+  nameKana: "かいはつてすとゆーざー",
+  employeeCode: "0001",
+  storeId: "1",
+  baseWage: 1250,
+  status: "active",
 };
 
 const monthlyHeaders = [
@@ -149,27 +172,27 @@ function logDate(row: TimecardRow) {
 }
 
 function getStoreName(store: StoreRow) {
-  return store.name || store.storeName || store.id;
+  return store.name || "";
 }
 
 function getStoreLogo(store: StoreRow) {
-  return store.logoUrl || storeLogos[store.id] || "/assets/logo-placeholder.png";
+  return store.logoUrl || "";
 }
 
 function getStoreLat(store: StoreRow) {
-  return store.latitude ?? store.lat ?? "";
+  return store.latitude ?? "";
 }
 
 function getStoreLng(store: StoreRow) {
-  return store.longitude ?? store.lng ?? "";
+  return store.longitude ?? "";
 }
 
 function getStoreRadius(store: StoreRow) {
-  return store.gpsRadiusMeters ?? store.radiusMeter ?? "";
+  return store.gpsRadiusMeters ?? "";
 }
 
 function getStoreHelpWage(store: StoreRow) {
-  return store.helpWage ?? store.helpHourlyWage ?? "";
+  return store.helpWage ?? "";
 }
 
 function getEmployeeBaseWage(employee: EmployeeRow) {
@@ -304,7 +327,7 @@ function buildAttendanceRows(timecards: TimecardRow[]) {
         key,
         date: date ? dateKey(date) : "",
         storeId: first.storeId,
-        storeName: first.storeName || "",
+        storeName: first.storeId,
         employeeKey: first.employeeId || first.employeeCode || first.employeeName || "",
         employeeCode: first.employeeCode || "",
         employeeName: first.employeeName || "",
@@ -360,7 +383,7 @@ function buildMonthlyRows(
         ) ?? null;
       bodyRows.push([
         employee.storeId,
-        store ? getStoreName(store) : employee.storeName ?? "",
+        store ? getStoreName(store) : employee.storeId,
         employee.employeeCode,
         employee.name,
         date.replaceAll("-", "/"),
@@ -432,6 +455,8 @@ function buildMonthlyRows(
 }
 
 export default function AdminPage() {
+  const router = useRouter();
+  const { user, profile, isLoading: isAuthLoading, error: authError } = useAuthProfile();
   const [timecards, setTimecards] = useState<TimecardRow[]>([]);
   const [employees, setEmployees] = useState<EmployeeRow[]>([]);
   const [stores, setStores] = useState<StoreRow[]>([]);
@@ -477,7 +502,12 @@ export default function AdminPage() {
     error: "",
   });
 
+  const isAdmin = profile?.role === "admin";
+  const managerStoreId = profile?.role === "manager" ? profile.storeId : "";
+  const visibleTabs = isAdmin ? tabs : tabs.filter((tab) => tab.id !== "wages");
+
   const load = async () => {
+    if (!profile || (profile.role !== "admin" && profile.role !== "manager")) return;
     setIsLoading(true);
     setErrorMessage("");
     try {
@@ -486,24 +516,24 @@ export default function AdminPage() {
         getDocs(query(collection(db, "employees"), orderBy("employeeCode"))),
         getDocs(collection(db, "stores")),
       ]);
-      setTimecards(
-        timecardSnapshot.docs.map((timecardDoc) => ({
+      const nextTimecards = timecardSnapshot.docs.map((timecardDoc) => ({
           id: timecardDoc.id,
           ...(timecardDoc.data() as Omit<TimecardRow, "id">),
-        })),
-      );
-      setEmployees(
-        employeeSnapshot.docs.map((employeeDoc) => ({
+      }));
+      const nextEmployees = employeeSnapshot.docs.map((employeeDoc) => ({
           id: employeeDoc.id,
           ...(employeeDoc.data() as Employee),
-        })),
-      );
-      setStores(
-        storeSnapshot.docs.map((storeDoc) => ({
+      }));
+      const nextStores = storeSnapshot.docs.map((storeDoc) => ({
           id: storeDoc.id,
           ...(storeDoc.data() as Store),
-        })),
-      );
+      }));
+      const scopedStoreId = profile.role === "manager" ? profile.storeId : "";
+
+      setTimecards(scopedStoreId ? nextTimecards.filter((row) => row.storeId === scopedStoreId) : nextTimecards);
+      setEmployees(scopedStoreId ? nextEmployees.filter((employee) => employee.storeId === scopedStoreId) : nextEmployees);
+      setStores(scopedStoreId ? nextStores.filter((store) => store.id === scopedStoreId) : nextStores);
+      if (scopedStoreId) setStoreFilter(scopedStoreId);
     } catch (error) {
       console.error("admin dashboard fetch failed", error);
       setErrorMessage("管理画面データの取得に失敗しました。Firebase設定または権限を確認してください。");
@@ -513,9 +543,23 @@ export default function AdminPage() {
   };
 
   useEffect(() => {
+    if (isAuthLoading) return;
+    if (!user) {
+      router.replace("/login");
+      return;
+    }
+    if (!profile) return;
+    if (profile.role === "staff") {
+      router.replace("/clock");
+      return;
+    }
+    if (profile.role === "manager" && !profile.storeId) {
+      return;
+    }
     // eslint-disable-next-line react-hooks/set-state-in-effect
     load();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAuthLoading, profile, router, user]);
 
   const filteredTimecards = useMemo(
     () =>
@@ -526,6 +570,16 @@ export default function AdminPage() {
       }),
     [storeFilter, targetMonth, timecards],
   );
+  const hasProductionCheckStores = productionCheckStores.every(([storeId]) =>
+    stores.some((store) => store.id === storeId && store.active !== false),
+  );
+  const hasProductionCheckEmployee = employees.some(
+    (employee) =>
+      employee.id === "dev-user" &&
+      employee.storeId === "1" &&
+      employee.status === "active",
+  );
+  const needsProductionCheckData = !hasProductionCheckStores || !hasProductionCheckEmployee;
   const attendanceRows = useMemo(() => buildAttendanceRows(filteredTimecards), [filteredTimecards]);
   const todayKey = dateKey(new Date());
   const summary = useMemo(() => {
@@ -539,6 +593,9 @@ export default function AdminPage() {
     return { todayPunches, notClockedOut, workMinutes, wageAmount };
   }, [attendanceRows, timecards, todayKey]);
   const editTarget = timecards.find((row) => row.id === editId) ?? null;
+  const storeNameById = (storeId: string) =>
+    getStoreName(stores.find((store) => store.id === storeId) ?? ({ id: storeId } as StoreRow)) ||
+    storeId;
 
   const startEdit = (row: TimecardRow) => {
     const date = logDate(row) ?? new Date();
@@ -613,17 +670,42 @@ export default function AdminPage() {
     URL.revokeObjectURL(url);
   };
 
+  const createProductionCheckData = async () => {
+    try {
+      await Promise.all([
+        ...productionCheckStores.map(([storeId, store]) =>
+          setDoc(doc(db, "stores", storeId), store, { merge: true }),
+        ),
+        setDoc(doc(db, "employees", "dev-user"), productionCheckEmployee, { merge: true }),
+      ]);
+      setMessage("確認用の店舗と従業員を作成しました。");
+      await load();
+      setActiveTab("stores");
+    } catch (error) {
+      console.error("production check seed failed", error);
+      setMessage("確認用データの作成に失敗しました。Firestore rules またはFirebase設定を確認してください。");
+    }
+  };
+
   const saveEmployee = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!employeeForm.name.trim() || !employeeForm.employeeCode.trim() || !employeeForm.storeId) {
+    const nextStoreId = managerStoreId || employeeForm.storeId;
+    if (!employeeForm.name.trim() || !employeeForm.employeeCode.trim() || !nextStoreId) {
       setMessage("従業員の氏名、社員コード、所属店舗を入力してください。");
       return;
+    }
+    if (managerStoreId && employeeEditingId) {
+      const target = employees.find((employee) => employee.id === employeeEditingId);
+      if (!target || target.storeId !== managerStoreId) {
+        setMessage("自店舗以外の従業員は編集できません。");
+        return;
+      }
     }
     const payload = {
       name: employeeForm.name.trim(),
       nameKana: employeeForm.nameKana.trim(),
       employeeCode: employeeForm.employeeCode.trim(),
-      storeId: employeeForm.storeId,
+      storeId: nextStoreId,
       baseWage: Number(employeeForm.baseWage) || 0,
       status: employeeForm.status as "active" | "inactive",
     };
@@ -658,8 +740,13 @@ export default function AdminPage() {
 
   const saveStore = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!storeForm.id.trim() || !storeForm.name.trim()) {
+    const nextStoreId = managerStoreId || storeForm.id.trim();
+    if (!nextStoreId || !storeForm.name.trim()) {
       setMessage("店舗IDと店舗名を入力してください。");
+      return;
+    }
+    if (managerStoreId && nextStoreId !== managerStoreId) {
+      setMessage("自店舗以外の店舗は編集できません。");
       return;
     }
     const payload = {
@@ -672,7 +759,7 @@ export default function AdminPage() {
       active: storeForm.active,
     };
     try {
-      await setDoc(doc(db, "stores", storeForm.id.trim()), payload, { merge: true });
+      await setDoc(doc(db, "stores", nextStoreId), payload, { merge: true });
       setStoreEditingId("");
       setStoreForm({ id: "", name: "", logoUrl: "", latitude: "", longitude: "", gpsRadiusMeters: "100", helpWage: "", active: true });
       setMessage("店舗を保存しました。");
@@ -694,18 +781,26 @@ export default function AdminPage() {
       longitude: String(getStoreLng(store) || ""),
       gpsRadiusMeters: String(getStoreRadius(store) || "100"),
       helpWage: String(getStoreHelpWage(store) || ""),
-      active: store.active !== false && store.isActive !== false,
+      active: store.active !== false,
     });
     setActiveTab("stores");
   };
 
   const uploadStoreLogo = async (file: File) => {
-    const storeId = storeForm.id.trim();
+    const storeId = managerStoreId || storeForm.id.trim();
     if (!storeId) {
       setLogoUploadState({
         isUploading: false,
         message: "",
         error: "先にstoreIdを入力してください。",
+      });
+      return;
+    }
+    if (managerStoreId && storeId !== managerStoreId) {
+      setLogoUploadState({
+        isUploading: false,
+        message: "",
+        error: "自店舗以外のロゴは変更できません。",
       });
       return;
     }
@@ -736,6 +831,60 @@ export default function AdminPage() {
       });
     }
   };
+
+  const saveCurrentLocation = () => {
+    const storeId = managerStoreId || storeForm.id.trim();
+    if (!storeId) {
+      setMessage("先にstoreIdを入力してください。");
+      return;
+    }
+    if (!navigator.geolocation) {
+      setMessage("このブラウザでは現在地を取得できません。");
+      return;
+    }
+
+    setMessage("現在地を取得しています。");
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        const latitude = position.coords.latitude;
+        const longitude = position.coords.longitude;
+        setStoreForm((current) => ({
+          ...current,
+          id: storeId,
+          latitude: String(latitude),
+          longitude: String(longitude),
+        }));
+        try {
+          await setDoc(doc(db, "stores", storeId), { latitude, longitude }, { merge: true });
+          setMessage("現在地の緯度経度を保存しました。");
+          await load();
+        } catch (error) {
+          console.error("store location save failed", error);
+          setMessage("現在地の保存に失敗しました。");
+        }
+      },
+      () => {
+        setMessage("現在地を取得できませんでした。");
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 },
+    );
+  };
+
+  if (isAuthLoading) {
+    return <main style={styles.page}><p style={styles.panel}>ログイン確認中</p></main>;
+  }
+
+  if (authError) {
+    return <main style={styles.page}><p style={styles.error}>{authError}</p></main>;
+  }
+
+  if (!profile || (profile.role !== "admin" && profile.role !== "manager")) {
+    return <main style={styles.page}><p style={styles.panel}>権限を確認しています</p></main>;
+  }
+
+  if (profile.role === "manager" && !profile.storeId) {
+    return <main style={styles.page}><p style={styles.error}>店長アカウントに storeId が設定されていません。</p></main>;
+  }
 
   return (
     <main style={styles.page}>
@@ -775,11 +924,11 @@ export default function AdminPage() {
       <div className="admin-layout" style={styles.layout}>
         <aside className="admin-sidebar" style={styles.sidebar}>
           <div>
-            <p style={styles.sidebarEyebrow}>本部管理</p>
+            <p style={styles.sidebarEyebrow}>{isAdmin ? "本部管理" : "店舗管理"}</p>
             <h2 style={styles.sidebarTitle}>勤怠ダッシュボード</h2>
           </div>
           <nav className="admin-side-nav" style={styles.sideNav}>
-            {tabs.map((tab) => (
+            {visibleTabs.map((tab) => (
               <button
                 key={tab.id}
                 type="button"
@@ -824,10 +973,11 @@ export default function AdminPage() {
               店舗
               <select
                 value={storeFilter}
-                onChange={(event) => setStoreFilter(event.target.value)}
+                onChange={(event) => setStoreFilter(isAdmin ? event.target.value : managerStoreId)}
+                disabled={!isAdmin}
                 style={styles.input}
               >
-                <option value="all">全店舗</option>
+                {isAdmin && <option value="all">全店舗</option>}
                 {stores.map((store) => (
                   <option key={store.id} value={store.id}>
                     {getStoreName(store)}
@@ -838,11 +988,21 @@ export default function AdminPage() {
             <button type="button" onClick={downloadExcel} style={styles.button}>
               Excel出力
             </button>
+            <button
+              type="button"
+              onClick={async () => {
+                await signOut(auth);
+                router.replace("/login");
+              }}
+              style={styles.secondaryButton}
+            >
+              ログアウト
+            </button>
           </div>
         </header>
 
         <nav className="admin-mobile-nav" style={styles.mobileTabs}>
-          {tabs.map((tab) => (
+          {visibleTabs.map((tab) => (
             <button
               key={tab.id}
               type="button"
@@ -866,7 +1026,7 @@ export default function AdminPage() {
 
         <section style={styles.mainCard}>
           <nav className="admin-main-tabs" style={styles.tabs}>
-            {tabs.map((tab) => (
+            {visibleTabs.map((tab) => (
               <button
                 key={tab.id}
                 type="button"
@@ -900,7 +1060,7 @@ export default function AdminPage() {
               {attendanceRows.map((row) => (
                 <tr key={row.key} style={row.isOutsideGps ? styles.warningRow : undefined}>
                   <td style={styles.td}>{row.date}</td>
-                  <td style={styles.td}>{row.storeName || row.storeId}</td>
+                  <td style={styles.td}>{storeNameById(row.storeId)}</td>
                   <td style={row.isMissingClockOut ? styles.dangerTd : styles.td}>
                     {row.employeeName || row.employeeKey}
                     {row.isMissingClockOut && <span style={styles.dangerBadge}>未退勤</span>}
@@ -955,12 +1115,13 @@ export default function AdminPage() {
                         const [, ...lines] = text.trim().split(/\r?\n/);
                         for (const line of lines) {
                           const [name, nameKana, employeeCode, storeIdValue, baseWage] = line.split(",");
-                          if (!name || !employeeCode || !storeIdValue) continue;
+                          const nextStoreId = managerStoreId || storeIdValue?.trim();
+                          if (!name || !employeeCode || !nextStoreId) continue;
                           await addDoc(collection(db, "employees"), {
                             name: name.trim(),
                             nameKana: (nameKana ?? "").trim(),
                             employeeCode: employeeCode.trim(),
-                            storeId: storeIdValue.trim(),
+                            storeId: nextStoreId,
                             baseWage: Number(baseWage) || 0,
                             status: "active",
                           });
@@ -978,7 +1139,12 @@ export default function AdminPage() {
               <label style={styles.label}>ひらがな<input value={employeeForm.nameKana} onChange={(e) => setEmployeeForm({ ...employeeForm, nameKana: e.target.value })} style={styles.input} /></label>
               <label style={styles.label}>社員コード<input value={employeeForm.employeeCode} onChange={(e) => setEmployeeForm({ ...employeeForm, employeeCode: e.target.value })} style={styles.input} /></label>
               <label style={styles.label}>所属店舗
-                <select value={employeeForm.storeId} onChange={(e) => setEmployeeForm({ ...employeeForm, storeId: e.target.value })} style={styles.input}>
+                <select
+                  value={managerStoreId || employeeForm.storeId}
+                  disabled={Boolean(managerStoreId)}
+                  onChange={(e) => setEmployeeForm({ ...employeeForm, storeId: e.target.value })}
+                  style={styles.input}
+                >
                   <option value="">選択</option>
                   {stores.map((store) => <option key={store.id} value={store.id}>{getStoreName(store)}</option>)}
                 </select>
@@ -998,7 +1164,7 @@ export default function AdminPage() {
                   <td style={styles.td}>{employee.employeeCode}</td>
                   <td style={styles.td}>{employee.name}</td>
                   <td style={styles.td}>{employee.nameKana}</td>
-                  <td style={styles.td}>{employee.storeName || employee.storeId}</td>
+                  <td style={styles.td}>{storeNameById(employee.storeId)}</td>
                   <td style={styles.td}>{employee.status === "inactive" ? "inactive" : "active"}</td>
                   <td style={styles.td}>{getEmployeeBaseWage(employee)}</td>
                   <td style={styles.td}>
@@ -1013,9 +1179,21 @@ export default function AdminPage() {
 
         {activeTab === "stores" && (
           <section style={styles.tabPanel}>
-            <h2 style={styles.sectionTitle}>店舗管理</h2>
+            <div style={styles.panelHeader}>
+              <h2 style={styles.sectionTitle}>店舗管理</h2>
+              {isAdmin && needsProductionCheckData && (
+                <button type="button" onClick={createProductionCheckData} style={styles.secondaryButton}>
+                  確認用店舗データ作成
+                </button>
+              )}
+            </div>
+            {isAdmin && needsProductionCheckData && (
+              <p style={styles.helpText}>
+                /clock?storeId=1〜5 の確認に必要な stores/1〜5 と employees/dev-user を作成できます。
+              </p>
+            )}
             <form onSubmit={saveStore} style={styles.editForm}>
-              <label style={styles.label}>storeId<input value={storeForm.id} disabled={Boolean(storeEditingId)} onChange={(e) => setStoreForm({ ...storeForm, id: e.target.value })} style={styles.input} /></label>
+              <label style={styles.label}>storeId<input value={managerStoreId || storeForm.id} disabled={Boolean(storeEditingId) || Boolean(managerStoreId)} onChange={(e) => setStoreForm({ ...storeForm, id: e.target.value })} style={styles.input} /></label>
               <label style={styles.label}>店舗名<input value={storeForm.name} onChange={(e) => setStoreForm({ ...storeForm, name: e.target.value })} style={styles.input} /></label>
               <div style={styles.logoUploadBox}>
                 <span style={styles.labelText}>ロゴ画像</span>
@@ -1044,6 +1222,7 @@ export default function AdminPage() {
               </div>
               <label style={styles.label}>緯度<input type="number" step="any" value={storeForm.latitude} onChange={(e) => setStoreForm({ ...storeForm, latitude: e.target.value })} style={styles.input} /></label>
               <label style={styles.label}>経度<input type="number" step="any" value={storeForm.longitude} onChange={(e) => setStoreForm({ ...storeForm, longitude: e.target.value })} style={styles.input} /></label>
+              <button type="button" onClick={saveCurrentLocation} style={styles.secondaryButton}>現在地取得</button>
               <label style={styles.label}>GPS半径<input type="number" value={storeForm.gpsRadiusMeters} onChange={(e) => setStoreForm({ ...storeForm, gpsRadiusMeters: e.target.value })} style={styles.input} /></label>
               <label style={styles.label}>ヘルプ時給<input type="number" value={storeForm.helpWage} onChange={(e) => setStoreForm({ ...storeForm, helpWage: e.target.value })} style={styles.input} /></label>
               <label style={styles.label}>active
@@ -1062,12 +1241,14 @@ export default function AdminPage() {
                 "GPS許可半径",
                 "ロゴ",
                 "QR打刻URL",
-                "QR表示/コピー",
+                "QRコード",
+                "QR画像",
                 "操作",
               ]}
             >
               {stores.map((store) => {
-                const qrUrl = `/clock?storeId=${store.id}`;
+                const qrUrl = buildClockUrl(store.id);
+                const qrImageUrl = buildQrImageUrl(store.id, 180);
                 return (
                   <tr key={store.id}>
                     <td style={styles.td}>{getStoreName(store)}</td>
@@ -1075,22 +1256,29 @@ export default function AdminPage() {
                     <td style={styles.td}>{getStoreLat(store)}, {getStoreLng(store)}</td>
                     <td style={styles.td}>{getStoreRadius(store)}m</td>
                     <td style={styles.td}>
-                      {getStoreLogo(store) ? (
+                      {store.logoUrl ? (
                         // eslint-disable-next-line @next/next/no-img-element
-                        <img src={getStoreLogo(store)} alt={getStoreName(store)} style={styles.logoPreview} />
+                        <img src={store.logoUrl} alt={getStoreName(store)} style={styles.logoPreview} />
                       ) : (
                         <span style={styles.logoPlaceholderSmall}>未登録</span>
                       )}
                     </td>
                     <td style={styles.td}>{qrUrl}</td>
                     <td style={styles.td}>
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={qrImageUrl} alt={`${getStoreName(store)} QRコード`} style={styles.qrImage} />
+                    </td>
+                    <td style={styles.td}>
                       <button
                         type="button"
-                        onClick={() => navigator.clipboard?.writeText(`${location.origin}${qrUrl}`)}
+                        onClick={() => navigator.clipboard?.writeText(qrUrl)}
                         style={styles.linkButton}
                       >
                         コピー
                       </button>
+                      <a href={buildQrImageUrl(store.id, 640)} download={`clock-store-${store.id}.png`} style={styles.linkAnchor}>
+                        ダウンロード
+                      </a>
                     </td>
                     <td style={styles.td}>
                       <button type="button" onClick={() => editStore(store)} style={styles.linkButton}>編集</button>
@@ -1144,7 +1332,7 @@ export default function AdminPage() {
                 <tr key={row.id}>
                   <td style={styles.td}>{formatDateTime(logDate(row))}</td>
                   <td style={styles.td}>{row.employeeName || row.employeeId || row.employeeCode}</td>
-                  <td style={styles.td}>{row.storeName || row.storeId}</td>
+                  <td style={styles.td}>{storeNameById(row.storeId)}</td>
                   <td style={styles.td}>{clockTypeLabels[normalizeClockType(row)] ?? normalizeClockType(row)}</td>
                   <td style={styles.td}>
                     <button type="button" onClick={() => startEdit(row)} style={styles.linkButton}>
@@ -1647,6 +1835,26 @@ const styles = {
     background: "#F0FBFE",
     color: "#3BAED6",
     fontWeight: 800,
+  },
+  linkAnchor: {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    marginLeft: 8,
+    border: "1px solid #BDEBFA",
+    borderRadius: 12,
+    padding: "8px 12px",
+    background: "#F0FBFE",
+    color: "#3BAED6",
+    fontWeight: 800,
+    textDecoration: "none",
+  },
+  qrImage: {
+    width: 96,
+    height: 96,
+    border: "1px solid #E2E8F0",
+    borderRadius: 8,
+    background: "#ffffff",
   },
   editForm: {
     marginTop: 20,
