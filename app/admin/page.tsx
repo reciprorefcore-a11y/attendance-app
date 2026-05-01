@@ -3,8 +3,9 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
-import { signOut } from "firebase/auth";
-import { auth, db, storage } from "@/lib/firebase";
+import { signOut, getAuth, createUserWithEmailAndPassword } from "firebase/auth";
+import { initializeApp, deleteApp } from "firebase/app";
+import { auth, db, storage, firebaseConfig } from "@/lib/firebase";
 import { useAuthProfile } from "@/lib/auth";
 import {
   Timestamp,
@@ -52,7 +53,7 @@ type TimecardRow = {
   deletedBy?: string | null;
 };
 
-type EmployeeRow = Employee & { id: string; hourlyWage?: number | null };
+type EmployeeRow = Employee & { id: string; hourlyWage?: number | null; hasManagerAccount?: boolean; managerUid?: string | null };
 type StoreRow = Store & { id: string };
 
 type AttendanceRow = {
@@ -519,6 +520,12 @@ export default function AdminPage() {
   const [wageEmpInput, setWageEmpInput] = useState("");
   const [wageStoreEditId, setWageStoreEditId] = useState("");
   const [wageStoreInput, setWageStoreInput] = useState("");
+  const [managerSetupEmpId, setManagerSetupEmpId] = useState("");
+  const [managerSetupEmail, setManagerSetupEmail] = useState("");
+  const [managerSetupPassword, setManagerSetupPassword] = useState("");
+  const [managerSetupMsg, setManagerSetupMsg] = useState<{ empId: string; text: string; isError: boolean } | null>(null);
+  const [managerCreating, setManagerCreating] = useState(false);
+  const [managerDeleting, setManagerDeleting] = useState("");
 
   const isAdmin = profile?.role === "admin";
   const managerStoreId = profile?.role === "manager" ? profile.storeId : "";
@@ -886,6 +893,89 @@ export default function AdminPage() {
     } catch (err) {
       console.error("store help wage save failed", err);
       setMessage("ヘルプ時給の保存に失敗しました。");
+    }
+  };
+
+  const createManagerAccount = async (employee: EmployeeRow) => {
+    if (!managerSetupEmail.trim() || !managerSetupPassword.trim()) return;
+    setManagerCreating(true);
+    setManagerSetupMsg(null);
+
+    const secondaryApp = initializeApp(firebaseConfig, `manager-setup-${Date.now()}`);
+    const secondaryAuth = getAuth(secondaryApp);
+    try {
+      const credential = await createUserWithEmailAndPassword(secondaryAuth, managerSetupEmail.trim(), managerSetupPassword);
+      const uid = credential.user.uid;
+
+      await setDoc(doc(db, "users", uid), {
+        name: employee.name,
+        email: managerSetupEmail.trim(),
+        role: "manager",
+        storeId: employee.storeId ?? "",
+        createdAt: serverTimestamp(),
+      });
+      await updateDoc(doc(db, "employees", employee.id), {
+        hasManagerAccount: true,
+        managerUid: uid,
+      });
+
+      setManagerSetupEmpId("");
+      setManagerSetupEmail("");
+      setManagerSetupPassword("");
+      setManagerSetupMsg({ empId: employee.id, text: "アカウントを作成しました。IDとパスワードを本人に渡してください。", isError: false });
+      await load();
+    } catch (err) {
+      console.error("manager account creation failed", err);
+      const code = (err as { code?: string }).code;
+      const text = code === "auth/email-already-in-use"
+        ? "このメールアドレスはすでに使用されています"
+        : code === "auth/weak-password"
+          ? "パスワードは6文字以上で入力してください"
+          : "アカウント作成に失敗しました";
+      setManagerSetupMsg({ empId: employee.id, text, isError: true });
+    } finally {
+      await deleteApp(secondaryApp);
+      setManagerCreating(false);
+    }
+  };
+
+  const deleteManagerAccount = async (employee: EmployeeRow) => {
+    if (!window.confirm(`${employee.name} のマネージャーアカウントを削除しますか？`)) return;
+    setManagerDeleting(employee.id);
+    setManagerSetupMsg(null);
+
+    try {
+      if (employee.managerUid) {
+        await deleteDoc(doc(db, "users", employee.managerUid));
+
+        try {
+          const idToken = await auth.currentUser?.getIdToken();
+          if (idToken) {
+            const res = await fetch("/api/delete-manager", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
+              body: JSON.stringify({ uid: employee.managerUid }),
+            });
+            if (!res.ok) {
+              const data = await res.json() as { error?: string };
+              if (data.error !== "ADMIN_SDK_NOT_CONFIGURED") {
+                console.error("auth delete failed", data.error);
+              }
+            }
+          }
+        } catch (err) {
+          console.error("auth delete api call failed", err);
+        }
+      }
+
+      await updateDoc(doc(db, "employees", employee.id), { hasManagerAccount: false, managerUid: null });
+      setManagerSetupMsg({ empId: employee.id, text: "アカウントを削除しました。", isError: false });
+      await load();
+    } catch (err) {
+      console.error("manager account deletion failed", err);
+      setManagerSetupMsg({ empId: employee.id, text: "削除に失敗しました。", isError: true });
+    } finally {
+      setManagerDeleting("");
     }
   };
 
@@ -1377,7 +1467,7 @@ export default function AdminPage() {
               </label>
               <button type="submit" style={styles.button}>{employeeEditingId ? "更新" : "登録"}</button>
             </form>
-            <DataTable headers={["社員コード", "氏名", "ひらがな", "所属店舗", "状態", "基本時給", "交通費", "操作"]}>
+            <DataTable headers={["社員コード", "氏名", "ひらがな", "所属店舗", "状態", "基本時給", "交通費", "権限", "操作"]}>
               {employees.filter(e => e.isDeleted !== true).map((employee) => (
                 <tr key={employee.id}>
                   <td style={styles.td}>{employee.employeeCode}</td>
@@ -1387,6 +1477,77 @@ export default function AdminPage() {
                   <td style={styles.td}><span style={employee.status === "active" ? styles.activeBadge : styles.inactiveBadge}>{employee.status === "active" ? "有効" : "無効"}</span></td>
                   <td style={styles.td}>{getEmployeeBaseWage(employee)}</td>
                   <td style={styles.td}>{employee.transportationCost ? `${employee.transportationCost}円/${employee.transportationType === "monthly" ? "月" : "日"}` : ""}</td>
+                  <td style={{ ...styles.td, minWidth: 220 }}>
+                    {employee.hasManagerAccount ? (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                        <span style={styles.activeBadge}>設定済み</span>
+                        {managerSetupMsg?.empId === employee.id && (
+                          <p style={{ margin: 0, fontSize: 12, color: managerSetupMsg.isError ? "#B91C1C" : "#047857", fontWeight: 700 }}>
+                            {managerSetupMsg.text}
+                          </p>
+                        )}
+                        <button
+                          type="button"
+                          disabled={managerDeleting === employee.id}
+                          onClick={() => deleteManagerAccount(employee)}
+                          style={{ ...styles.linkButton, color: "#B91C1C", borderColor: "#FCA5A5", background: "#FEF2F2" }}
+                        >
+                          {managerDeleting === employee.id ? "削除中..." : "アカウントを削除"}
+                        </button>
+                      </div>
+                    ) : (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+                          <input
+                            type="checkbox"
+                            checked={managerSetupEmpId === employee.id}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setManagerSetupEmpId(employee.id);
+                                setManagerSetupEmail("");
+                                setManagerSetupPassword("");
+                                setManagerSetupMsg(null);
+                              } else {
+                                setManagerSetupEmpId("");
+                              }
+                            }}
+                          />
+                          マネージャー権限を付与
+                        </label>
+                        {managerSetupEmpId === employee.id && (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                            <input
+                              type="email"
+                              placeholder="メールアドレス"
+                              value={managerSetupEmail}
+                              onChange={(e) => setManagerSetupEmail(e.target.value)}
+                              style={{ ...styles.input, minHeight: 32, padding: "2px 8px", fontSize: 13 }}
+                            />
+                            <input
+                              type="password"
+                              placeholder="パスワード（6文字以上）"
+                              value={managerSetupPassword}
+                              onChange={(e) => setManagerSetupPassword(e.target.value)}
+                              style={{ ...styles.input, minHeight: 32, padding: "2px 8px", fontSize: 13 }}
+                            />
+                            {managerSetupMsg?.empId === employee.id && (
+                              <p style={{ margin: 0, fontSize: 12, color: managerSetupMsg.isError ? "#B91C1C" : "#047857", fontWeight: 700 }}>
+                                {managerSetupMsg.text}
+                              </p>
+                            )}
+                            <button
+                              type="button"
+                              disabled={managerCreating || !managerSetupEmail.trim() || !managerSetupPassword.trim()}
+                              onClick={() => createManagerAccount(employee)}
+                              style={styles.linkButton}
+                            >
+                              {managerCreating ? "作成中..." : "アカウント作成"}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </td>
                   <td style={styles.td}>
                     <button type="button" onClick={() => editEmployee(employee)} style={styles.linkButton}>編集</button>
                     {isAdmin && <button type="button" onClick={async () => { await updateDoc(doc(db, "employees", employee.id), { status: "inactive" }); await load(); }} style={styles.linkButton}>無効化</button>}
