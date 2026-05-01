@@ -304,7 +304,7 @@ function ClockPageContent() {
     setErrorMessage("");
 
     try {
-      await addDoc(collection(db, "clockLogs"), {
+      const payload = {
         employeeId: employee.id,
         employeeCode: employee.employeeCode ?? "",
         employeeName: employee.name ?? "",
@@ -319,7 +319,16 @@ function ClockPageContent() {
         latitude: gps.latitude ?? null,
         longitude: gps.longitude ?? null,
         isOutsideGps: !!gps.isOutsideGps,
-      });
+      };
+      console.log("punch payload:", JSON.stringify({
+        employeeId: employee.id,
+        employeeCode: employee.employeeCode,
+        homeStoreId: employee.storeId,
+        workStoreId,
+        isHelp: employee.storeId !== workStoreId,
+        hourlyWageAtWork,
+      }));
+      await addDoc(collection(db, "clockLogs"), payload);
 
       setLastPunchType(type);
       setSuccessMessage("打刻しました");
