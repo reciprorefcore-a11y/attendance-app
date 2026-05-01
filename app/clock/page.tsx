@@ -276,6 +276,8 @@ function ClockPageContent() {
         setLastPunchType(lastSnap.empty ? null : ((lastSnap.docs[0].data().type as ClockType) ?? null));
       } catch (err) {
         console.error("last punch fetch failed", err);
+        setLastPunchType(null);
+        setIsLastPunchLoading(false);
       } finally {
         setIsLastPunchLoading(false);
       }
