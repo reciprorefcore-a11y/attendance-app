@@ -1223,8 +1223,6 @@ export default function AdminPage() {
                 "休憩",
                 "労働時間",
                 "深夜時間",
-                "適用時給",
-                "概算給与",
                 "GPS範囲外",
                 "操作",
               ]}
@@ -1242,8 +1240,6 @@ export default function AdminPage() {
                   <td style={styles.td}>{formatMinutes(row.breakMinutes)}</td>
                   <td style={styles.td}>{formatMinutes(row.workMinutes)}</td>
                   <td style={styles.td}>{formatMinutes(row.nightMinutes)}</td>
-                  <td style={styles.td}>{row.hourlyWageSnapshot ?? ""}</td>
-                  <td style={styles.td}>{row.wageAmount ? row.wageAmount.toLocaleString() : ""}</td>
                   <td style={styles.td}>{row.isOutsideGps ? "範囲外" : ""}</td>
                   <td style={styles.td}>
                     {row.logs[0] && (
