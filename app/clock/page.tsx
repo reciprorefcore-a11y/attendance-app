@@ -10,11 +10,15 @@ import {
   collection,
   doc,
   getDocs,
+  limit,
   onSnapshot,
+  orderBy,
   query,
   serverTimestamp,
   where,
 } from "firebase/firestore";
+
+// ─── 型定義 ───────────────────────────────────────────────────────────────
 
 type ClockType = "clock_in" | "clock_out" | "break_start" | "break_end";
 
@@ -37,6 +41,7 @@ type EmployeeDoc = {
   baseWage?: number;
   baseHourlyWage?: number;
   status: "active" | "inactive" | "pending" | "rejected";
+  pin?: string; // 4桁PIN（Firestoreの employees ドキュメントに追加が必要）
 };
 
 type GpsState = {
@@ -47,12 +52,26 @@ type GpsState = {
   message: string;
 };
 
+// ─── 打刻許可ロジック ───────────────────────────────────────────────────────
+// 直前の打刻タイプに応じて、次に押せるボタンを決定する
+
+function getAllowedActions(last: ClockType | null): ClockType[] {
+  if (last === null || last === "clock_out") return ["clock_in"];
+  if (last === "clock_in" || last === "break_end") return ["break_start", "clock_out"];
+  if (last === "break_start") return ["break_end"];
+  return [];
+}
+
+// ─── ボタン定義 ─────────────────────────────────────────────────────────────
+
 const clockButtons: { type: ClockType; label: string; tone: "primary" | "dark" | "light" }[] = [
   { type: "clock_in", label: "出勤", tone: "primary" },
   { type: "clock_out", label: "退勤", tone: "dark" },
   { type: "break_start", label: "休憩開始", tone: "light" },
   { type: "break_end", label: "休憩終了", tone: "light" },
 ];
+
+// ─── ユーティリティ関数 ──────────────────────────────────────────────────────
 
 function calcDistance(lat1: number, lng1: number, lat2: number, lng2: number) {
   const radius = 6371000;
@@ -65,38 +84,35 @@ function calcDistance(lat1: number, lng1: number, lat2: number, lng2: number) {
   return radius * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-function storeName(store: StoreDoc | null) {
-  return store?.name ?? "";
-}
+function storeName(store: StoreDoc | null) { return store?.name ?? ""; }
+function storeLatitude(store: StoreDoc | null) { return store?.latitude ?? null; }
+function storeLongitude(store: StoreDoc | null) { return store?.longitude ?? null; }
+function storeRadius(store: StoreDoc | null) { return store?.gpsRadiusMeters ?? 0; }
+function storeHelpWage(store: StoreDoc | null) { return store?.helpWage ?? null; }
+function storeLogo(store: StoreDoc | null) { return store?.logoUrl || "/assets/logo-placeholder.png"; }
 
-function storeLatitude(store: StoreDoc | null) {
-  return store?.latitude ?? null;
-}
-
-function storeLongitude(store: StoreDoc | null) {
-  return store?.longitude ?? null;
-}
-
-function storeRadius(store: StoreDoc | null) {
-  return store?.gpsRadiusMeters ?? 0;
-}
-
-function storeHelpWage(store: StoreDoc | null) {
-  return store?.helpWage ?? null;
-}
-
-function storeLogo(store: StoreDoc | null) {
-  return store?.logoUrl || "/assets/logo-placeholder.png";
-}
+// ─── メインコンポーネント ────────────────────────────────────────────────────
 
 function ClockPageContent() {
   const searchParams = useSearchParams();
   const storeId = searchParams.get("storeId") ?? "";
   const { user, profile, isLoading: isAuthLoading } = useAuthProfile();
   const effectiveStoreId = storeId || profile?.storeId || "";
+
   const [store, setStore] = useState<StoreDoc | null>(null);
   const [employees, setEmployees] = useState<EmployeeDoc[]>([]);
   const [employeeId, setEmployeeId] = useState("");
+
+  // PIN 認証
+  const [pinInput, setPinInput] = useState("");
+  const [pinVerified, setPinVerified] = useState(false);
+  const [pinError, setPinError] = useState("");
+
+  // 直前の打刻タイプ（二重打刻防止）
+  const [lastPunchType, setLastPunchType] = useState<ClockType | null>(null);
+  const [isLastPunchLoading, setIsLastPunchLoading] = useState(false);
+
+  // GPS
   const [gps, setGps] = useState<GpsState>({
     latitude: null,
     longitude: null,
@@ -104,17 +120,18 @@ function ClockPageContent() {
     isOutsideGps: false,
     message: "位置情報は未取得です",
   });
+
+  // UI 状態
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
 
+  // ─── 店舗・従業員データ取得 ──────────────────────────────────────────────
+
   useEffect(() => {
     if (isAuthLoading) return;
-
-    if (!effectiveStoreId) {
-      return;
-    }
+    if (!effectiveStoreId) return;
 
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setIsLoading(true);
@@ -123,6 +140,10 @@ function ClockPageContent() {
     setStore(null);
     setEmployees([]);
     setEmployeeId("");
+    setPinInput("");
+    setPinVerified(false);
+    setPinError("");
+    setLastPunchType(null);
 
     const unsubscribe = onSnapshot(
       doc(db, "stores", effectiveStoreId),
@@ -150,6 +171,7 @@ function ClockPageContent() {
         setErrorMessage("");
 
         try {
+          // Firestore クエリで絞り込み済みのため、クライアント側の .filter() は不要
           const employeeSnapshot = await getDocs(
             query(
               collection(db, "employees"),
@@ -157,22 +179,19 @@ function ClockPageContent() {
               where("storeId", "==", effectiveStoreId),
             ),
           );
-          const rows = employeeSnapshot.docs
-            .map((employeeDoc) => ({
+          const rows = employeeSnapshot.docs.map((employeeDoc) => ({
             id: employeeDoc.id,
             ...(employeeDoc.data() as Omit<EmployeeDoc, "id">),
-          }))
-            .filter(
-              (employee) =>
-                employee.status === "active" && employee.storeId === effectiveStoreId,
-            );
+          }));
+
           const signedInEmployee =
-            rows.find((employee) => employee.id === user?.uid) ??
-            rows.find((employee) => profile?.name && employee.name === profile.name) ??
+            rows.find((e) => e.id === user?.uid) ??
+            rows.find((e) => profile?.name && e.name === profile.name) ??
             null;
+
           setEmployees(rows);
           setEmployeeId((current) =>
-            rows.some((employee) => employee.id === current)
+            rows.some((e) => e.id === current)
               ? current
               : signedInEmployee?.id ?? rows[0]?.id ?? "",
           );
@@ -196,11 +215,62 @@ function ClockPageContent() {
     return unsubscribe;
   }, [effectiveStoreId, isAuthLoading, profile?.name, user?.uid]);
 
+  // ─── 従業員が変わったら PIN をリセット ──────────────────────────────────
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setPinInput("");
+    setPinVerified(false);
+    setPinError("");
+    setLastPunchType(null);
+    setSuccessMessage("");
+  }, [employeeId]);
+
+  // ─── PIN 認証後に直前の打刻タイプを取得 ──────────────────────────────────
+
+  useEffect(() => {
+    if (!pinVerified || !employeeId) return;
+
+    let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setIsLastPunchLoading(true);
+
+    const fetchLastPunch = async () => {
+      try {
+        const snap = await getDocs(
+          query(
+            collection(db, "clockLogs"),
+            where("employeeId", "==", employeeId),
+            orderBy("timestamp", "desc"),
+            limit(1),
+          ),
+        );
+        if (cancelled) return;
+        if (snap.empty) {
+          setLastPunchType(null);
+        } else {
+          const data = snap.docs[0].data();
+          setLastPunchType((data.type as ClockType) ?? null);
+        }
+      } catch (error) {
+        console.error("last punch fetch failed", error);
+      } finally {
+        if (!cancelled) setIsLastPunchLoading(false);
+      }
+    };
+
+    fetchLastPunch();
+    return () => { cancelled = true; };
+  }, [pinVerified, employeeId]);
+
+  // ─── GPS 取得 ────────────────────────────────────────────────────────────
+
   useEffect(() => {
     if (!store) return;
     const lat = storeLatitude(store);
     const lng = storeLongitude(store);
     const radius = storeRadius(store);
+
     if (lat === null || lng === null || !radius || !navigator.geolocation) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setGps((current) => ({
@@ -242,11 +312,40 @@ function ClockPageContent() {
     );
   }, [store]);
 
+  // ─── 派生値 ──────────────────────────────────────────────────────────────
+
   const currentStore = effectiveStoreId ? store : null;
+
   const selectedEmployee = useMemo(
-    () => employees.find((employee) => employee.id === employeeId) ?? null,
+    () => employees.find((e) => e.id === employeeId) ?? null,
     [employeeId, employees],
   );
+
+  const allowedActions = useMemo(
+    () => (pinVerified ? getAllowedActions(lastPunchType) : []),
+    [pinVerified, lastPunchType],
+  );
+
+  // ─── PIN 確認 ─────────────────────────────────────────────────────────────
+
+  const verifyPin = () => {
+    if (!selectedEmployee) return;
+    const storedPin = selectedEmployee.pin ?? "";
+    if (!storedPin) {
+      // PIN未設定の従業員は打刻不可
+      setPinError("PINが設定されていません。管理者に連絡してください。");
+      return;
+    }
+    if (pinInput === storedPin) {
+      setPinVerified(true);
+      setPinError("");
+    } else {
+      setPinError("PINが正しくありません");
+      setPinInput("");
+    }
+  };
+
+  // ─── 打刻送信 ────────────────────────────────────────────────────────────
 
   const punch = async (type: ClockType) => {
     if (!effectiveStoreId || !currentStore) {
@@ -255,6 +354,14 @@ function ClockPageContent() {
     }
     if (!selectedEmployee) {
       setErrorMessage("有効な従業員がいません");
+      return;
+    }
+    if (!pinVerified) {
+      setErrorMessage("PIN認証が完了していません");
+      return;
+    }
+    if (!allowedActions.includes(type)) {
+      setErrorMessage("この操作は現在実行できません");
       return;
     }
 
@@ -268,6 +375,7 @@ function ClockPageContent() {
     setIsSubmitting(true);
     setSuccessMessage("");
     setErrorMessage("");
+
     try {
       await addDoc(collection(db, "clockLogs"), {
         employeeId: selectedEmployee.id,
@@ -276,15 +384,23 @@ function ClockPageContent() {
         storeId: effectiveStoreId,
         storeName: storeName(currentStore),
         type,
-        timestamp: serverTimestamp(),
+        timestamp: serverTimestamp(), // createdAt は削除（重複のため）
         hourlyWageSnapshot,
         wageSource,
         latitude: gps.latitude,
         longitude: gps.longitude,
         isOutsideGps: gps.isOutsideGps,
-        createdAt: serverTimestamp(),
       });
+
+      setLastPunchType(type); // 直前の打刻を即時更新（再取得なしで UI を反映）
       setSuccessMessage("打刻しました");
+
+      // 成功メッセージを 3 秒後に自動クリア
+      setTimeout(() => setSuccessMessage(""), 3000);
+
+      // 打刻後は PIN をリセットし、次の従業員の操作に備える
+      setPinVerified(false);
+      setPinInput("");
     } catch (error) {
       console.error("clock save failed", error);
       setErrorMessage("打刻の保存に失敗しました。通信状態またはFirebase設定を確認してください。");
@@ -292,6 +408,8 @@ function ClockPageContent() {
       setIsSubmitting(false);
     }
   };
+
+  // ─── レンダリング ─────────────────────────────────────────────────────────
 
   const logoSrc = storeLogo(currentStore);
 
@@ -328,6 +446,7 @@ function ClockPageContent() {
 
         {currentStore && (
           <>
+            {/* 従業員選択 */}
             <label style={styles.label}>
               従業員
               <select
@@ -335,6 +454,7 @@ function ClockPageContent() {
                 onChange={(event) => {
                   setEmployeeId(event.target.value);
                   setSuccessMessage("");
+                  setErrorMessage("");
                 }}
                 style={styles.select}
               >
@@ -346,26 +466,73 @@ function ClockPageContent() {
               </select>
             </label>
 
-            <div style={styles.actions}>
-              {clockButtons.map((button) => (
+            {/* PIN 入力（未認証時のみ表示） */}
+            {!pinVerified && (
+              <div style={styles.pinBox}>
+                <label style={styles.label}>
+                  PIN（4桁）
+                  <input
+                    type="password"
+                    inputMode="numeric"
+                    maxLength={4}
+                    value={pinInput}
+                    onChange={(event) => {
+                      setPinInput(event.target.value.replace(/\D/g, "").slice(0, 4));
+                      setPinError("");
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && pinInput.length === 4) verifyPin();
+                    }}
+                    style={styles.pinInput}
+                    placeholder="••••"
+                  />
+                </label>
+                {pinError && <p style={styles.error}>{pinError}</p>}
                 <button
-                  key={button.type}
                   type="button"
-                  onClick={() => punch(button.type)}
-                  disabled={isSubmitting || !selectedEmployee}
-                  style={
-                    button.tone === "primary"
-                      ? styles.primaryButton
-                      : button.tone === "dark"
-                        ? styles.darkButton
-                        : styles.lightButton
-                  }
+                  onClick={verifyPin}
+                  disabled={pinInput.length !== 4}
+                  style={styles.pinButton}
                 >
-                  {button.label}
+                  確認
                 </button>
-              ))}
-            </div>
+              </div>
+            )}
 
+            {/* 打刻ボタン（PIN 認証済みかつ直前打刻取得完了後） */}
+            {pinVerified && (
+              <>
+                {isLastPunchLoading ? (
+                  <p style={styles.info}>打刻状態を確認中...</p>
+                ) : (
+                  <div style={styles.actions}>
+                    {clockButtons.map((button) => {
+                      const allowed = allowedActions.includes(button.type);
+                      return (
+                        <button
+                          key={button.type}
+                          type="button"
+                          onClick={() => punch(button.type)}
+                          disabled={isSubmitting || !selectedEmployee || !allowed}
+                          style={{
+                            ...(button.tone === "primary"
+                              ? styles.primaryButton
+                              : button.tone === "dark"
+                                ? styles.darkButton
+                                : styles.lightButton),
+                            ...(!allowed ? styles.disabledButton : {}),
+                          }}
+                        >
+                          {button.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* GPS 表示 */}
             <div style={gps.isOutsideGps ? styles.gpsWarning : styles.gpsBox}>
               <p style={styles.gpsMain}>{gps.message}</p>
               {gps.distanceMeters !== null && (
@@ -388,6 +555,8 @@ export default function ClockPage() {
     </Suspense>
   );
 }
+
+// ─── スタイル ─────────────────────────────────────────────────────────────────
 
 const styles = {
   page: {
@@ -430,12 +599,6 @@ const styles = {
     gap: 16,
     boxShadow: "0 18px 45px rgba(15, 23, 42, 0.10)",
   },
-  subtitle: {
-    margin: 0,
-    textAlign: "center",
-    color: "#64748B",
-    fontWeight: 700,
-  },
   label: {
     display: "flex",
     flexDirection: "column",
@@ -450,6 +613,30 @@ const styles = {
     padding: "0 14px",
     fontSize: 18,
     background: "#ffffff",
+  },
+  pinBox: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 10,
+  },
+  pinInput: {
+    minHeight: 56,
+    borderRadius: 14,
+    border: "1px solid #CBD5E1",
+    padding: "0 14px",
+    fontSize: 28,
+    letterSpacing: 8,
+    textAlign: "center",
+    background: "#ffffff",
+  },
+  pinButton: {
+    minHeight: 52,
+    border: 0,
+    borderRadius: 14,
+    background: "#53C1ED",
+    color: "#ffffff",
+    fontSize: 18,
+    fontWeight: 900,
   },
   gpsBox: {
     borderRadius: 14,
@@ -484,6 +671,7 @@ const styles = {
     color: "#ffffff",
     fontSize: 24,
     fontWeight: 900,
+    cursor: "pointer",
   },
   darkButton: {
     minHeight: 72,
@@ -493,6 +681,7 @@ const styles = {
     color: "#ffffff",
     fontSize: 24,
     fontWeight: 900,
+    cursor: "pointer",
   },
   lightButton: {
     minHeight: 58,
@@ -502,6 +691,11 @@ const styles = {
     color: "#363A3D",
     fontSize: 18,
     fontWeight: 800,
+    cursor: "pointer",
+  },
+  disabledButton: {
+    opacity: 0.35,
+    cursor: "not-allowed",
   },
   error: {
     margin: 0,

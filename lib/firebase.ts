@@ -4,14 +4,27 @@ import { getFirestore } from "firebase/firestore";
 import { getStorage } from "firebase/storage";
 
 const firebaseConfig = {
-  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY ?? "AIzaSyCX145b-8MaT8qIIEWQODnVuBrP1Ur76pU",
-  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN ?? "fublev-attendance.firebaseapp.com",
-  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID ?? "fublev-attendance",
-  storageBucket:
-    process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET ?? "fublev-attendance.firebasestorage.app",
-  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID ?? "723802054662",
-  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID ?? "1:723802054662:web:000ad15a29503b5578e387",
+  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
+  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
+  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
+  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
+  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
 };
+
+const missingFirebaseEnv = Object.entries(firebaseConfig)
+  .filter(([, value]) => !value)
+  .map(([key]) => `NEXT_PUBLIC_FIREBASE_${key.replace(/[A-Z]/g, (char) => `_${char}`).toUpperCase()}`);
+
+if (missingFirebaseEnv.length > 0) {
+  console.error(
+    [
+      "Firebase環境変数が未設定です。",
+      ".env.local または Vercel の Environment Variables に以下を設定してください:",
+      missingFirebaseEnv.join(", "),
+    ].join(" "),
+  );
+}
 
 const app = initializeApp(firebaseConfig);
 

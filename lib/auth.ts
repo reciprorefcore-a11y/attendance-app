@@ -36,14 +36,22 @@ export function useAuthProfile(): AuthProfileState {
   });
 
   useEffect(() => {
+    // cancelled フラグで非同期競合を防ぐ
+    // （認証状態が素早く切り替わった際に古い getDoc が setState を上書きするのを防止）
+    let cancelled = false;
+
     const unsubscribe = onAuthStateChanged(auth, async (nextUser) => {
       if (!nextUser) {
-        setState({ user: null, profile: null, isLoading: false, error: "" });
+        if (!cancelled) {
+          setState({ user: null, profile: null, isLoading: false, error: "" });
+        }
         return;
       }
 
       try {
         const userSnap = await getDoc(doc(db, "users", nextUser.uid));
+        if (cancelled) return;
+
         const data = userSnap.data();
         const role = data?.role;
         const storeId = typeof data?.storeId === "string" ? data.storeId : "";
@@ -72,16 +80,21 @@ export function useAuthProfile(): AuthProfileState {
         });
       } catch (error) {
         console.error("user profile fetch failed", error);
-        setState({
-          user: nextUser,
-          profile: null,
-          isLoading: false,
-          error: "ユーザー権限の取得に失敗しました。",
-        });
+        if (!cancelled) {
+          setState({
+            user: nextUser,
+            profile: null,
+            isLoading: false,
+            error: "ユーザー権限の取得に失敗しました。",
+          });
+        }
       }
     });
 
-    return unsubscribe;
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
   }, []);
 
   return state;

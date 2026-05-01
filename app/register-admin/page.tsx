@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useState } from "react";
 import { createUserWithEmailAndPassword } from "firebase/auth";
-import { doc, serverTimestamp, setDoc } from "firebase/firestore";
+import { collection, doc, getDocs, limit, query, serverTimestamp, setDoc, where } from "firebase/firestore";
 import { useRouter } from "next/navigation";
 import { useAuthProfile } from "@/lib/auth";
 import { auth, db } from "@/lib/firebase";
@@ -13,6 +13,7 @@ export default function RegisterAdminPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
+  const [isCheckingAdmin, setIsCheckingAdmin] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
 
@@ -24,6 +25,27 @@ export default function RegisterAdminPage() {
       router.replace("/clock");
     }
   }, [profile, router]);
+
+  useEffect(() => {
+    const checkAdminExists = async () => {
+      try {
+        const adminSnapshot = await getDocs(
+          query(collection(db, "users"), where("role", "==", "admin"), limit(1)),
+        );
+        if (!adminSnapshot.empty) {
+          router.replace("/login");
+          return;
+        }
+      } catch (error) {
+        console.error("admin existence check failed", error);
+        setErrorMessage("管理者登録の確認に失敗しました");
+      } finally {
+        setIsCheckingAdmin(false);
+      }
+    };
+
+    checkAdminExists();
+  }, [router]);
 
   const register = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -90,7 +112,7 @@ export default function RegisterAdminPage() {
             />
           </label>
           {errorMessage && <p style={styles.error}>{errorMessage}</p>}
-          <button type="submit" disabled={isSubmitting || isLoading} style={styles.button}>
+          <button type="submit" disabled={isSubmitting || isLoading || isCheckingAdmin} style={styles.button}>
             {isSubmitting ? "登録中" : "登録"}
           </button>
         </form>

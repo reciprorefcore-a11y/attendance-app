@@ -477,6 +477,7 @@ export default function AdminPage() {
     name: "",
     nameKana: "",
     employeeCode: "",
+    pin: "",
     storeId: "",
     baseWage: "",
     status: "active",
@@ -694,6 +695,10 @@ export default function AdminPage() {
       setMessage("従業員の氏名、社員コード、所属店舗を入力してください。");
       return;
     }
+    if (!/^\d{4}$/.test(employeeForm.pin.trim())) {
+      setMessage("PINは4桁の数字で入力してください。");
+      return;
+    }
     if (managerStoreId && employeeEditingId) {
       const target = employees.find((employee) => employee.id === employeeEditingId);
       if (!target || target.storeId !== managerStoreId) {
@@ -705,6 +710,7 @@ export default function AdminPage() {
       name: employeeForm.name.trim(),
       nameKana: employeeForm.nameKana.trim(),
       employeeCode: employeeForm.employeeCode.trim(),
+      pin: employeeForm.pin.trim(),
       storeId: nextStoreId,
       baseWage: Number(employeeForm.baseWage) || 0,
       status: employeeForm.status as "active" | "inactive",
@@ -716,7 +722,7 @@ export default function AdminPage() {
         await addDoc(collection(db, "employees"), payload);
       }
       setEmployeeEditingId("");
-      setEmployeeForm({ name: "", nameKana: "", employeeCode: "", storeId: "", baseWage: "", status: "active" });
+      setEmployeeForm({ name: "", nameKana: "", employeeCode: "", pin: "", storeId: "", baseWage: "", status: "active" });
       setMessage("従業員を保存しました。");
       await load();
     } catch (error) {
@@ -731,6 +737,7 @@ export default function AdminPage() {
       name: employee.name,
       nameKana: employee.nameKana,
       employeeCode: employee.employeeCode,
+      pin: employee.pin ?? "",
       storeId: employee.storeId,
       baseWage: String(getEmployeeBaseWage(employee) || ""),
       status: employee.status === "inactive" ? "inactive" : "active",
@@ -1096,7 +1103,7 @@ export default function AdminPage() {
                   type="button"
                   onClick={() => {
                     setEmployeeEditingId("");
-                    setEmployeeForm({ name: "", nameKana: "", employeeCode: "", storeId: "", baseWage: "", status: "active" });
+                    setEmployeeForm({ name: "", nameKana: "", employeeCode: "", pin: "", storeId: "", baseWage: "", status: "active" });
                   }}
                   style={styles.secondaryButton}
                 >
@@ -1138,6 +1145,7 @@ export default function AdminPage() {
               <label style={styles.label}>氏名<input value={employeeForm.name} onChange={(e) => setEmployeeForm({ ...employeeForm, name: e.target.value })} style={styles.input} /></label>
               <label style={styles.label}>ひらがな<input value={employeeForm.nameKana} onChange={(e) => setEmployeeForm({ ...employeeForm, nameKana: e.target.value })} style={styles.input} /></label>
               <label style={styles.label}>社員コード<input value={employeeForm.employeeCode} onChange={(e) => setEmployeeForm({ ...employeeForm, employeeCode: e.target.value })} style={styles.input} /></label>
+              <label style={styles.label}>PIN（4桁）<input inputMode="numeric" maxLength={4} pattern="[0-9]{4}" value={employeeForm.pin} onChange={(e) => setEmployeeForm({ ...employeeForm, pin: e.target.value.replace(/\D/g, "").slice(0, 4) })} style={styles.input} /></label>
               <label style={styles.label}>所属店舗
                 <select
                   value={managerStoreId || employeeForm.storeId}

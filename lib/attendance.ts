@@ -38,6 +38,7 @@ export type Employee = {
   updatedAt: Timestamp;
   baseWage?: number | null;
   baseHourlyWage?: number | null;
+  pin?: string;
   phone?: string;
   memo?: string;
 };

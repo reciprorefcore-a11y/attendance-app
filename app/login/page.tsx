@@ -2,7 +2,6 @@
 
 import { FormEvent, Suspense, useEffect, useState } from "react";
 import { signInWithEmailAndPassword } from "firebase/auth";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { auth } from "@/lib/firebase";
 import { useAuthProfile } from "@/lib/auth";
@@ -74,11 +73,14 @@ function LoginPageContent() {
             {isSubmitting ? "ログイン中" : "ログイン"}
           </button>
         </form>
-        <div style={styles.registerLinkWrap}>
+        {/* 初回管理者登録リンクはここには置かない。
+            /register-admin ページ自体で「管理者がすでに存在する場合はリダイレクト」を制御すること。
+            開発中のみ必要な場合は下のコメントを外して使用 */}
+        {/* <div style={styles.registerLinkWrap}>
           <Link href="/register-admin" style={styles.registerLink}>
             初回管理者登録
           </Link>
-        </div>
+        </div> */}
       </section>
     </main>
   );
@@ -160,15 +162,5 @@ const styles = {
     color: "#B42318",
     fontSize: 13,
     fontWeight: 700,
-  },
-  registerLinkWrap: {
-    marginTop: 18,
-    textAlign: "center",
-  },
-  registerLink: {
-    color: "#3BAED6",
-    fontSize: 14,
-    fontWeight: 800,
-    textDecoration: "none",
   },
 } satisfies Record<string, React.CSSProperties>;
