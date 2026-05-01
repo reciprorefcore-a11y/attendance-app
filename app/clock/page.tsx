@@ -310,6 +310,7 @@ function ClockPageContent() {
         employeeName: employee.name ?? "",
         homeStoreId: employee.storeId ?? "",
         homeStoreName: homeStoreName ?? "",
+        storeId: workStoreId,
         workStoreId,
         workStoreName: workStore.name ?? "",
         isHelp: !!isHelp,
