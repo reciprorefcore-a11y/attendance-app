@@ -522,7 +522,8 @@ export default function AdminPage() {
 
   const isAdmin = profile?.role === "admin";
   const managerStoreId = profile?.role === "manager" ? profile.storeId : "";
-  const visibleTabs = isAdmin ? tabs : tabs.filter((tab) => tab.id !== "wages");
+  const managerAllowedTabs: TabId[] = ["attendance", "employees", "edits"];
+  const visibleTabs = isAdmin ? tabs : tabs.filter((tab) => managerAllowedTabs.includes(tab.id));
   const [appBaseUrl, setAppBaseUrl] = useState(
     process.env.NEXT_PUBLIC_APP_URL ??
       (typeof window !== "undefined" ? window.location.origin : ""),
@@ -1191,9 +1192,11 @@ export default function AdminPage() {
                 ))}
               </select>
             </label>
-            <button type="button" onClick={downloadExcel} style={styles.button}>
-              Excel出力
-            </button>
+            {isAdmin && (
+              <button type="button" onClick={downloadExcel} style={styles.button}>
+                Excel出力
+              </button>
+            )}
             <button
               type="button"
               onClick={async () => {
@@ -1304,21 +1307,23 @@ export default function AdminPage() {
                 >
                   新規登録
                 </button>
-                <label style={styles.secondaryButton}>
-                  {csvImporting ? "CSV取込中..." : "CSV一括登録"}
-                  <input
-                    type="file"
-                    accept=".csv,text/csv"
-                    disabled={csvImporting}
-                    style={{ display: "none" }}
-                    onChange={(event) => {
-                      const file = event.target.files?.[0];
-                      if (!file) return;
-                      event.target.value = "";
-                      void importEmployeesFromCsv(file);
-                    }}
-                  />
-                </label>
+                {isAdmin && (
+                  <label style={styles.secondaryButton}>
+                    {csvImporting ? "CSV取込中..." : "CSV一括登録"}
+                    <input
+                      type="file"
+                      accept=".csv,text/csv"
+                      disabled={csvImporting}
+                      style={{ display: "none" }}
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (!file) return;
+                        event.target.value = "";
+                        void importEmployeesFromCsv(file);
+                      }}
+                    />
+                  </label>
+                )}
               </div>
             </div>
             {csvImportSummary && <p style={styles.message}>{csvImportSummary}</p>}
@@ -1384,8 +1389,8 @@ export default function AdminPage() {
                   <td style={styles.td}>{employee.transportationCost ? `${employee.transportationCost}円/${employee.transportationType === "monthly" ? "月" : "日"}` : ""}</td>
                   <td style={styles.td}>
                     <button type="button" onClick={() => editEmployee(employee)} style={styles.linkButton}>編集</button>
-                    <button type="button" onClick={async () => { await updateDoc(doc(db, "employees", employee.id), { status: "inactive" }); await load(); }} style={styles.linkButton}>無効化</button>
-                    <button type="button" onClick={() => deleteEmployee(employee)} style={{...styles.linkButton, color: "#B91C1C", borderColor: "#FCA5A5", background: "#FEF2F2"}}>削除</button>
+                    {isAdmin && <button type="button" onClick={async () => { await updateDoc(doc(db, "employees", employee.id), { status: "inactive" }); await load(); }} style={styles.linkButton}>無効化</button>}
+                    {isAdmin && <button type="button" onClick={() => deleteEmployee(employee)} style={{...styles.linkButton, color: "#B91C1C", borderColor: "#FCA5A5", background: "#FEF2F2"}}>削除</button>}
                   </td>
                 </tr>
               ))}
