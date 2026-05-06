@@ -265,6 +265,11 @@ function formatMinutes(minutes: number) {
   return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, "0")}`;
 }
 
+function formatMinutesZero(minutes: number) {
+  const rounded = Math.round(Math.max(0, minutes));
+  return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, "0")}`;
+}
+
 function minutesBetween(start: Date, end: Date) {
   return Math.max(0, (end.getTime() - start.getTime()) / 60000);
 }
@@ -429,9 +434,9 @@ function buildMonthlyRows(
         row ? formatTime(row.clockIn) : "",
         row ? formatTime(row.clockOut) : "",
         row ? formatMinutes(row.workMinutes) : "",
-        "", "", "", "",
-        row ? formatMinutes(row.nightMinutes) : "",
-        row ? formatMinutes(row.breakMinutes) : "",
+        row ? "0:00" : "", row ? "0:00" : "", row ? "0:00" : "", row ? "0:00" : "",
+        row ? formatMinutesZero(row.nightMinutes) : "",
+        row ? formatMinutesZero(row.breakMinutes) : "",
         "", "",
         row && row.workMinutes > 0 ? "通常" : "",
         "",
@@ -630,6 +635,51 @@ export default function AdminPage() {
     const wageAmount = attendanceRows.reduce((sum, row) => sum + row.wageAmount, 0);
     return { todayPunches, notClockedOut, workMinutes, wageAmount };
   }, [attendanceRows, timecards, todayKey]);
+  const laborCostDashboard = useMemo(() => {
+    const now = new Date();
+    const todayStr = dateKey(now);
+    const dayOfWeek = now.getDay();
+    const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+    const mondayDate = new Date(now);
+    mondayDate.setDate(now.getDate() + mondayOffset);
+    const mondayStr = dateKey(mondayDate);
+    const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
+
+    const validCards = timecards.filter((row) => !row.isDeleted);
+
+    const todayCards = validCards.filter((row) => {
+      const d = logDate(row);
+      return d && dateKey(d) === todayStr;
+    });
+    const weekCards = validCards.filter((row) => {
+      const d = logDate(row);
+      if (!d) return false;
+      const k = dateKey(d);
+      return k >= mondayStr && k <= todayStr;
+    });
+    const monthCards = validCards.filter((row) => {
+      const d = logDate(row);
+      if (!d) return false;
+      const k = dateKey(d);
+      return k >= monthStart && k <= todayStr;
+    });
+
+    const calcCosts = (cards: TimecardRow[]) => {
+      const rows = buildAttendanceRows(cards);
+      const costs = new Map<string, number>();
+      for (const row of rows) {
+        costs.set(row.storeId, (costs.get(row.storeId) ?? 0) + row.wageAmount);
+      }
+      return costs;
+    };
+
+    return {
+      today: calcCosts(todayCards),
+      week: calcCosts(weekCards),
+      month: calcCosts(monthCards),
+    };
+  }, [timecards]);
+
   const editTarget = timecards.find((row) => row.id === editId) ?? null;
   const storeNameById = (storeId: string) =>
     getStoreName(stores.find((store) => store.id === storeId) ?? ({ id: storeId } as StoreRow)) ||
@@ -1167,6 +1217,32 @@ export default function AdminPage() {
     }
   };
 
+  const cleanupTestData = async () => {
+    if (!window.confirm("テストデータ（井上　美咲 0:21・小林　彗太 0:00）を論理削除しますか？")) return;
+    const allRows = buildAttendanceRows(timecards.filter((r) => !r.isDeleted));
+    const targets = allRows.filter((row) => {
+      if (row.employeeName === "井上　美咲" && Math.round(row.workMinutes) === 21) return true;
+      if (row.employeeName === "小林　彗太" && row.workMinutes === 0 && row.clockIn) return true;
+      return false;
+    });
+    if (targets.length === 0) {
+      setMessage("対象レコードが見つかりませんでした。");
+      return;
+    }
+    const allLogs = targets.flatMap((row) => row.logs);
+    await Promise.all(
+      allLogs.map((log) =>
+        updateDoc(doc(db, "clockLogs", log.id), {
+          isDeleted: true,
+          deletedAt: serverTimestamp(),
+          deletedBy: user?.uid ?? "admin",
+        }),
+      ),
+    );
+    setMessage(`テストデータ ${allLogs.length} 件を論理削除しました。`);
+    await load();
+  };
+
   if (isAuthLoading) {
     return <main style={styles.page}><p style={styles.panel}>ログイン確認中</p></main>;
   }
@@ -1340,6 +1416,33 @@ export default function AdminPage() {
         {activeTab === "attendance" && (
           <section style={styles.tabPanel}>
             <h2 style={styles.sectionTitle}>勤怠一覧</h2>
+
+            <div style={{ marginBottom: 20 }}>
+              <h3 style={styles.subTitle}>店舗別概算人件費</h3>
+              <div style={styles.tableWrap}>
+                <table style={styles.table}>
+                  <thead>
+                    <tr>
+                      <th style={styles.th}>店舗名</th>
+                      <th style={styles.th}>今日</th>
+                      <th style={styles.th}>今週（月〜日）</th>
+                      <th style={styles.th}>今月（1日〜本日）</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {stores.map((store) => (
+                      <tr key={store.id}>
+                        <td style={styles.td}>{getStoreName(store)}</td>
+                        <td style={styles.td}>{(laborCostDashboard.today.get(store.id) ?? 0).toLocaleString()}円</td>
+                        <td style={styles.td}>{(laborCostDashboard.week.get(store.id) ?? 0).toLocaleString()}円</td>
+                        <td style={styles.td}>{(laborCostDashboard.month.get(store.id) ?? 0).toLocaleString()}円</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
             <DataTable
               headers={[
                 "日付",
@@ -1379,6 +1482,13 @@ export default function AdminPage() {
               ))}
             </DataTable>
             {attendanceRows.length === 0 && <p style={styles.empty}>データがありません</p>}
+            {isAdmin && (
+              <div style={{ marginTop: 16 }}>
+                <button type="button" onClick={cleanupTestData} style={{ ...styles.secondaryButton, borderColor: "#FCA5A5", color: "#B91C1C" }}>
+                  テストデータ論理削除（井上美咲・小林彗太）
+                </button>
+              </div>
+            )}
           </section>
         )}
 

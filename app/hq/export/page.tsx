@@ -51,6 +51,11 @@ const headers = [
   "その他",
 ];
 
+function toHHMM(minutes: number) {
+  const rounded = Math.round(Math.max(0, minutes));
+  return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, "0")}`;
+}
+
 function currentMonth() {
   return new Date().toISOString().slice(0, 7);
 }
@@ -181,12 +186,12 @@ export default function HqExportPage() {
           attendance ? formatClockTime(attendance.clockIn) : "",
           attendance ? formatClockTime(attendance.clockOut) : "",
           attendance ? formatHours(attendance.workMinutes) : "",
-          "",
-          "",
-          "",
-          "",
-          attendance ? formatHours(attendance.nightMinutes) : "",
-          attendance ? formatHours(attendance.breakMinutes) : "",
+          attendance ? "0:00" : "",
+          attendance ? "0:00" : "",
+          attendance ? "0:00" : "",
+          attendance ? "0:00" : "",
+          attendance ? toHHMM(attendance.nightMinutes) : "",
+          attendance ? toHHMM(attendance.breakMinutes) : "",
           attendance ? formatHours(attendance.workMinutes) : "",
           "",
           attendance ? "通常" : "",
