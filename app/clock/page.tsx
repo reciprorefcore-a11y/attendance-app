@@ -262,7 +262,7 @@ function ClockPageContent() {
       setIsHelp(helpFlag);
       setHourlyWageAtWork(wageAtWork);
 
-      // 直前打刻を取得
+      // 直前打刻を取得して allowedActions を決定
       setIsLastPunchLoading(true);
       try {
         const lastSnap = await getDocs(
@@ -270,14 +270,15 @@ function ClockPageContent() {
             collection(db, "clockLogs"),
             where("employeeId", "==", emp.id),
             orderBy("timestamp", "desc"),
-            limit(1),
+            limit(10),
           ),
         );
-        setLastPunchType(lastSnap.empty ? null : ((lastSnap.docs[0].data().type as ClockType) ?? null));
+        // isDeleted フィールドが存在しない旧レコードも含め、論理削除されていない最新打刻を取得
+        const lastDoc = lastSnap.docs.find((d) => d.data().isDeleted !== true);
+        setLastPunchType(lastDoc ? ((lastDoc.data().type as ClockType) ?? null) : null);
       } catch (err) {
         console.error("last punch fetch failed", err);
         setLastPunchType(null);
-        setIsLastPunchLoading(false);
       } finally {
         setIsLastPunchLoading(false);
       }
