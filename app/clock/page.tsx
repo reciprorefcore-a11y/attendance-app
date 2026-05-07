@@ -107,6 +107,7 @@ function ClockPageContent() {
   const [isHelp, setIsHelp] = useState(false);
 
   const [lastPunchType, setLastPunchType] = useState<ClockType | null>(null);
+  const [isLastPunchLoading, setIsLastPunchLoading] = useState(false);
 
   const [gps, setGps] = useState<GpsState>({
     latitude: null,
@@ -292,13 +293,15 @@ function ClockPageContent() {
           .catch(() => setHomeStoreName(homeStoreId));
       }
 
-      // 最新打刻を非同期取得（ブロックしない）
+      // 最新打刻を非同期取得（完了まで打刻ボタンを disabled に）
+      setIsLastPunchLoading(true);
       fetchLastPunch(emp.id)
         .then((lastType) => setLastPunchType(lastType))
         .catch((err) => {
           console.error("last punch fetch failed", err);
           setLastPunchType(null);
-        });
+        })
+        .finally(() => setIsLastPunchLoading(false));
     } catch (err) {
       console.error("employee search failed", err);
       setErrorMessage("検索に失敗しました。通信状態を確認してください。");
@@ -429,21 +432,25 @@ function ClockPageContent() {
             </div>
 
             <div style={styles.actions}>
+              {isLastPunchLoading && (
+                <p style={styles.loadingPunch}>打刻状態を確認中...</p>
+              )}
               {clockButtons.map((btn) => {
                 const allowed = allowedActions.includes(btn.type);
+                const isDisabled = isSubmitting || isLastPunchLoading || !allowed || gps.isBlocked;
                 return (
                   <button
                     key={btn.type}
                     type="button"
                     onClick={() => punch(btn.type)}
-                    disabled={isSubmitting || !allowed || gps.isBlocked}
+                    disabled={isDisabled}
                     style={{
                       ...(btn.tone === "primary"
                         ? styles.primaryButton
                         : btn.tone === "dark"
                           ? styles.darkButton
                           : styles.lightButton),
-                      ...(!allowed || gps.isBlocked ? styles.disabledButton : {}),
+                      ...(isDisabled ? styles.disabledButton : {}),
                     }}
                   >
                     {btn.label}
@@ -590,6 +597,17 @@ const styles = {
   actions: {
     display: "grid",
     gap: 12,
+  },
+  loadingPunch: {
+    margin: 0,
+    padding: "10px 14px",
+    borderRadius: 10,
+    background: "#F0FBFE",
+    border: "1px solid #BDEBFA",
+    color: "#3BAED6",
+    fontSize: 14,
+    fontWeight: 700,
+    textAlign: "center",
   },
   primaryButton: {
     minHeight: 72,
