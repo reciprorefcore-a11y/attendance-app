@@ -534,30 +534,27 @@ export default function AdminPage() {
   const [managerDeleting, setManagerDeleting] = useState("");
 
   const isAdmin = profile?.role === "admin";
-  const managerStoreId = profile?.role === "manager" ? profile.storeId : "";
+  const isManager = profile?.role === "manager";
+  const managerStoreId = isManager ? (profile?.storeId ?? "") : "";
   const managerAllowedTabs: TabId[] = ["attendance", "employees", "edits"];
   const visibleTabs = isAdmin ? tabs : tabs.filter((tab) => managerAllowedTabs.includes(tab.id));
-  if (profile) {
-    console.log("profile role:", profile.role, "| isAdmin:", isAdmin, "| visibleTabs:", visibleTabs.map((t) => t.id));
-  }
+  console.log("current role:", profile?.role, "isAdmin:", profile?.role === "admin");
   const [appBaseUrl, setAppBaseUrl] = useState(
     process.env.NEXT_PUBLIC_APP_URL ??
       (typeof window !== "undefined" ? window.location.origin : ""),
   );
 
   const load = async () => {
-    if (!profile || (profile.role !== "admin" && profile.role !== "manager")) return;
-    console.log("profile role:", profile?.role, "| storeId:", profile?.storeId, "| uid:", profile?.uid);
+    if (!profile || (!isAdmin && !isManager)) return;
+    console.log("load() called – role:", profile.role, "storeId:", profile.storeId, "uid:", profile.uid);
     setIsLoading(true);
     setErrorMessage("");
     try {
-      const scopedStoreId = profile.role === "manager" ? profile.storeId : "";
-
-      // manager: storeId でサーバーサイドフィルタ（セキュリティルール対応）
-      // admin: 全件取得
-      const clockLogsQuery = scopedStoreId
-        ? query(collection(db, "clockLogs"), where("storeId", "==", scopedStoreId))
-        : query(collection(db, "clockLogs"), orderBy("timestamp", "desc"));
+      // admin: storeId フィルタなし・全件取得
+      // manager: where("storeId") でサーバーサイドフィルタ（Firestore セキュリティルール対応）
+      const clockLogsQuery = isAdmin
+        ? query(collection(db, "clockLogs"), orderBy("timestamp", "desc"))
+        : query(collection(db, "clockLogs"), where("storeId", "==", managerStoreId));
 
       const [timecardSnapshot, employeeSnapshot, storeSnapshot] = await Promise.all([
         getDocs(clockLogsQuery),
@@ -565,22 +562,23 @@ export default function AdminPage() {
         getDocs(collection(db, "stores")),
       ]);
       const nextTimecards = timecardSnapshot.docs.map((timecardDoc) => ({
-          id: timecardDoc.id,
-          ...(timecardDoc.data() as Omit<TimecardRow, "id">),
+        id: timecardDoc.id,
+        ...(timecardDoc.data() as Omit<TimecardRow, "id">),
       }));
       const nextEmployees = employeeSnapshot.docs.map((employeeDoc) => ({
-          id: employeeDoc.id,
-          ...(employeeDoc.data() as Employee),
+        id: employeeDoc.id,
+        ...(employeeDoc.data() as Employee),
       }));
       const nextStores = storeSnapshot.docs.map((storeDoc) => ({
-          id: storeDoc.id,
-          ...(storeDoc.data() as Store),
+        id: storeDoc.id,
+        ...(storeDoc.data() as Store),
       }));
 
-      setTimecards(scopedStoreId ? nextTimecards.filter((row) => row.storeId === scopedStoreId) : nextTimecards);
-      setEmployees(scopedStoreId ? nextEmployees.filter((employee) => employee.storeId === scopedStoreId) : nextEmployees);
-      setStores(scopedStoreId ? nextStores.filter((store) => store.id === scopedStoreId) : nextStores);
-      if (scopedStoreId) setStoreFilter(scopedStoreId);
+      // admin は全データ、manager は storeId で絞り込み（クライアント側）
+      setTimecards(isManager ? nextTimecards.filter((row) => row.storeId === managerStoreId) : nextTimecards);
+      setEmployees(isManager ? nextEmployees.filter((emp) => emp.storeId === managerStoreId) : nextEmployees);
+      setStores(isManager ? nextStores.filter((store) => store.id === managerStoreId) : nextStores);
+      if (isManager) setStoreFilter(managerStoreId);
     } catch (error) {
       console.error("admin dashboard fetch failed", error);
       const detail = error instanceof Error ? error.message : String(error);
