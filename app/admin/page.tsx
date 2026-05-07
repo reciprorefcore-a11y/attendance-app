@@ -19,6 +19,7 @@ import {
   serverTimestamp,
   setDoc,
   updateDoc,
+  where,
 } from "firebase/firestore";
 import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
 import type { ClockType, Employee, Store } from "@/lib/attendance";
@@ -536,6 +537,9 @@ export default function AdminPage() {
   const managerStoreId = profile?.role === "manager" ? profile.storeId : "";
   const managerAllowedTabs: TabId[] = ["attendance", "employees", "edits"];
   const visibleTabs = isAdmin ? tabs : tabs.filter((tab) => managerAllowedTabs.includes(tab.id));
+  if (profile) {
+    console.log("profile role:", profile.role, "| isAdmin:", isAdmin, "| visibleTabs:", visibleTabs.map((t) => t.id));
+  }
   const [appBaseUrl, setAppBaseUrl] = useState(
     process.env.NEXT_PUBLIC_APP_URL ??
       (typeof window !== "undefined" ? window.location.origin : ""),
@@ -543,11 +547,20 @@ export default function AdminPage() {
 
   const load = async () => {
     if (!profile || (profile.role !== "admin" && profile.role !== "manager")) return;
+    console.log("profile role:", profile?.role, "| storeId:", profile?.storeId, "| uid:", profile?.uid);
     setIsLoading(true);
     setErrorMessage("");
     try {
+      const scopedStoreId = profile.role === "manager" ? profile.storeId : "";
+
+      // manager: storeId でサーバーサイドフィルタ（セキュリティルール対応）
+      // admin: 全件取得
+      const clockLogsQuery = scopedStoreId
+        ? query(collection(db, "clockLogs"), where("storeId", "==", scopedStoreId))
+        : query(collection(db, "clockLogs"), orderBy("timestamp", "desc"));
+
       const [timecardSnapshot, employeeSnapshot, storeSnapshot] = await Promise.all([
-        getDocs(query(collection(db, "clockLogs"), orderBy("timestamp", "desc"))),
+        getDocs(clockLogsQuery),
         getDocs(query(collection(db, "employees"), orderBy("employeeCode"))),
         getDocs(collection(db, "stores")),
       ]);
@@ -563,7 +576,6 @@ export default function AdminPage() {
           id: storeDoc.id,
           ...(storeDoc.data() as Store),
       }));
-      const scopedStoreId = profile.role === "manager" ? profile.storeId : "";
 
       setTimecards(scopedStoreId ? nextTimecards.filter((row) => row.storeId === scopedStoreId) : nextTimecards);
       setEmployees(scopedStoreId ? nextEmployees.filter((employee) => employee.storeId === scopedStoreId) : nextEmployees);
@@ -571,7 +583,8 @@ export default function AdminPage() {
       if (scopedStoreId) setStoreFilter(scopedStoreId);
     } catch (error) {
       console.error("admin dashboard fetch failed", error);
-      setErrorMessage("管理画面データの取得に失敗しました。Firebase設定または権限を確認してください。");
+      const detail = error instanceof Error ? error.message : String(error);
+      setErrorMessage(`データ取得に失敗しました: ${detail}`);
     } finally {
       setIsLoading(false);
     }
