@@ -57,7 +57,7 @@ type TimecardRow = {
   deletedBy?: string | null;
 };
 
-type EmployeeRow = Employee & { id: string; hourlyWage?: number | null; hasManagerAccount?: boolean; managerUid?: string | null };
+type EmployeeRow = Employee & { id: string; hourlyWage?: number | null; hasManagerAccount?: boolean; managerUid?: string | null; accountRole?: "manager" | "area_manager" | "fc_manager" | null; accountStoreIds?: string[] };
 type StoreRow = Store & { id: string };
 
 type AttendanceRow = {
@@ -590,12 +590,16 @@ export default function AdminPage() {
   const [wageEmpInput, setWageEmpInput] = useState("");
   const [wageStoreEditId, setWageStoreEditId] = useState("");
   const [wageStoreInput, setWageStoreInput] = useState("");
-  const [managerSetupEmpId, setManagerSetupEmpId] = useState("");
-  const [managerSetupEmail, setManagerSetupEmail] = useState("");
-  const [managerSetupPassword, setManagerSetupPassword] = useState("");
-  const [managerSetupMsg, setManagerSetupMsg] = useState<{ empId: string; text: string; isError: boolean } | null>(null);
-  const [managerCreating, setManagerCreating] = useState(false);
-  const [managerDeleting, setManagerDeleting] = useState("");
+  const [permissionModal, setPermissionModal] = useState<{
+    empId: string;
+    role: "manager" | "area_manager" | "fc_manager" | "";
+    storeId: string;
+    storeIds: string[];
+    email: string;
+    password: string;
+  } | null>(null);
+  const [permissionMsg, setPermissionMsg] = useState("");
+  const [permissionWorking, setPermissionWorking] = useState(false);
 
   const isAdmin = profile?.role === "admin";
   const isFcManager = profile?.role === "fc_manager";
@@ -1047,46 +1051,60 @@ export default function AdminPage() {
     }
   };
 
-  const createManagerAccount = async (employee: EmployeeRow) => {
-    if (!managerSetupEmail.trim() || !managerSetupPassword.trim()) return;
-    setManagerCreating(true);
-    setManagerSetupMsg(null);
+  const openPermissionModal = (employee: EmployeeRow) => {
+    setPermissionMsg("");
+    setPermissionModal({
+      empId: employee.id,
+      role: employee.accountRole ?? "",
+      storeId: employee.accountRole === "manager" ? (employee.accountStoreIds?.[0] ?? employee.storeId) : employee.storeId,
+      storeIds: employee.accountStoreIds ?? [],
+      email: "",
+      password: "",
+    });
+  };
 
-    const secondaryApp = initializeApp(firebaseConfig, `manager-setup-${Date.now()}`);
+  const savePermission = async (employee: EmployeeRow) => {
+    if (!permissionModal) return;
+    const { role, storeId, storeIds, email, password } = permissionModal;
+    if (!role) { setPermissionMsg("権限を選択してください。"); return; }
+    if (!email.trim() || !password.trim()) { setPermissionMsg("メールアドレスとパスワードを入力してください。"); return; }
+    if (role === "manager" && !storeId) { setPermissionMsg("担当店舗を選択してください。"); return; }
+    if ((role === "area_manager" || role === "fc_manager") && storeIds.length === 0) { setPermissionMsg("担当店舗を選択してください。"); return; }
+
+    setPermissionWorking(true);
+    setPermissionMsg("");
+    const secondaryApp = initializeApp(firebaseConfig, `perm-setup-${Date.now()}`);
     const secondaryAuth = getAuth(secondaryApp);
     try {
-      const credential = await createUserWithEmailAndPassword(secondaryAuth, managerSetupEmail.trim(), managerSetupPassword);
+      const credential = await createUserWithEmailAndPassword(secondaryAuth, email.trim(), password);
       const uid = credential.user.uid;
-
       await setDoc(doc(db, "users", uid), {
         name: employee.name,
-        email: managerSetupEmail.trim(),
-        role: "manager",
-        storeId: employee.storeId ?? "",
+        email: email.trim(),
+        role,
+        storeId: role === "manager" ? storeId : (storeIds[0] ?? ""),
+        ...(role !== "manager" ? { storeIds } : {}),
         createdAt: serverTimestamp(),
       });
       await updateDoc(doc(db, "employees", employee.id), {
         hasManagerAccount: true,
         managerUid: uid,
+        accountRole: role,
+        accountStoreIds: role === "manager" ? [storeId] : storeIds,
       });
-
-      setManagerSetupEmpId("");
-      setManagerSetupEmail("");
-      setManagerSetupPassword("");
-      setManagerSetupMsg({ empId: employee.id, text: "アカウントを作成しました。IDとパスワードを本人に渡してください。", isError: false });
+      setPermissionMsg("アカウントを作成しました。IDとパスワードを本人に渡してください。");
       await load();
     } catch (err) {
-      console.error("manager account creation failed", err);
+      console.error("permission account creation failed", err);
       const code = (err as { code?: string }).code;
-      const text = code === "auth/email-already-in-use"
-        ? "このメールアドレスはすでに使用されています"
-        : code === "auth/weak-password"
-          ? "パスワードは6文字以上で入力してください"
-          : "アカウント作成に失敗しました";
-      setManagerSetupMsg({ empId: employee.id, text, isError: true });
+      setPermissionMsg(
+        code === "auth/email-already-in-use" ? "このメールアドレスはすでに使用されています"
+        : code === "auth/weak-password" ? "パスワードは6文字以上で入力してください"
+        : "アカウント作成に失敗しました",
+      );
     } finally {
       await deleteApp(secondaryApp);
-      setManagerCreating(false);
+      setPermissionWorking(false);
     }
   };
 
@@ -1127,14 +1145,12 @@ export default function AdminPage() {
   };
 
   const deleteManagerAccount = async (employee: EmployeeRow) => {
-    if (!window.confirm(`${employee.name} のマネージャーアカウントを削除しますか？`)) return;
-    setManagerDeleting(employee.id);
-    setManagerSetupMsg(null);
-
+    if (!window.confirm(`${employee.name} のアカウントを削除しますか？`)) return;
+    setPermissionWorking(true);
+    setPermissionMsg("");
     try {
       if (employee.managerUid) {
         await deleteDoc(doc(db, "users", employee.managerUid));
-
         try {
           const idToken = await auth.currentUser?.getIdToken();
           if (idToken) {
@@ -1154,15 +1170,15 @@ export default function AdminPage() {
           console.error("auth delete api call failed", err);
         }
       }
-
-      await updateDoc(doc(db, "employees", employee.id), { hasManagerAccount: false, managerUid: null });
-      setManagerSetupMsg({ empId: employee.id, text: "アカウントを削除しました。", isError: false });
+      await updateDoc(doc(db, "employees", employee.id), { hasManagerAccount: false, managerUid: null, accountRole: null, accountStoreIds: [] });
+      setPermissionMsg("アカウントを削除しました。");
+      setPermissionModal(null);
       await load();
     } catch (err) {
       console.error("manager account deletion failed", err);
-      setManagerSetupMsg({ empId: employee.id, text: "削除に失敗しました。", isError: true });
+      setPermissionMsg("削除に失敗しました。");
     } finally {
-      setManagerDeleting("");
+      setPermissionWorking(false);
     }
   };
 
@@ -1354,31 +1370,6 @@ export default function AdminPage() {
     }
   };
 
-  const cleanupTestData = async () => {
-    if (!window.confirm("テストデータ（井上　美咲 0:21・小林　彗太 0:00）を論理削除しますか？")) return;
-    const allRows = buildAttendanceRows(timecards.filter((r) => !r.isDeleted));
-    const targets = allRows.filter((row) => {
-      if (row.employeeName === "井上　美咲" && Math.round(row.workMinutes) === 21) return true;
-      if (row.employeeName === "小林　彗太" && row.workMinutes === 0 && row.clockIn) return true;
-      return false;
-    });
-    if (targets.length === 0) {
-      setMessage("対象レコードが見つかりませんでした。");
-      return;
-    }
-    const allLogs = targets.flatMap((row) => row.logs);
-    await Promise.all(
-      allLogs.map((log) =>
-        updateDoc(doc(db, "clockLogs", log.id), {
-          isDeleted: true,
-          deletedAt: serverTimestamp(),
-          deletedBy: user?.uid ?? "admin",
-        }),
-      ),
-    );
-    setMessage(`テストデータ ${allLogs.length} 件を論理削除しました。`);
-    await load();
-  };
 
   if (isAuthLoading) {
     return <main style={styles.page}><p style={styles.panel}>ログイン確認中</p></main>;
@@ -1623,13 +1614,6 @@ export default function AdminPage() {
               ))}
             </DataTable>
             {attendanceRows.length === 0 && <p style={styles.empty}>データがありません</p>}
-            {isAdmin && (
-              <div style={{ marginTop: 16 }}>
-                <button type="button" onClick={cleanupTestData} style={{ ...styles.secondaryButton, borderColor: "#FCA5A5", color: "#B91C1C" }}>
-                  テストデータ論理削除（井上美咲・小林彗太）
-                </button>
-              </div>
-            )}
           </section>
         )}
 
@@ -1787,78 +1771,23 @@ export default function AdminPage() {
                   <td style={styles.td}><span style={employee.status === "active" ? styles.activeBadge : styles.inactiveBadge}>{employee.status === "active" ? "有効" : "無効"}</span></td>
                   <td style={styles.td}>{getEmployeeBaseWage(employee)}</td>
                   <td style={styles.td}>{employee.transportationCost ? `${employee.transportationCost}円/${employee.transportationType === "monthly" ? "月" : "日"}` : ""}</td>
-                  <td style={{ ...styles.td, minWidth: 220 }}>
+                  <td style={styles.td}>
                     {employee.hasManagerAccount ? (
-                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                        <span style={styles.activeBadge}>設定済み</span>
-                        {managerSetupMsg?.empId === employee.id && (
-                          <p style={{ margin: 0, fontSize: 12, color: managerSetupMsg.isError ? "#B91C1C" : "#047857", fontWeight: 700 }}>
-                            {managerSetupMsg.text}
-                          </p>
-                        )}
-                        <button
-                          type="button"
-                          disabled={managerDeleting === employee.id}
-                          onClick={() => deleteManagerAccount(employee)}
-                          style={{ ...styles.linkButton, color: "#B91C1C", borderColor: "#FCA5A5", background: "#FEF2F2" }}
-                        >
-                          {managerDeleting === employee.id ? "削除中..." : "アカウントを削除"}
-                        </button>
-                      </div>
+                      <span style={
+                        employee.accountRole === "fc_manager" ? styles.fcBadge
+                        : employee.accountRole === "area_manager" ? styles.chainBadge
+                        : styles.activeBadge
+                      }>
+                        {employee.accountRole ?? "manager"}
+                      </span>
                     ) : (
-                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
-                          <input
-                            type="checkbox"
-                            checked={managerSetupEmpId === employee.id}
-                            onChange={(e) => {
-                              if (e.target.checked) {
-                                setManagerSetupEmpId(employee.id);
-                                setManagerSetupEmail("");
-                                setManagerSetupPassword("");
-                                setManagerSetupMsg(null);
-                              } else {
-                                setManagerSetupEmpId("");
-                              }
-                            }}
-                          />
-                          マネージャー権限を付与
-                        </label>
-                        {managerSetupEmpId === employee.id && (
-                          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                            <input
-                              type="email"
-                              placeholder="メールアドレス"
-                              value={managerSetupEmail}
-                              onChange={(e) => setManagerSetupEmail(e.target.value)}
-                              style={{ ...styles.input, minHeight: 32, padding: "2px 8px", fontSize: 13 }}
-                            />
-                            <input
-                              type="password"
-                              placeholder="パスワード（6文字以上）"
-                              value={managerSetupPassword}
-                              onChange={(e) => setManagerSetupPassword(e.target.value)}
-                              style={{ ...styles.input, minHeight: 32, padding: "2px 8px", fontSize: 13 }}
-                            />
-                            {managerSetupMsg?.empId === employee.id && (
-                              <p style={{ margin: 0, fontSize: 12, color: managerSetupMsg.isError ? "#B91C1C" : "#047857", fontWeight: 700 }}>
-                                {managerSetupMsg.text}
-                              </p>
-                            )}
-                            <button
-                              type="button"
-                              disabled={managerCreating || !managerSetupEmail.trim() || !managerSetupPassword.trim()}
-                              onClick={() => createManagerAccount(employee)}
-                              style={styles.linkButton}
-                            >
-                              {managerCreating ? "作成中..." : "アカウント作成"}
-                            </button>
-                          </div>
-                        )}
-                      </div>
+                      <span style={styles.inactiveBadge}>権限なし</span>
                     )}
                   </td>
                   <td style={styles.td}>
+                    {isAdmin && (
+                      <button type="button" onClick={() => openPermissionModal(employee)} style={styles.linkButton}>権限設定</button>
+                    )}
                     <button type="button" onClick={() => editEmployee(employee)} style={styles.linkButton}>編集</button>
                     {isAdmin && <button type="button" onClick={async () => { await updateDoc(doc(db, "employees", employee.id), { status: "inactive" }); await load(); }} style={styles.linkButton}>無効化</button>}
                     {isAdmin && <button type="button" onClick={() => deleteEmployee(employee)} style={{...styles.linkButton, color: "#B91C1C", borderColor: "#FCA5A5", background: "#FEF2F2"}}>削除</button>}
@@ -2189,6 +2118,111 @@ export default function AdminPage() {
         </section>
         </div>
       </div>
+
+      {/* 権限設定モーダル */}
+      {permissionModal && (() => {
+        const emp = employees.find((e) => e.id === permissionModal.empId);
+        if (!emp) return null;
+        const fcStores = permissionModal.role === "fc_manager" ? stores.filter((s) => s.isFc === true) : stores;
+        return (
+          <div style={styles.modalOverlay} onClick={() => setPermissionModal(null)}>
+            <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+                <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800 }}>権限設定：{emp.name}</h3>
+                <button type="button" onClick={() => setPermissionModal(null)} style={{ ...styles.linkButton, fontSize: 14 }}>✕ 閉じる</button>
+              </div>
+
+              {emp.hasManagerAccount && (
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16, padding: "8px 12px", background: "#F0FDF4", borderRadius: 8, border: "1px solid #BBF7D0" }}>
+                  <span style={{ fontSize: 13 }}>現在の権限：<strong>{emp.accountRole ?? "manager"}</strong></span>
+                  <button
+                    type="button"
+                    disabled={permissionWorking}
+                    onClick={() => deleteManagerAccount(emp)}
+                    style={{ ...styles.linkButton, color: "#B91C1C", borderColor: "#FCA5A5", background: "#FEF2F2" }}
+                  >
+                    {permissionWorking ? "処理中..." : "アカウント削除"}
+                  </button>
+                </div>
+              )}
+
+              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                <label style={styles.label}>権限
+                  <select
+                    value={permissionModal.role}
+                    onChange={(e) => setPermissionModal({ ...permissionModal, role: e.target.value as "manager" | "area_manager" | "fc_manager" | "", storeIds: [] })}
+                    style={styles.input}
+                  >
+                    <option value="">選択してください</option>
+                    <option value="manager">manager（1店舗・勤怠/従業員/打刻修正）</option>
+                    <option value="area_manager">area_manager（複数店舗・勤怠/従業員/打刻修正/Excel）</option>
+                    <option value="fc_manager">fc_manager（FC店舗・全タブ）</option>
+                  </select>
+                </label>
+
+                {permissionModal.role === "manager" && (
+                  <label style={styles.label}>担当店舗
+                    <select
+                      value={permissionModal.storeId}
+                      onChange={(e) => setPermissionModal({ ...permissionModal, storeId: e.target.value })}
+                      style={styles.input}
+                    >
+                      <option value="">選択してください</option>
+                      {stores.map((s) => <option key={s.id} value={s.id}>{getStoreName(s)}</option>)}
+                    </select>
+                  </label>
+                )}
+
+                {(permissionModal.role === "area_manager" || permissionModal.role === "fc_manager") && (
+                  <div style={styles.label}>
+                    <span style={styles.labelText}>担当店舗（複数選択可）{permissionModal.role === "fc_manager" ? "※FC店舗のみ" : ""}</span>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+                      {fcStores.map((s) => (
+                        <label key={s.id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer" }}>
+                          <input
+                            type="checkbox"
+                            checked={permissionModal.storeIds.includes(s.id)}
+                            onChange={(e) => {
+                              const next = e.target.checked
+                                ? [...permissionModal.storeIds, s.id]
+                                : permissionModal.storeIds.filter((id) => id !== s.id);
+                              setPermissionModal({ ...permissionModal, storeIds: next });
+                            }}
+                          />
+                          {getStoreName(s)}{s.isFc ? " (FC)" : ""}
+                        </label>
+                      ))}
+                      {fcStores.length === 0 && <p style={{ margin: 0, fontSize: 12, color: "#B91C1C" }}>FC店舗が登録されていません。先に店舗管理でFC店舗を登録してください。</p>}
+                    </div>
+                  </div>
+                )}
+
+                <label style={styles.label}>メールアドレス
+                  <input type="email" value={permissionModal.email} onChange={(e) => setPermissionModal({ ...permissionModal, email: e.target.value })} style={styles.input} />
+                </label>
+                <label style={styles.label}>パスワード（6文字以上）
+                  <input type="password" value={permissionModal.password} onChange={(e) => setPermissionModal({ ...permissionModal, password: e.target.value })} style={styles.input} />
+                </label>
+
+                {permissionMsg && (
+                  <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: permissionMsg.includes("作成") || permissionMsg.includes("削除") ? "#047857" : "#B91C1C" }}>
+                    {permissionMsg}
+                  </p>
+                )}
+
+                <button
+                  type="button"
+                  disabled={permissionWorking || !permissionModal.role}
+                  onClick={() => savePermission(emp)}
+                  style={styles.button}
+                >
+                  {permissionWorking ? "作成中..." : "アカウント作成"}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </main>
   );
 }
@@ -2709,5 +2743,25 @@ const styles = {
     color: "#1D4ED8",
     fontSize: 12,
     fontWeight: 800,
+  },
+  modalOverlay: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(0,0,0,0.45)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 1000,
+    padding: 16,
+  },
+  modal: {
+    background: "#ffffff",
+    borderRadius: 16,
+    padding: 24,
+    width: "100%",
+    maxWidth: 480,
+    maxHeight: "90svh",
+    overflowY: "auto",
+    boxShadow: "0 24px 60px rgba(0,0,0,0.25)",
   },
 } satisfies Record<string, React.CSSProperties>;
