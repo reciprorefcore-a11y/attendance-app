@@ -5,7 +5,7 @@ import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { signOut, getAuth, createUserWithEmailAndPassword } from "firebase/auth";
 import { initializeApp, deleteApp } from "firebase/app";
-import { auth, db, storage, firebaseConfig } from "@/lib/firebase";
+import { auth, db, firebaseConfig } from "@/lib/firebase";
 import { useAuthProfile } from "@/lib/auth";
 import {
   Timestamp,
@@ -21,7 +21,6 @@ import {
   updateDoc,
   where,
 } from "firebase/firestore";
-import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
 import type { ClockType, Employee, Store } from "@/lib/attendance";
 
 type TabId =
@@ -100,7 +99,6 @@ const clockTypeLabels: Record<string, string> = {
   clock_out: "退勤",
   clockOut: "退勤",
 };
-const supportedLogoTypes = ["image/png", "image/jpeg", "image/svg+xml"];
 const csvEmployeeFields = ["name", "nameKana", "employeeCode", "storeId", "baseHourlyWage", "pin", "status"] as const;
 
 type CsvEmployeeRow = Record<(typeof csvEmployeeFields)[number], string>;
@@ -578,15 +576,6 @@ export default function AdminPage() {
   const [accountMgrEditUid, setAccountMgrEditUid] = useState<string | null>(null);
   const [accountMgrEditStoreIds, setAccountMgrEditStoreIds] = useState<string[]>([]);
   const [employeeFormError, setEmployeeFormError] = useState("");
-  const [logoUploadState, setLogoUploadState] = useState<{
-    isUploading: boolean;
-    message: string;
-    error: string;
-  }>({
-    isUploading: false,
-    message: "",
-    error: "",
-  });
   const [csvImportErrors, setCsvImportErrors] = useState<CsvEmployeeError[]>([]);
   const [csvImportSummary, setCsvImportSummary] = useState("");
   const [csvImporting, setCsvImporting] = useState(false);
@@ -605,10 +594,10 @@ export default function AdminPage() {
   const [permissionMsg, setPermissionMsg] = useState("");
   const [permissionWorking, setPermissionWorking] = useState(false);
 
-  const isAdmin = profile?.role === "admin";
-  const isFcManager = profile?.role === "fc_manager";
-  const isAreaManager = profile?.role === "area_manager";
-  const isManager = profile?.role === "manager";
+  const isAdmin = !isAuthLoading && profile?.role === "admin";
+  const isFcManager = !isAuthLoading && profile?.role === "fc_manager";
+  const isAreaManager = !isAuthLoading && profile?.role === "area_manager";
+  const isManager = !isAuthLoading && profile?.role === "manager";
   const managerStoreId = isManager ? (profile?.storeId ?? "") : "";
   const myStoreIds = (isFcManager || isAreaManager) ? (profile?.storeIds ?? []) : [];
   const isReadOnlyStore = isFcManager;
@@ -774,7 +763,8 @@ export default function AdminPage() {
     const mondayDate = new Date(now);
     mondayDate.setDate(now.getDate() + mondayOffset);
     const mondayStr = dateKey(mondayDate);
-    const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
+    const jstNow = new Date(now.getTime() + 9 * 60 * 60 * 1000);
+    const monthStart = `${jstNow.getUTCFullYear()}-${String(jstNow.getUTCMonth() + 1).padStart(2, "0")}-01`;
 
     const validCards = timecards.filter((row) => !row.isDeleted);
 
@@ -1045,7 +1035,6 @@ export default function AdminPage() {
 
   const editStore = (store: StoreRow) => {
     setStoreEditingId(store.id);
-    setLogoUploadState({ isUploading: false, message: "", error: "" });
     setStoreForm({
       id: store.id,
       name: getStoreName(store),
@@ -1260,93 +1249,6 @@ export default function AdminPage() {
       setPermissionMsg("削除に失敗しました。");
     } finally {
       setPermissionWorking(false);
-    }
-  };
-
-  const compressImage = (file: File): Promise<Blob> => {
-    return new Promise((resolve, reject) => {
-      const canvas = document.createElement("canvas");
-      const img = new window.Image();
-      img.onload = () => {
-        const MAX_SIZE = 800;
-        let width = img.width;
-        let height = img.height;
-        if (width > MAX_SIZE || height > MAX_SIZE) {
-          if (width > height) {
-            height = Math.round((height / width) * MAX_SIZE);
-            width = MAX_SIZE;
-          } else {
-            width = Math.round((width / height) * MAX_SIZE);
-            height = MAX_SIZE;
-          }
-        }
-        canvas.width = width;
-        canvas.height = height;
-        canvas.getContext("2d")?.drawImage(img, 0, 0, width, height);
-        const mimeType = file.type === "image/png" ? "image/png" : "image/jpeg";
-        canvas.toBlob(
-          (blob) => {
-            if (blob) resolve(blob);
-            else reject(new Error("canvas.toBlob failed"));
-          },
-          mimeType,
-          0.8,
-        );
-      };
-      img.onerror = () => reject(new Error("image load failed"));
-      img.src = URL.createObjectURL(file);
-    });
-  };
-
-  const uploadStoreLogo = async (file: File) => {
-    const storeId = managerStoreId || storeForm.id.trim();
-    if (!storeId) {
-      setLogoUploadState({ isUploading: false, message: "", error: "先にstoreIdを入力してください。" });
-      return;
-    }
-    if (managerStoreId && storeId !== managerStoreId) {
-      setLogoUploadState({ isUploading: false, message: "", error: "自店舗以外のロゴは変更できません。" });
-      return;
-    }
-    if (!supportedLogoTypes.includes(file.type)) {
-      setLogoUploadState({ isUploading: false, message: "", error: "png / jpg / svg の画像を選択してください。" });
-      return;
-    }
-    if (file.size > 5 * 1024 * 1024) {
-      setLogoUploadState({ isUploading: false, message: "", error: "ファイルサイズが大きすぎます（5MB以下にしてください）。" });
-      return;
-    }
-
-    setLogoUploadState({ isUploading: true, message: "アップロード中...", error: "" });
-    try {
-      const isSvg = file.type === "image/svg+xml";
-      const isPng = file.type === "image/png";
-      const uploadBlob = isSvg ? file : await compressImage(file);
-      const ext = isSvg ? "svg" : isPng ? "png" : "jpg";
-      const contentType = isSvg ? "image/svg+xml" : isPng ? "image/png" : "image/jpeg";
-      const storageRef = ref(storage, `store-logos/${storeId}.${ext}`);
-      const timeout = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("upload timeout")), 30000),
-      );
-      await Promise.race([
-        uploadBytes(storageRef, uploadBlob, { contentType }),
-        timeout,
-      ]);
-      const logoUrl = await getDownloadURL(storageRef);
-      await setDoc(doc(db, "stores", storeId), { logoUrl }, { merge: true });
-      setStoreForm((current) => ({ ...current, logoUrl }));
-      setLogoUploadState({ isUploading: false, message: "アップロード完了", error: "" });
-      await load();
-    } catch (error) {
-      console.error("store logo upload failed", error);
-      const isTimeout = error instanceof Error && error.message === "upload timeout";
-      setLogoUploadState({
-        isUploading: false,
-        message: "",
-        error: isTimeout
-          ? "アップロードがタイムアウトしました。回線状況を確認して再度お試しください。"
-          : "ロゴ画像のアップロードに失敗しました。",
-      });
     }
   };
 
@@ -2012,33 +1914,22 @@ export default function AdminPage() {
             <form onSubmit={saveStore} style={styles.editForm}>
               <label style={styles.label}>storeId<input value={managerStoreId || storeForm.id} disabled={Boolean(storeEditingId) || Boolean(managerStoreId) || isReadOnlyStore} onChange={(e) => setStoreForm({ ...storeForm, id: e.target.value })} style={{ ...styles.input, ...(isReadOnlyStore ? { opacity: 0.6 } : {}) }} /></label>
               <label style={styles.label}>店舗名<input value={storeForm.name} disabled={isReadOnlyStore} onChange={(e) => setStoreForm({ ...storeForm, name: e.target.value })} style={{ ...styles.input, ...(isReadOnlyStore ? { opacity: 0.6 } : {}) }} /></label>
-              <div style={styles.logoUploadBox}>
-                <span style={styles.labelText}>ロゴ画像</span>
-                {storeForm.logoUrl ? (
-                  // eslint-disable-next-line @next/next/no-img-element
+              <label style={{ ...styles.label, gridColumn: "1 / -1" }}>
+                ロゴURL
+                <input
+                  value={storeForm.logoUrl}
+                  disabled={isReadOnlyStore}
+                  placeholder="/assets/logo-store-6.png"
+                  onChange={(e) => setStoreForm({ ...storeForm, logoUrl: e.target.value })}
+                  style={{ ...styles.input, ...(isReadOnlyStore ? { opacity: 0.6 } : {}) }}
+                />
+              </label>
+              {storeForm.logoUrl && (
+                // eslint-disable-next-line @next/next/no-img-element
+                <div style={{ gridColumn: "1 / -1" }}>
                   <img src={storeForm.logoUrl} alt={storeForm.name || "店舗ロゴ"} style={styles.logoPreviewLarge} />
-                ) : (
-                  <div style={styles.logoPlaceholder}>ロゴ未登録</div>
-                )}
-                {!isReadOnlyStore && (
-                  <label style={styles.uploadButton}>
-                    {logoUploadState.isUploading ? "アップロード中..." : "ロゴ画像アップロード"}
-                    <input
-                      type="file"
-                      accept="image/*"
-                      disabled={logoUploadState.isUploading}
-                      onChange={(event) => {
-                        const file = event.target.files?.[0];
-                        event.target.value = "";
-                        if (file) uploadStoreLogo(file);
-                      }}
-                      style={styles.fileInput}
-                    />
-                  </label>
-                )}
-                {logoUploadState.message && <span style={styles.uploadSuccess}>{logoUploadState.message}</span>}
-                {logoUploadState.error && <span style={styles.uploadError}>{logoUploadState.error}</span>}
-              </div>
+                </div>
+              )}
               <label style={styles.label}>緯度<input type="number" step="any" value={storeForm.latitude} disabled={isReadOnlyStore} onChange={(e) => setStoreForm({ ...storeForm, latitude: e.target.value })} style={{ ...styles.input, ...(isReadOnlyStore ? { opacity: 0.6 } : {}) }} /></label>
               <label style={styles.label}>経度<input type="number" step="any" value={storeForm.longitude} disabled={isReadOnlyStore} onChange={(e) => setStoreForm({ ...storeForm, longitude: e.target.value })} style={{ ...styles.input, ...(isReadOnlyStore ? { opacity: 0.6 } : {}) }} /></label>
               {!isReadOnlyStore && <button type="button" onClick={saveCurrentLocation} style={styles.secondaryButton}>現在地取得</button>}
@@ -2789,59 +2680,15 @@ const styles = {
     background: "#F8FAFC",
     border: "1px solid #E2E8F0",
   },
-  logoUploadBox: {
-    display: "flex",
-    flexDirection: "column",
-    gap: 8,
-  },
   labelText: {
     fontSize: 13,
     fontWeight: 800,
     color: "#334155",
   },
-  uploadButton: {
-    minHeight: 42,
-    border: "1px solid #BDEBFA",
-    borderRadius: 12,
-    padding: "0 14px",
-    background: "#F0FBFE",
-    color: "#3BAED6",
-    fontWeight: 800,
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    cursor: "pointer",
-  },
-  fileInput: {
-    display: "none",
-  },
-  logoPlaceholder: {
-    width: 120,
-    height: 72,
-    borderRadius: 12,
-    border: "1px dashed #CBD5E1",
-    background: "#F8FAFC",
-    color: "#64748B",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    fontSize: 13,
-    fontWeight: 700,
-  },
   logoPlaceholderSmall: {
     color: "#64748B",
     fontSize: 13,
     fontWeight: 700,
-  },
-  uploadSuccess: {
-    color: "#047857",
-    fontSize: 13,
-    fontWeight: 800,
-  },
-  uploadError: {
-    color: "#B91C1C",
-    fontSize: 13,
-    fontWeight: 800,
   },
   linkButton: {
     border: "1px solid #BDEBFA",
