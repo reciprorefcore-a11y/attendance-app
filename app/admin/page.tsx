@@ -1283,12 +1283,13 @@ export default function AdminPage() {
         canvas.width = width;
         canvas.height = height;
         canvas.getContext("2d")?.drawImage(img, 0, 0, width, height);
+        const mimeType = file.type === "image/png" ? "image/png" : "image/jpeg";
         canvas.toBlob(
           (blob) => {
             if (blob) resolve(blob);
             else reject(new Error("canvas.toBlob failed"));
           },
-          "image/jpeg",
+          mimeType,
           0.8,
         );
       };
@@ -1319,13 +1320,16 @@ export default function AdminPage() {
     setLogoUploadState({ isUploading: true, message: "アップロード中...", error: "" });
     try {
       const isSvg = file.type === "image/svg+xml";
+      const isPng = file.type === "image/png";
       const uploadBlob = isSvg ? file : await compressImage(file);
-      const storageRef = ref(storage, `store-logos/${storeId}.${isSvg ? "svg" : "jpg"}`);
+      const ext = isSvg ? "svg" : isPng ? "png" : "jpg";
+      const contentType = isSvg ? "image/svg+xml" : isPng ? "image/png" : "image/jpeg";
+      const storageRef = ref(storage, `store-logos/${storeId}.${ext}`);
       const timeout = new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error("upload timeout")), 30000),
       );
       await Promise.race([
-        uploadBytes(storageRef, uploadBlob, { contentType: isSvg ? "image/svg+xml" : "image/jpeg" }),
+        uploadBytes(storageRef, uploadBlob, { contentType }),
         timeout,
       ]);
       const logoUrl = await getDownloadURL(storageRef);
@@ -2021,7 +2025,7 @@ export default function AdminPage() {
                     {logoUploadState.isUploading ? "アップロード中..." : "ロゴ画像アップロード"}
                     <input
                       type="file"
-                      accept="image/png,image/jpeg,image/svg+xml"
+                      accept="image/*"
                       disabled={logoUploadState.isUploading}
                       onChange={(event) => {
                         const file = event.target.files?.[0];
