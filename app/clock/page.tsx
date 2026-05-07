@@ -49,6 +49,7 @@ type GpsState = {
   longitude: number | null;
   distanceMeters: number | null;
   isOutsideGps: boolean;
+  isBlocked: boolean;
   message: string;
 };
 
@@ -113,6 +114,7 @@ function ClockPageContent() {
     longitude: null,
     distanceMeters: null,
     isOutsideGps: false,
+    isBlocked: false,
     message: "位置情報は未取得です",
   });
 
@@ -166,7 +168,7 @@ function ClockPageContent() {
   useEffect(() => {
     if (!workStore) return;
     if (workStore.gpsEnabled === false) {
-      setGps({ latitude: null, longitude: null, distanceMeters: null, isOutsideGps: false, message: "GPS打刻チェック無効" });
+      setGps({ latitude: null, longitude: null, distanceMeters: null, isOutsideGps: false, isBlocked: false, message: "GPS打刻チェック無効" });
       return;
     }
     const lat = workStore.latitude ?? null;
@@ -174,7 +176,7 @@ function ClockPageContent() {
     const radius = workStore.gpsRadiusMeters ?? 0;
 
     if (lat === null || lng === null || !radius || !navigator.geolocation) {
-      setGps((prev) => ({ ...prev, distanceMeters: null, isOutsideGps: false, message: "GPS取得不可のため位置未確認で打刻できます" }));
+      setGps((prev) => ({ ...prev, distanceMeters: null, isOutsideGps: false, isBlocked: false, message: "GPS取得不可のため位置未確認で打刻できます" }));
       return;
     }
 
@@ -187,10 +189,31 @@ function ClockPageContent() {
           longitude: pos.coords.longitude,
           distanceMeters: dist,
           isOutsideGps: outside,
+          isBlocked: false,
           message: outside ? "GPS許可範囲外です。打刻は可能です。" : "GPS確認OK",
         });
       },
-      () => setGps({ latitude: null, longitude: null, distanceMeters: null, isOutsideGps: false, message: "GPS取得不可のため位置未確認で打刻できます" }),
+      (error) => {
+        if (error.code === 1) {
+          setGps({
+            latitude: null,
+            longitude: null,
+            distanceMeters: null,
+            isOutsideGps: false,
+            isBlocked: true,
+            message: "位置情報の許可が必要です。スマホの設定からブラウザの位置情報を許可してください。",
+          });
+        } else {
+          setGps({
+            latitude: null,
+            longitude: null,
+            distanceMeters: null,
+            isOutsideGps: false,
+            isBlocked: false,
+            message: "GPS取得不可のため位置未確認で打刻できます",
+          });
+        }
+      },
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 },
     );
   }, [workStore]);
@@ -427,14 +450,14 @@ function ClockPageContent() {
                     key={btn.type}
                     type="button"
                     onClick={() => punch(btn.type)}
-                    disabled={isSubmitting || !allowed}
+                    disabled={isSubmitting || !allowed || gps.isBlocked}
                     style={{
                       ...(btn.tone === "primary"
                         ? styles.primaryButton
                         : btn.tone === "dark"
                           ? styles.darkButton
                           : styles.lightButton),
-                      ...(!allowed ? styles.disabledButton : {}),
+                      ...(!allowed || gps.isBlocked ? styles.disabledButton : {}),
                     }}
                   >
                     {btn.label}
@@ -451,7 +474,7 @@ function ClockPageContent() {
 
         {/* GPS 状態 */}
         {workStore && (
-          <div style={gps.isOutsideGps ? styles.gpsWarning : styles.gpsBox}>
+          <div style={gps.isBlocked ? styles.gpsBlocked : gps.isOutsideGps ? styles.gpsWarning : styles.gpsBox}>
             <p style={styles.gpsMain}>{gps.message}</p>
             {gps.distanceMeters !== null && (
               <p style={styles.gpsSub}>
@@ -643,6 +666,12 @@ const styles = {
     borderRadius: 14,
     background: "#FFFBEB",
     border: "1px solid #F59E0B",
+    padding: 14,
+  },
+  gpsBlocked: {
+    borderRadius: 14,
+    background: "#FEF2F2",
+    border: "1px solid #FCA5A5",
     padding: 14,
   },
   gpsMain: {
