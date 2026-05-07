@@ -1,8 +1,5 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useState } from "react";
-import Image from "next/image";
-import { useSearchParams } from "next/navigation";
 import { db } from "@/lib/firebase";
 import {
   addDoc,
@@ -17,6 +14,9 @@ import {
   serverTimestamp,
   where,
 } from "firebase/firestore";
+import { Suspense, useEffect, useMemo, useState } from "react";
+import Image from "next/image";
+import { useSearchParams } from "next/navigation";
 
 // ─── 型定義 ───────────────────────────────────────────────────────────────
 
@@ -268,6 +268,7 @@ function ClockPageContent() {
 
       if (!found) {
         setErrorMessage("社員番号が見つかりません");
+        setIsSearching(false);
         return;
       }
 
