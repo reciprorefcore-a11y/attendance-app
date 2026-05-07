@@ -22,6 +22,7 @@ export type Store = {
   active?: boolean;
   isActive?: boolean;
   gpsEnabled?: boolean;
+  isFc?: boolean;
 };
 
 export type Employee = {
