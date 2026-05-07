@@ -562,7 +562,18 @@ export default function AdminPage() {
     helpWage: "",
     active: true,
     gpsEnabled: true,
+    isFc: false,
   });
+  const [multiAccountOpen, setMultiAccountOpen] = useState(false);
+  const [multiAccountForm, setMultiAccountForm] = useState({
+    name: "",
+    email: "",
+    password: "",
+    role: "area_manager" as "area_manager" | "fc_manager",
+    storeIds: [] as string[],
+  });
+  const [multiAccountMsg, setMultiAccountMsg] = useState("");
+  const [multiAccountCreating, setMultiAccountCreating] = useState(false);
   const [logoUploadState, setLogoUploadState] = useState<{
     isUploading: boolean;
     message: string;
@@ -587,27 +598,35 @@ export default function AdminPage() {
   const [managerDeleting, setManagerDeleting] = useState("");
 
   const isAdmin = profile?.role === "admin";
+  const isFcManager = profile?.role === "fc_manager";
+  const isAreaManager = profile?.role === "area_manager";
   const isManager = profile?.role === "manager";
   const managerStoreId = isManager ? (profile?.storeId ?? "") : "";
+  const myStoreIds = (isFcManager || isAreaManager) ? (profile?.storeIds ?? []) : [];
+  const canChangeStoreFilter = isAdmin || isFcManager || isAreaManager;
+  const areaManagerAllowedTabs: TabId[] = ["attendance", "employees", "edits", "exports"];
   const managerAllowedTabs: TabId[] = ["attendance", "employees", "edits"];
-  const visibleTabs = isAdmin ? tabs : tabs.filter((tab) => managerAllowedTabs.includes(tab.id));
-  console.log("current role:", profile?.role, "isAdmin:", profile?.role === "admin");
+  const visibleTabs = isAdmin || isFcManager
+    ? tabs
+    : isAreaManager
+      ? tabs.filter((tab) => areaManagerAllowedTabs.includes(tab.id))
+      : tabs.filter((tab) => managerAllowedTabs.includes(tab.id));
   const [appBaseUrl, setAppBaseUrl] = useState(
     process.env.NEXT_PUBLIC_APP_URL ??
       (typeof window !== "undefined" ? window.location.origin : ""),
   );
 
   const load = async () => {
-    if (!profile || (!isAdmin && !isManager)) return;
-    console.log("load() called – role:", profile.role, "storeId:", profile.storeId, "uid:", profile.uid);
+    if (!profile) return;
+    if (!isAdmin && !isFcManager && !isAreaManager && !isManager) return;
     setIsLoading(true);
     setErrorMessage("");
     try {
-      // admin: storeId フィルタなし・全件取得
-      // manager: where("storeId") でサーバーサイドフィルタ（Firestore セキュリティルール対応）
       const clockLogsQuery = isAdmin
         ? query(collection(db, "clockLogs"), orderBy("timestamp", "desc"))
-        : query(collection(db, "clockLogs"), where("storeId", "==", managerStoreId));
+        : (isFcManager || isAreaManager) && myStoreIds.length > 0
+          ? query(collection(db, "clockLogs"), where("storeId", "in", myStoreIds))
+          : query(collection(db, "clockLogs"), where("storeId", "==", managerStoreId));
 
       const [timecardSnapshot, employeeSnapshot, storeSnapshot] = await Promise.all([
         getDocs(clockLogsQuery),
@@ -627,11 +646,20 @@ export default function AdminPage() {
         ...(storeDoc.data() as Store),
       }));
 
-      // admin は全データ、manager は storeId で絞り込み（クライアント側）
-      setTimecards(isManager ? nextTimecards.filter((row) => row.storeId === managerStoreId) : nextTimecards);
-      setEmployees(isManager ? nextEmployees.filter((emp) => emp.storeId === managerStoreId) : nextEmployees);
-      setStores(isManager ? nextStores.filter((store) => store.id === managerStoreId) : nextStores);
-      if (isManager) setStoreFilter(managerStoreId);
+      if (isManager) {
+        setTimecards(nextTimecards.filter((row) => row.storeId === managerStoreId));
+        setEmployees(nextEmployees.filter((emp) => emp.storeId === managerStoreId));
+        setStores(nextStores.filter((store) => store.id === managerStoreId));
+        setStoreFilter(managerStoreId);
+      } else if (isFcManager || isAreaManager) {
+        setTimecards(nextTimecards.filter((row) => myStoreIds.includes(row.storeId)));
+        setEmployees(nextEmployees.filter((emp) => myStoreIds.includes(emp.storeId)));
+        setStores(nextStores.filter((store) => myStoreIds.includes(store.id)));
+      } else {
+        setTimecards(nextTimecards);
+        setEmployees(nextEmployees);
+        setStores(nextStores);
+      }
     } catch (error) {
       console.error("admin dashboard fetch failed", error);
       const detail = error instanceof Error ? error.message : String(error);
@@ -652,9 +680,8 @@ export default function AdminPage() {
       router.replace("/clock");
       return;
     }
-    if (profile.role === "manager" && !profile.storeId) {
-      return;
-    }
+    if (profile.role === "manager" && !profile.storeId) return;
+    if ((profile.role === "area_manager" || profile.role === "fc_manager") && !profile.storeIds?.length) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -937,8 +964,16 @@ export default function AdminPage() {
       setMessage("店舗IDと店舗名を入力してください。");
       return;
     }
+    if (!storeEditingId && !isAdmin) {
+      setMessage("店舗の新規作成は管理者のみ可能です。");
+      return;
+    }
     if (managerStoreId && nextStoreId !== managerStoreId) {
       setMessage("自店舗以外の店舗は編集できません。");
+      return;
+    }
+    if ((isFcManager || isAreaManager) && !myStoreIds.includes(nextStoreId)) {
+      setMessage("担当店舗以外の店舗は編集できません。");
       return;
     }
     const payload = {
@@ -950,11 +985,12 @@ export default function AdminPage() {
       helpWage: storeForm.helpWage ? Number(storeForm.helpWage) : null,
       active: storeForm.active,
       gpsEnabled: storeForm.gpsEnabled,
+      isFc: storeForm.isFc,
     };
     try {
       await setDoc(doc(db, "stores", nextStoreId), payload, { merge: true });
       setStoreEditingId("");
-      setStoreForm({ id: "", name: "", logoUrl: "", latitude: "", longitude: "", gpsRadiusMeters: "100", helpWage: "", active: true, gpsEnabled: true });
+      setStoreForm({ id: "", name: "", logoUrl: "", latitude: "", longitude: "", gpsRadiusMeters: "100", helpWage: "", active: true, gpsEnabled: true, isFc: false });
       setMessage("店舗を保存しました。");
       await load();
     } catch (error) {
@@ -976,6 +1012,7 @@ export default function AdminPage() {
       helpWage: String(getStoreHelpWage(store) || ""),
       active: store.active !== false,
       gpsEnabled: store.gpsEnabled !== false,
+      isFc: store.isFc === true,
     });
     setActiveTab("stores");
   };
@@ -1050,6 +1087,42 @@ export default function AdminPage() {
     } finally {
       await deleteApp(secondaryApp);
       setManagerCreating(false);
+    }
+  };
+
+  const createMultiStoreAccount = async () => {
+    const { name, email, password, role, storeIds: ids } = multiAccountForm;
+    if (!name.trim() || !email.trim() || !password.trim() || ids.length === 0) {
+      setMultiAccountMsg("名前・メール・パスワード・担当店舗を入力してください。");
+      return;
+    }
+    setMultiAccountCreating(true);
+    setMultiAccountMsg("");
+    const secondaryApp = initializeApp(firebaseConfig, `multi-account-${Date.now()}`);
+    const secondaryAuth = getAuth(secondaryApp);
+    try {
+      const credential = await createUserWithEmailAndPassword(secondaryAuth, email.trim(), password);
+      const uid = credential.user.uid;
+      await setDoc(doc(db, "users", uid), {
+        name: name.trim(),
+        email: email.trim(),
+        role,
+        storeId: ids[0] ?? "",
+        storeIds: ids,
+        createdAt: serverTimestamp(),
+      });
+      setMultiAccountMsg("アカウントを作成しました。IDとパスワードを本人に渡してください。");
+      setMultiAccountForm({ name: "", email: "", password: "", role: "area_manager", storeIds: [] });
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      setMultiAccountMsg(
+        code === "auth/email-already-in-use" ? "このメールアドレスはすでに使用されています"
+        : code === "auth/weak-password" ? "パスワードは6文字以上で入力してください"
+        : "アカウント作成に失敗しました",
+      );
+    } finally {
+      await deleteApp(secondaryApp);
+      setMultiAccountCreating(false);
     }
   };
 
@@ -1315,12 +1388,16 @@ export default function AdminPage() {
     return <main style={styles.page}><p style={styles.error}>{authError}</p></main>;
   }
 
-  if (!profile || (profile.role !== "admin" && profile.role !== "manager")) {
+  if (!profile || !["admin", "fc_manager", "area_manager", "manager"].includes(profile.role)) {
     return <main style={styles.page}><p style={styles.panel}>権限を確認しています</p></main>;
   }
 
   if (profile.role === "manager" && !profile.storeId) {
     return <main style={styles.page}><p style={styles.error}>店長アカウントに storeId が設定されていません。</p></main>;
+  }
+
+  if ((profile.role === "area_manager" || profile.role === "fc_manager") && !profile.storeIds?.length) {
+    return <main style={styles.page}><p style={styles.error}>アカウントに担当店舗（storeIds）が設定されていません。</p></main>;
   }
 
   return (
@@ -1361,7 +1438,7 @@ export default function AdminPage() {
       <div className="admin-layout" style={styles.layout}>
         <aside className="admin-sidebar" style={styles.sidebar}>
           <div>
-            <p style={styles.sidebarEyebrow}>{isAdmin ? "本部管理" : "店舗管理"}</p>
+            <p style={styles.sidebarEyebrow}>{isAdmin ? "本部管理" : isFcManager ? "FC管理" : isAreaManager ? "エリア管理" : "店舗管理"}</p>
             <h2 style={styles.sidebarTitle}>勤怠ダッシュボード</h2>
           </div>
           <nav className="admin-side-nav" style={styles.sideNav}>
@@ -1410,11 +1487,11 @@ export default function AdminPage() {
               店舗
               <select
                 value={storeFilter}
-                onChange={(event) => setStoreFilter(isAdmin ? event.target.value : managerStoreId)}
-                disabled={!isAdmin}
+                onChange={(event) => setStoreFilter(canChangeStoreFilter ? event.target.value : managerStoreId)}
+                disabled={!canChangeStoreFilter}
                 style={styles.input}
               >
-                {isAdmin && <option value="all">全店舗</option>}
+                {canChangeStoreFilter && stores.length > 1 && <option value="all">全店舗</option>}
                 {stores.map((store) => (
                   <option key={store.id} value={store.id}>
                     {getStoreName(store)}
@@ -1422,7 +1499,7 @@ export default function AdminPage() {
                 ))}
               </select>
             </label>
-            {isAdmin && (
+            {(isAdmin || isAreaManager || isFcManager) && (
               <button type="button" onClick={downloadExcel} style={styles.button}>
                 Excel出力
               </button>
@@ -1641,6 +1718,65 @@ export default function AdminPage() {
               </label>
               <button type="submit" style={styles.button}>{employeeEditingId ? "更新" : "登録"}</button>
             </form>
+            {isAdmin && (
+              <div style={{ marginTop: 24 }}>
+                <button
+                  type="button"
+                  onClick={() => setMultiAccountOpen(!multiAccountOpen)}
+                  style={styles.secondaryButton}
+                >
+                  {multiAccountOpen ? "閉じる" : "エリア・FCマネージャーアカウント作成"}
+                </button>
+                {multiAccountOpen && (
+                  <div style={{ ...styles.editForm, marginTop: 12 }}>
+                    <label style={styles.label}>氏名<input value={multiAccountForm.name} onChange={(e) => setMultiAccountForm({ ...multiAccountForm, name: e.target.value })} style={styles.input} /></label>
+                    <label style={styles.label}>メールアドレス<input type="email" value={multiAccountForm.email} onChange={(e) => setMultiAccountForm({ ...multiAccountForm, email: e.target.value })} style={styles.input} /></label>
+                    <label style={styles.label}>パスワード（6文字以上）<input type="password" value={multiAccountForm.password} onChange={(e) => setMultiAccountForm({ ...multiAccountForm, password: e.target.value })} style={styles.input} /></label>
+                    <label style={styles.label}>権限
+                      <select value={multiAccountForm.role} onChange={(e) => setMultiAccountForm({ ...multiAccountForm, role: e.target.value as "area_manager" | "fc_manager", storeIds: [] })} style={styles.input}>
+                        <option value="area_manager">エリアマネージャー</option>
+                        <option value="fc_manager">FCマネージャー</option>
+                      </select>
+                    </label>
+                    <div style={styles.label}>
+                      <span style={styles.labelText}>担当店舗（複数選択可）</span>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+                        {stores
+                          .filter((s) => multiAccountForm.role === "fc_manager" ? s.isFc === true : true)
+                          .map((store) => (
+                            <label key={store.id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer" }}>
+                              <input
+                                type="checkbox"
+                                checked={multiAccountForm.storeIds.includes(store.id)}
+                                onChange={(e) => {
+                                  const next = e.target.checked
+                                    ? [...multiAccountForm.storeIds, store.id]
+                                    : multiAccountForm.storeIds.filter((id) => id !== store.id);
+                                  setMultiAccountForm({ ...multiAccountForm, storeIds: next });
+                                }}
+                              />
+                              {getStoreName(store)}{store.isFc ? " (FC)" : ""}
+                            </label>
+                          ))}
+                      </div>
+                    </div>
+                    {multiAccountMsg && (
+                      <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: multiAccountMsg.includes("作成") ? "#047857" : "#B91C1C" }}>
+                        {multiAccountMsg}
+                      </p>
+                    )}
+                    <button
+                      type="button"
+                      disabled={multiAccountCreating}
+                      onClick={createMultiStoreAccount}
+                      style={styles.button}
+                    >
+                      {multiAccountCreating ? "作成中..." : "アカウント作成"}
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
             <DataTable headers={["社員コード", "氏名", "ひらがな", "所属店舗", "状態", "基本時給", "交通費", "権限", "操作"]}>
               {employees.filter(e => e.isDeleted !== true).map((employee) => (
                 <tr key={employee.id}>
@@ -1793,11 +1929,18 @@ export default function AdminPage() {
                   <option value="false">OFF（GPS確認なし）</option>
                 </select>
               </label>
+              <label style={styles.label}>店舗種別
+                <select value={storeForm.isFc ? "true" : "false"} onChange={(e) => setStoreForm({ ...storeForm, isFc: e.target.value === "true" })} style={styles.input}>
+                  <option value="false">直営</option>
+                  <option value="true">FC</option>
+                </select>
+              </label>
               <button type="submit" style={styles.button}>{storeEditingId ? "更新" : "登録"}</button>
             </form>
             <DataTable
               headers={[
                 "店舗名",
+                "種別",
                 "storeId",
                 "緯度経度",
                 "GPS許可半径",
@@ -1815,6 +1958,11 @@ export default function AdminPage() {
                 return (
                   <tr key={store.id}>
                     <td style={styles.td}>{getStoreName(store)}</td>
+                    <td style={styles.td}>
+                      <span style={store.isFc ? styles.fcBadge : styles.chainBadge}>
+                        {store.isFc ? "FC" : "直営"}
+                      </span>
+                    </td>
                     <td style={styles.td}>{store.id}</td>
                     <td style={styles.td}>{getStoreLat(store)}, {getStoreLng(store)}</td>
                     <td style={styles.td}>{getStoreRadius(store)}m</td>
@@ -2541,6 +2689,24 @@ const styles = {
     borderRadius: 999,
     background: "#F1F5F9",
     color: "#64748B",
+    fontSize: 12,
+    fontWeight: 800,
+  },
+  fcBadge: {
+    display: "inline-flex",
+    padding: "2px 8px",
+    borderRadius: 999,
+    background: "#FEF3C7",
+    color: "#92400E",
+    fontSize: 12,
+    fontWeight: 800,
+  },
+  chainBadge: {
+    display: "inline-flex",
+    padding: "2px 8px",
+    borderRadius: 999,
+    background: "#EFF6FF",
+    color: "#1D4ED8",
     fontSize: 12,
     fontWeight: 800,
   },
