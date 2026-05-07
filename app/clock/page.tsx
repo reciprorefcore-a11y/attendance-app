@@ -104,7 +104,6 @@ function ClockPageContent() {
   const [employeeCode, setEmployeeCode] = useState("");
   const [employee, setEmployee] = useState<EmployeeDoc | null>(null);
   const [homeStoreName, setHomeStoreName] = useState("");
-  const [hourlyWageAtWork, setHourlyWageAtWork] = useState(0);
   const [isHelp, setIsHelp] = useState(false);
 
   const [lastPunchType, setLastPunchType] = useState<ClockType | null>(null);
@@ -233,7 +232,6 @@ function ClockPageContent() {
     setEmployeeCode("");
     setEmployee(null);
     setHomeStoreName("");
-    setHourlyWageAtWork(0);
     setIsHelp(false);
     setLastPunchType(null);
     setErrorMessage("");
@@ -287,27 +285,25 @@ function ClockPageContent() {
 
       const homeStoreId = emp.storeId;
       const helpFlag = !!homeStoreId && homeStoreId !== workStoreId;
-      let wageAtWork = emp.hourlyWage ?? emp.baseHourlyWage ?? 0;
-
-      if (helpFlag) {
-        const homeSnap = await getDoc(doc(db, "stores", homeStoreId));
-        const homeData = homeSnap.exists() ? (homeSnap.data() as StoreDoc) : null;
-        setHomeStoreName(homeData?.name ?? homeStoreId);
-        const helpWage = homeData?.helpHourlyWage ?? homeData?.helpWage ?? 0;
-        wageAtWork = Math.max(wageAtWork, helpWage);
-      } else {
-        setHomeStoreName(workStore?.name ?? "");
-      }
 
       // 従業員確認完了 → 即座に打刻画面を表示
       setEmployee(emp);
       setIsHelp(helpFlag);
-      setHourlyWageAtWork(wageAtWork);
+      setHomeStoreName(helpFlag ? "" : workStore?.name ?? "");
       setLastPunchType(null);
       setStep("confirm");
       setIsSearching(false);
 
-      // clockLogs の最新打刻は画面表示後に非同期取得（ブロックしない）
+      // ヘルプ勤務：所属店舗名を非同期取得（画面表示をブロックしない）
+      if (helpFlag) {
+        getDoc(doc(db, "stores", homeStoreId))
+          .then((snap) => {
+            setHomeStoreName(snap.exists() ? ((snap.data() as StoreDoc).name ?? homeStoreId) : homeStoreId);
+          })
+          .catch(() => setHomeStoreName(homeStoreId));
+      }
+
+      // 最新打刻を非同期取得（ブロックしない）
       fetchLastPunch(emp.id)
         .then((lastType) => setLastPunchType(lastType))
         .catch((err) => {
@@ -336,33 +332,37 @@ function ClockPageContent() {
     setErrorMessage("");
 
     try {
+      let wageAtWork = employee.hourlyWage ?? employee.baseHourlyWage ?? 0;
+      let resolvedHomeStoreName = homeStoreName;
+
+      if (isHelp) {
+        const homeSnap = await getDoc(doc(db, "stores", employee.storeId));
+        const homeData = homeSnap.exists() ? (homeSnap.data() as StoreDoc) : null;
+        if (homeData?.name) resolvedHomeStoreName = homeData.name;
+        const helpWage = homeData?.helpHourlyWage ?? homeData?.helpWage ?? 0;
+        wageAtWork = Math.max(wageAtWork, helpWage);
+      }
+
       const payload = {
         employeeId: employee.id,
         employeeCode: employee.employeeCode ?? "",
         employeeName: employee.name ?? "",
         homeStoreId: employee.storeId ?? "",
-        homeStoreName: homeStoreName ?? "",
+        homeStoreName: resolvedHomeStoreName,
         storeId: workStoreId,
         workStoreId,
         workStoreName: workStore.name ?? "",
         isHelp: !!isHelp,
-        hourlyWageAtWork: hourlyWageAtWork ?? 0,
+        hourlyWageAtWork: wageAtWork,
         type,
         timestamp: serverTimestamp(),
         latitude: gps.latitude ?? null,
         longitude: gps.longitude ?? null,
         isOutsideGps: !!gps.isOutsideGps,
       };
-      console.log("punch payload:", JSON.stringify({
-        employeeId: employee.id,
-        employeeCode: employee.employeeCode,
-        homeStoreId: employee.storeId,
-        workStoreId,
-        isHelp: employee.storeId !== workStoreId,
-        hourlyWageAtWork,
-      }));
       await addDoc(collection(db, "clockLogs"), payload);
 
+      // ローカル state を直接更新（Firestore 再取得なし）
       setLastPunchType(type);
       setSuccessMessage("打刻しました");
 
