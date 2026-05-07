@@ -257,14 +257,13 @@ function ClockPageContent() {
         query(
           collection(db, "employees"),
           where("employeeCode", "==", code),
-          where("status", "==", "active"),
           limit(1),
         ),
       );
 
       const found = snap.docs
         .map((d) => ({ id: d.id, ...(d.data() as Omit<EmployeeDoc, "id">) }))
-        .find((e) => e.isDeleted !== true);
+        .find((e) => e.status === "active" && e.isDeleted !== true);
 
       if (!found) {
         setErrorMessage("社員番号が見つかりません");
