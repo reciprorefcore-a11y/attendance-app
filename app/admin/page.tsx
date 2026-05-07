@@ -59,6 +59,7 @@ type TimecardRow = {
 
 type EmployeeRow = Employee & { id: string; hourlyWage?: number | null; hasManagerAccount?: boolean; managerUid?: string | null; accountRole?: "manager" | "area_manager" | "fc_manager" | null; accountStoreIds?: string[] };
 type StoreRow = Store & { id: string };
+type AccountManagerRow = { uid: string; name?: string; email?: string; role: "area_manager" | "fc_manager"; storeId?: string; storeIds?: string[] };
 
 type AttendanceRow = {
   key: string;
@@ -564,16 +565,19 @@ export default function AdminPage() {
     gpsEnabled: true,
     isFc: false,
   });
-  const [multiAccountOpen, setMultiAccountOpen] = useState(false);
-  const [multiAccountForm, setMultiAccountForm] = useState({
+  const [accountManagers, setAccountManagers] = useState<AccountManagerRow[]>([]);
+  const [accountMgrForm, setAccountMgrForm] = useState({
     name: "",
     email: "",
     password: "",
     role: "area_manager" as "area_manager" | "fc_manager",
     storeIds: [] as string[],
   });
-  const [multiAccountMsg, setMultiAccountMsg] = useState("");
-  const [multiAccountCreating, setMultiAccountCreating] = useState(false);
+  const [accountMgrMsg, setAccountMgrMsg] = useState("");
+  const [accountMgrWorking, setAccountMgrWorking] = useState(false);
+  const [accountMgrEditUid, setAccountMgrEditUid] = useState<string | null>(null);
+  const [accountMgrEditStoreIds, setAccountMgrEditStoreIds] = useState<string[]>([]);
+  const [employeeFormError, setEmployeeFormError] = useState("");
   const [logoUploadState, setLogoUploadState] = useState<{
     isUploading: boolean;
     message: string;
@@ -663,6 +667,15 @@ export default function AdminPage() {
         setTimecards(nextTimecards);
         setEmployees(nextEmployees);
         setStores(nextStores);
+      }
+
+      if (isAdmin) {
+        const acctSnap = await getDocs(
+          query(collection(db, "users"), where("role", "in", ["area_manager", "fc_manager"])),
+        );
+        setAccountManagers(
+          acctSnap.docs.map((d) => ({ uid: d.id, ...(d.data() as Omit<AccountManagerRow, "uid">) })),
+        );
       }
     } catch (error) {
       console.error("admin dashboard fetch failed", error);
@@ -890,21 +903,24 @@ export default function AdminPage() {
   const saveEmployee = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const nextStoreId = managerStoreId || employeeForm.storeId;
-    if (!employeeForm.name.trim() || !employeeForm.employeeCode.trim() || !nextStoreId) {
-      setMessage("従業員の氏名、社員コード、所属店舗を入力してください。");
-      return;
-    }
-    if (!/^\d{4}$/.test(employeeForm.pin.trim())) {
-      setMessage("PINは4桁の数字で入力してください。");
+    const missing: string[] = [];
+    if (!employeeForm.name.trim()) missing.push("氏名");
+    if (!employeeForm.employeeCode.trim()) missing.push("社員コード");
+    if (!nextStoreId) missing.push("所属店舗");
+    if (!employeeForm.pin.trim()) missing.push("PIN");
+    else if (!/^\d{4}$/.test(employeeForm.pin.trim())) missing.push("PIN（4桁の数字）");
+    if (missing.length > 0) {
+      setEmployeeFormError(`未入力または不正なフィールド：${missing.join("、")}`);
       return;
     }
     if (managerStoreId && employeeEditingId) {
       const target = employees.find((employee) => employee.id === employeeEditingId);
       if (!target || target.storeId !== managerStoreId) {
-        setMessage("自店舗以外の従業員は編集できません。");
+        setEmployeeFormError("自店舗以外の従業員は編集できません。");
         return;
       }
     }
+    setEmployeeFormError("");
     const payload = {
       name: employeeForm.name.trim(),
       nameKana: employeeForm.nameKana.trim(),
@@ -924,11 +940,12 @@ export default function AdminPage() {
       }
       setEmployeeEditingId("");
       setEmployeeForm({ name: "", nameKana: "", employeeCode: "", pin: "", storeId: "", baseWage: "", status: "active", transportationCost: "", transportationType: "daily" });
+      setEmployeeFormError("");
       setMessage("従業員を保存しました。");
       await load();
     } catch (error) {
       console.error("employee save failed", error);
-      setMessage("従業員の保存に失敗しました。");
+      setEmployeeFormError("従業員の保存に失敗しました。");
     }
   };
 
@@ -1108,15 +1125,15 @@ export default function AdminPage() {
     }
   };
 
-  const createMultiStoreAccount = async () => {
-    const { name, email, password, role, storeIds: ids } = multiAccountForm;
-    if (!name.trim() || !email.trim() || !password.trim() || ids.length === 0) {
-      setMultiAccountMsg("名前・メール・パスワード・担当店舗を入力してください。");
+  const createAccountManager = async () => {
+    const { name, email, password, role, storeIds } = accountMgrForm;
+    if (!name.trim() || !email.trim() || !password.trim() || storeIds.length === 0) {
+      setAccountMgrMsg("氏名・メール・パスワード・担当店舗をすべて入力してください。");
       return;
     }
-    setMultiAccountCreating(true);
-    setMultiAccountMsg("");
-    const secondaryApp = initializeApp(firebaseConfig, `multi-account-${Date.now()}`);
+    setAccountMgrWorking(true);
+    setAccountMgrMsg("");
+    const secondaryApp = initializeApp(firebaseConfig, `acct-mgr-${Date.now()}`);
     const secondaryAuth = getAuth(secondaryApp);
     try {
       const credential = await createUserWithEmailAndPassword(secondaryAuth, email.trim(), password);
@@ -1125,22 +1142,63 @@ export default function AdminPage() {
         name: name.trim(),
         email: email.trim(),
         role,
-        storeId: ids[0] ?? "",
-        storeIds: ids,
+        storeId: storeIds[0] ?? "",
+        storeIds,
         createdAt: serverTimestamp(),
       });
-      setMultiAccountMsg("アカウントを作成しました。IDとパスワードを本人に渡してください。");
-      setMultiAccountForm({ name: "", email: "", password: "", role: "area_manager", storeIds: [] });
+      setAccountMgrMsg("アカウントを作成しました。IDとパスワードを本人に渡してください。");
+      setAccountMgrForm({ name: "", email: "", password: "", role: "area_manager", storeIds: [] });
+      await load();
     } catch (err) {
       const code = (err as { code?: string }).code;
-      setMultiAccountMsg(
+      setAccountMgrMsg(
         code === "auth/email-already-in-use" ? "このメールアドレスはすでに使用されています"
         : code === "auth/weak-password" ? "パスワードは6文字以上で入力してください"
         : "アカウント作成に失敗しました",
       );
     } finally {
       await deleteApp(secondaryApp);
-      setMultiAccountCreating(false);
+      setAccountMgrWorking(false);
+    }
+  };
+
+  const deleteAccountManager = async (acct: AccountManagerRow) => {
+    if (!window.confirm(`${acct.name ?? acct.email} のアカウントを削除しますか？`)) return;
+    setAccountMgrWorking(true);
+    try {
+      await deleteDoc(doc(db, "users", acct.uid));
+      try {
+        const idToken = await auth.currentUser?.getIdToken();
+        if (idToken) {
+          await fetch("/api/delete-manager", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
+            body: JSON.stringify({ uid: acct.uid }),
+          });
+        }
+      } catch (err) {
+        console.error("auth delete api call failed", err);
+      }
+      await load();
+    } catch (err) {
+      console.error("account manager deletion failed", err);
+      setAccountMgrMsg("削除に失敗しました。");
+    } finally {
+      setAccountMgrWorking(false);
+    }
+  };
+
+  const saveAccountManagerStores = async (uid: string) => {
+    try {
+      await updateDoc(doc(db, "users", uid), {
+        storeIds: accountMgrEditStoreIds,
+        storeId: accountMgrEditStoreIds[0] ?? "",
+      });
+      setAccountMgrEditUid(null);
+      await load();
+    } catch (err) {
+      console.error("account manager store update failed", err);
+      setAccountMgrMsg("担当店舗の更新に失敗しました。");
     }
   };
 
@@ -1670,11 +1728,11 @@ export default function AdminPage() {
                 </DataTable>
               </section>
             )}
-            <form onSubmit={saveEmployee} style={styles.editForm}>
+            <form onSubmit={saveEmployee} noValidate style={styles.editForm}>
               <label style={styles.label}>氏名<input value={employeeForm.name} onChange={(e) => setEmployeeForm({ ...employeeForm, name: e.target.value })} style={styles.input} /></label>
               <label style={styles.label}>ひらがな<input value={employeeForm.nameKana} onChange={(e) => setEmployeeForm({ ...employeeForm, nameKana: e.target.value })} style={styles.input} /></label>
               <label style={styles.label}>社員コード<input value={employeeForm.employeeCode} onChange={(e) => setEmployeeForm({ ...employeeForm, employeeCode: e.target.value })} style={styles.input} /></label>
-              <label style={styles.label}>PIN（4桁）<input inputMode="numeric" maxLength={4} pattern="[0-9]{4}" value={employeeForm.pin} onChange={(e) => setEmployeeForm({ ...employeeForm, pin: e.target.value.replace(/\D/g, "").slice(0, 4) })} style={styles.input} /></label>
+              <label style={styles.label}>PIN（4桁）<input inputMode="numeric" maxLength={4} value={employeeForm.pin} onChange={(e) => setEmployeeForm({ ...employeeForm, pin: e.target.value.replace(/\D/g, "").slice(0, 4) })} style={styles.input} /></label>
               <label style={styles.label}>所属店舗
                 <select
                   value={managerStoreId || employeeForm.storeId}
@@ -1682,7 +1740,7 @@ export default function AdminPage() {
                   onChange={(e) => setEmployeeForm({ ...employeeForm, storeId: e.target.value })}
                   style={styles.input}
                 >
-                  <option value="">選択</option>
+                  <option value="">選択してください</option>
                   {stores.map((store) => <option key={store.id} value={store.id}>{getStoreName(store)}</option>)}
                 </select>
               </label>
@@ -1700,65 +1758,134 @@ export default function AdminPage() {
                   <option value="monthly">定期代</option>
                 </select>
               </label>
-              <button type="submit" style={styles.button}>{employeeEditingId ? "更新" : "登録"}</button>
+              <div style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 8 }}>
+                {employeeFormError && (
+                  <p style={{ margin: 0, color: "#B91C1C", fontWeight: 700, fontSize: 13, padding: "8px 12px", background: "#FEF2F2", borderRadius: 8, border: "1px solid #FCA5A5" }}>
+                    {employeeFormError}
+                  </p>
+                )}
+                <button type="submit" style={styles.button}>{employeeEditingId ? "更新" : "登録"}</button>
+              </div>
             </form>
             {isAdmin && (
-              <div style={{ marginTop: 24 }}>
-                <button
-                  type="button"
-                  onClick={() => setMultiAccountOpen(!multiAccountOpen)}
-                  style={styles.secondaryButton}
-                >
-                  {multiAccountOpen ? "閉じる" : "エリア・FCマネージャーアカウント作成"}
-                </button>
-                {multiAccountOpen && (
-                  <div style={{ ...styles.editForm, marginTop: 12 }}>
-                    <label style={styles.label}>氏名<input value={multiAccountForm.name} onChange={(e) => setMultiAccountForm({ ...multiAccountForm, name: e.target.value })} style={styles.input} /></label>
-                    <label style={styles.label}>メールアドレス<input type="email" value={multiAccountForm.email} onChange={(e) => setMultiAccountForm({ ...multiAccountForm, email: e.target.value })} style={styles.input} /></label>
-                    <label style={styles.label}>パスワード（6文字以上）<input type="password" value={multiAccountForm.password} onChange={(e) => setMultiAccountForm({ ...multiAccountForm, password: e.target.value })} style={styles.input} /></label>
-                    <label style={styles.label}>権限
-                      <select value={multiAccountForm.role} onChange={(e) => setMultiAccountForm({ ...multiAccountForm, role: e.target.value as "area_manager" | "fc_manager", storeIds: [] })} style={styles.input}>
-                        <option value="area_manager">エリアマネージャー</option>
-                        <option value="fc_manager">FCマネージャー</option>
-                      </select>
-                    </label>
-                    <div style={styles.label}>
-                      <span style={styles.labelText}>担当店舗（複数選択可）</span>
-                      <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
-                        {stores
-                          .filter((s) => multiAccountForm.role === "fc_manager" ? s.isFc === true : true)
-                          .map((store) => (
-                            <label key={store.id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer" }}>
-                              <input
-                                type="checkbox"
-                                checked={multiAccountForm.storeIds.includes(store.id)}
-                                onChange={(e) => {
-                                  const next = e.target.checked
-                                    ? [...multiAccountForm.storeIds, store.id]
-                                    : multiAccountForm.storeIds.filter((id) => id !== store.id);
-                                  setMultiAccountForm({ ...multiAccountForm, storeIds: next });
-                                }}
-                              />
-                              {getStoreName(store)}{store.isFc ? " (FC)" : ""}
-                            </label>
-                          ))}
-                      </div>
-                    </div>
-                    {multiAccountMsg && (
-                      <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: multiAccountMsg.includes("作成") ? "#047857" : "#B91C1C" }}>
-                        {multiAccountMsg}
-                      </p>
-                    )}
-                    <button
-                      type="button"
-                      disabled={multiAccountCreating}
-                      onClick={createMultiStoreAccount}
-                      style={styles.button}
-                    >
-                      {multiAccountCreating ? "作成中..." : "アカウント作成"}
-                    </button>
-                  </div>
+              <div style={{ marginTop: 32 }}>
+                <h3 style={styles.subTitle}>アカウント管理（エリア・FCマネージャー）</h3>
+                <p style={styles.helpText}>users コレクションから role が area_manager / fc_manager のアカウントを管理します。</p>
+
+                {accountManagers.length > 0 && (
+                  <DataTable headers={["氏名", "メール", "権限", "担当店舗", "操作"]}>
+                    {accountManagers.map((acct) => {
+                      const isEditing = accountMgrEditUid === acct.uid;
+                      const mgrStores = stores.filter((s) => acct.role === "fc_manager" ? s.isFc === true : true);
+                      return (
+                        <tr key={acct.uid}>
+                          <td style={styles.td}>{acct.name ?? "—"}</td>
+                          <td style={styles.td}>{acct.email ?? "—"}</td>
+                          <td style={styles.td}>
+                            <span style={acct.role === "fc_manager" ? styles.fcBadge : styles.chainBadge}>
+                              {acct.role}
+                            </span>
+                          </td>
+                          <td style={{ ...styles.td, minWidth: 200 }}>
+                            {isEditing ? (
+                              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                                {mgrStores.map((s) => (
+                                  <label key={s.id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer" }}>
+                                    <input
+                                      type="checkbox"
+                                      checked={accountMgrEditStoreIds.includes(s.id)}
+                                      onChange={(e) => {
+                                        const next = e.target.checked
+                                          ? [...accountMgrEditStoreIds, s.id]
+                                          : accountMgrEditStoreIds.filter((id) => id !== s.id);
+                                        setAccountMgrEditStoreIds(next);
+                                      }}
+                                    />
+                                    {getStoreName(s)}{s.isFc ? " (FC)" : ""}
+                                  </label>
+                                ))}
+                                <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+                                  <button type="button" onClick={() => saveAccountManagerStores(acct.uid)} style={styles.linkButton}>保存</button>
+                                  <button type="button" onClick={() => setAccountMgrEditUid(null)} style={styles.linkButton}>キャンセル</button>
+                                </div>
+                              </div>
+                            ) : (
+                              <span style={{ fontSize: 13 }}>
+                                {(acct.storeIds ?? [acct.storeId ?? ""].filter(Boolean)).map((sid) => storeNameById(sid)).join("、") || "—"}
+                              </span>
+                            )}
+                          </td>
+                          <td style={styles.td}>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setAccountMgrEditUid(acct.uid);
+                                setAccountMgrEditStoreIds(acct.storeIds ?? (acct.storeId ? [acct.storeId] : []));
+                              }}
+                              style={styles.linkButton}
+                            >
+                              店舗変更
+                            </button>
+                            <button
+                              type="button"
+                              disabled={accountMgrWorking}
+                              onClick={() => deleteAccountManager(acct)}
+                              style={{ ...styles.linkButton, color: "#B91C1C", borderColor: "#FCA5A5", background: "#FEF2F2" }}
+                            >
+                              削除
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </DataTable>
                 )}
+                {accountManagers.length === 0 && <p style={styles.empty}>アカウントなし</p>}
+
+                <h4 style={{ margin: "20px 0 8px", fontSize: 14, fontWeight: 700 }}>新規アカウント追加</h4>
+                <div style={{ ...styles.editForm, marginTop: 0 }}>
+                  <label style={styles.label}>氏名<input value={accountMgrForm.name} onChange={(e) => setAccountMgrForm({ ...accountMgrForm, name: e.target.value })} style={styles.input} /></label>
+                  <label style={styles.label}>メールアドレス<input type="email" value={accountMgrForm.email} onChange={(e) => setAccountMgrForm({ ...accountMgrForm, email: e.target.value })} style={styles.input} /></label>
+                  <label style={styles.label}>パスワード（6文字以上）<input type="password" value={accountMgrForm.password} onChange={(e) => setAccountMgrForm({ ...accountMgrForm, password: e.target.value })} style={styles.input} /></label>
+                  <label style={styles.label}>権限
+                    <select value={accountMgrForm.role} onChange={(e) => setAccountMgrForm({ ...accountMgrForm, role: e.target.value as "area_manager" | "fc_manager", storeIds: [] })} style={styles.input}>
+                      <option value="area_manager">エリアマネージャー（area_manager）</option>
+                      <option value="fc_manager">FCマネージャー（fc_manager）</option>
+                    </select>
+                  </label>
+                  <div style={styles.label}>
+                    <span style={styles.labelText}>
+                      担当店舗（複数選択）{accountMgrForm.role === "fc_manager" ? "※FC店舗のみ" : ""}
+                    </span>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+                      {stores
+                        .filter((s) => accountMgrForm.role === "fc_manager" ? s.isFc === true : true)
+                        .map((s) => (
+                          <label key={s.id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer" }}>
+                            <input
+                              type="checkbox"
+                              checked={accountMgrForm.storeIds.includes(s.id)}
+                              onChange={(e) => {
+                                const next = e.target.checked
+                                  ? [...accountMgrForm.storeIds, s.id]
+                                  : accountMgrForm.storeIds.filter((id) => id !== s.id);
+                                setAccountMgrForm({ ...accountMgrForm, storeIds: next });
+                              }}
+                            />
+                            {getStoreName(s)}{s.isFc ? " (FC)" : ""}
+                          </label>
+                        ))}
+                    </div>
+                  </div>
+                  {accountMgrMsg && (
+                    <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: accountMgrMsg.includes("作成") || accountMgrMsg.includes("成功") ? "#047857" : "#B91C1C" }}>
+                      {accountMgrMsg}
+                    </p>
+                  )}
+                  <button type="button" disabled={accountMgrWorking} onClick={createAccountManager} style={styles.button}>
+                    {accountMgrWorking ? "作成中..." : "アカウント作成"}
+                  </button>
+                </div>
               </div>
             )}
             <DataTable headers={["社員コード", "氏名", "ひらがな", "所属店舗", "状態", "基本時給", "交通費", "権限", "操作"]}>
