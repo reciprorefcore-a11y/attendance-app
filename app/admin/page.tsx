@@ -629,6 +629,42 @@ export default function AdminPage() {
     if (!isAdmin && !isFcManager && !isAreaManager && !isManager) return;
     setIsLoading(true);
     setErrorMessage("");
+
+    // ── Phase 1: stores / employees（allow read: if true → 必ず成功）────────
+    try {
+      const [employeeSnapshot, storeSnapshot] = await Promise.all([
+        getDocs(query(collection(db, "employees"), orderBy("employeeCode"))),
+        getDocs(collection(db, "stores")),
+      ]);
+      const nextEmployees = employeeSnapshot.docs.map((d) => ({
+        id: d.id,
+        ...(d.data() as Employee),
+      }));
+      const nextStores = storeSnapshot.docs.map((d) => ({
+        id: d.id,
+        ...(d.data() as Store),
+      }));
+
+      if (isManager) {
+        setEmployees(nextEmployees.filter((emp) => emp.storeId === managerStoreId));
+        setStores(nextStores.filter((store) => store.id === managerStoreId));
+        setStoreFilter(managerStoreId);
+      } else if (isFcManager || isAreaManager) {
+        setEmployees(nextEmployees.filter((emp) => myStoreIds.includes(emp.storeId)));
+        setStores(nextStores.filter((store) => myStoreIds.includes(store.id)));
+      } else {
+        setEmployees(nextEmployees);
+        setStores(nextStores);
+      }
+    } catch (error) {
+      console.error("employees/stores fetch failed", error);
+      const detail = error instanceof Error ? error.message : String(error);
+      setErrorMessage(`店舗・従業員データ取得に失敗しました: ${detail}`);
+      setIsLoading(false);
+      return;
+    }
+
+    // ── Phase 2: clockLogs（Firestoreルールによる権限制御）──────────────────
     try {
       const clockLogsQuery = isAdmin
         ? query(collection(db, "clockLogs"), orderBy("timestamp", "desc"))
@@ -636,54 +672,40 @@ export default function AdminPage() {
           ? query(collection(db, "clockLogs"), where("storeId", "in", myStoreIds))
           : query(collection(db, "clockLogs"), where("storeId", "==", managerStoreId));
 
-      const [timecardSnapshot, employeeSnapshot, storeSnapshot] = await Promise.all([
-        getDocs(clockLogsQuery),
-        getDocs(query(collection(db, "employees"), orderBy("employeeCode"))),
-        getDocs(collection(db, "stores")),
-      ]);
-      const nextTimecards = timecardSnapshot.docs.map((timecardDoc) => ({
-        id: timecardDoc.id,
-        ...(timecardDoc.data() as Omit<TimecardRow, "id">),
-      }));
-      const nextEmployees = employeeSnapshot.docs.map((employeeDoc) => ({
-        id: employeeDoc.id,
-        ...(employeeDoc.data() as Employee),
-      }));
-      const nextStores = storeSnapshot.docs.map((storeDoc) => ({
-        id: storeDoc.id,
-        ...(storeDoc.data() as Store),
+      const timecardSnapshot = await getDocs(clockLogsQuery);
+      const nextTimecards = timecardSnapshot.docs.map((d) => ({
+        id: d.id,
+        ...(d.data() as Omit<TimecardRow, "id">),
       }));
 
       if (isManager) {
         setTimecards(nextTimecards.filter((row) => row.storeId === managerStoreId));
-        setEmployees(nextEmployees.filter((emp) => emp.storeId === managerStoreId));
-        setStores(nextStores.filter((store) => store.id === managerStoreId));
-        setStoreFilter(managerStoreId);
       } else if (isFcManager || isAreaManager) {
         setTimecards(nextTimecards.filter((row) => myStoreIds.includes(row.storeId)));
-        setEmployees(nextEmployees.filter((emp) => myStoreIds.includes(emp.storeId)));
-        setStores(nextStores.filter((store) => myStoreIds.includes(store.id)));
       } else {
         setTimecards(nextTimecards);
-        setEmployees(nextEmployees);
-        setStores(nextStores);
       }
+    } catch (error) {
+      console.error("clockLogs fetch failed", error);
+      const detail = error instanceof Error ? error.message : String(error);
+      setErrorMessage(`打刻データ取得に失敗しました（Firestoreルールを確認してください）: ${detail}`);
+    }
 
-      if (isAdmin) {
+    // ── Phase 3: account managers（admin のみ）───────────────────────────────
+    if (isAdmin) {
+      try {
         const acctSnap = await getDocs(
           query(collection(db, "users"), where("role", "in", ["area_manager", "fc_manager"])),
         );
         setAccountManagers(
           acctSnap.docs.map((d) => ({ uid: d.id, ...(d.data() as Omit<AccountManagerRow, "uid">) })),
         );
+      } catch (error) {
+        console.error("account managers fetch failed", error);
       }
-    } catch (error) {
-      console.error("admin dashboard fetch failed", error);
-      const detail = error instanceof Error ? error.message : String(error);
-      setErrorMessage(`データ取得に失敗しました: ${detail}`);
-    } finally {
-      setIsLoading(false);
     }
+
+    setIsLoading(false);
   };
 
   useEffect(() => {
