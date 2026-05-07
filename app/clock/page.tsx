@@ -107,7 +107,6 @@ function ClockPageContent() {
   const [isHelp, setIsHelp] = useState(false);
 
   const [lastPunchType, setLastPunchType] = useState<ClockType | null>(null);
-  const [isLastPunchLoading, setIsLastPunchLoading] = useState(false);
 
   const [gps, setGps] = useState<GpsState>({
     latitude: null,
@@ -248,7 +247,7 @@ function ClockPageContent() {
         collection(db, "clockLogs"),
         where("employeeId", "==", employeeId),
         orderBy("timestamp", "desc"),
-        limit(10),
+        limit(5),
       ),
     );
     const lastDoc = lastSnap.docs.find((d) => d.data().isDeleted !== true);
@@ -304,14 +303,12 @@ function ClockPageContent() {
       setStep("confirm");
 
       // clockLogs の最新打刻は並行で非同期取得 → 完了後にボタン制御を更新
-      setIsLastPunchLoading(true);
       fetchLastPunch(emp.id)
         .then((lastType) => setLastPunchType(lastType))
         .catch((err) => {
           console.error("last punch fetch failed", err);
           setLastPunchType(null);
-        })
-        .finally(() => setIsLastPunchLoading(false));
+        });
     } catch (err) {
       console.error("employee search failed", err);
       setErrorMessage("検索に失敗しました。通信状態を確認してください。");
@@ -440,9 +437,6 @@ function ClockPageContent() {
             </div>
 
             <div style={styles.actions}>
-              {isLastPunchLoading && (
-                <p style={styles.loadingPunch}>打刻状態を確認中...</p>
-              )}
               {clockButtons.map((btn) => {
                 const allowed = allowedActions.includes(btn.type);
                 return (
@@ -604,13 +598,6 @@ const styles = {
   actions: {
     display: "grid",
     gap: 12,
-  },
-  loadingPunch: {
-    margin: 0,
-    fontSize: 13,
-    color: "#3BAED6",
-    fontWeight: 700,
-    textAlign: "center",
   },
   primaryButton: {
     minHeight: 72,
