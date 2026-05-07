@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
 import { useSearchParams } from "next/navigation";
 import { db } from "@/lib/firebase";
@@ -122,8 +122,6 @@ function ClockPageContent() {
   const [errorMessage, setErrorMessage] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
 
-  const resetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   // ─── 店舗データ購読 ──────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -216,14 +214,6 @@ function ClockPageContent() {
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 },
     );
   }, [workStore]);
-
-  // ─── タイマークリーンアップ ──────────────────────────────────────────────
-
-  useEffect(() => {
-    return () => {
-      if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
-    };
-  }, []);
 
   // ─── リセット ─────────────────────────────────────────────────────────────
 
@@ -365,8 +355,7 @@ function ClockPageContent() {
       // ローカル state を直接更新（Firestore 再取得なし）
       setLastPunchType(type);
       setSuccessMessage("打刻しました");
-
-      resetTimerRef.current = setTimeout(resetToInput, 3000);
+      setTimeout(resetToInput, 3000);
     } catch (err) {
       console.error("clock save failed", err);
       setErrorMessage("打刻の保存に失敗しました。通信状態を確認してください。");
