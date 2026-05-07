@@ -36,6 +36,8 @@ type TimecardRow = {
   id: string;
   storeId: string;
   storeName?: string;
+  workStoreId?: string;
+  workStoreName?: string;
   employeeCode?: string;
   employeeId?: string | null;
   employeeName?: string;
@@ -43,6 +45,7 @@ type TimecardRow = {
   clockType?: string;
   timestamp?: Timestamp | Date | string | null;
   createdAt?: Timestamp | Date | string | null;
+  hourlyWageAtWork?: number | null;
   hourlyWageSnapshot?: number | null;
   wageSource?: "store_help" | "employee_base";
   latitude?: number | null;
@@ -291,8 +294,8 @@ function normalizeClockType(row: TimecardRow) {
 }
 
 function buildAttendanceRows(timecards: TimecardRow[]) {
+  // 同一従業員・同一日付でグループ化
   const groups = new Map<string, TimecardRow[]>();
-
   for (const row of timecards) {
     const date = logDate(row);
     if (!date) continue;
@@ -304,78 +307,128 @@ function buildAttendanceRows(timecards: TimecardRow[]) {
   return Array.from(groups.entries())
     .map(([key, rows]) => {
       const sorted = rows.slice().sort((a, b) => {
-        const aDate = logDate(a)?.getTime() ?? 0;
-        const bDate = logDate(b)?.getTime() ?? 0;
-        return aDate - bDate;
+        return (logDate(a)?.getTime() ?? 0) - (logDate(b)?.getTime() ?? 0);
       });
       const first = sorted[0];
       const date = logDate(first);
-      const clockInRow = sorted.find((row) => normalizeClockType(row) === "clock_in") ?? null;
-      const clockOutRows = sorted.filter((row) => normalizeClockType(row) === "clock_out");
-      const clockOutRow = clockOutRows[clockOutRows.length - 1] ?? null;
-      const clockIn = clockInRow ? logDate(clockInRow) : null;
-      const clockOut = clockOutRow ? logDate(clockOutRow) : null;
-      const breakRanges: { start: Date; end: Date }[] = [];
+
+      // ── ペアリング（同一employeeId内でのみ） ──────────────────────────────
+      type WorkPair = {
+        clockIn: Date;
+        clockOut: Date | null;
+        hourlyWage: number | null;
+        workStoreName: string;
+        breakMinutes: number;
+        breakRanges: { start: Date; end: Date }[];
+      };
+
+      const pairs: WorkPair[] = [];
+      let currentPair: WorkPair | null = null;
       let breakStart: Date | null = null;
-      let breakMinutes = 0;
 
       for (const row of sorted) {
         const type = normalizeClockType(row);
         const rowDate = logDate(row);
         if (!rowDate) continue;
-        if (type === "break_start") breakStart = rowDate;
-        if (type === "break_end" && breakStart && rowDate > breakStart) {
-          breakMinutes += minutesBetween(breakStart, rowDate);
-          breakRanges.push({ start: breakStart, end: rowDate });
+
+        if (type === "clock_in") {
+          // 前のペアが未退勤でも新しいペアを開始
+          const hourlyWage =
+            typeof row.hourlyWageAtWork === "number" ? row.hourlyWageAtWork
+            : typeof row.hourlyWageSnapshot === "number" ? row.hourlyWageSnapshot
+            : null;
+          currentPair = {
+            clockIn: rowDate,
+            clockOut: null,
+            hourlyWage,
+            workStoreName: row.workStoreName ?? row.storeName ?? "",
+            breakMinutes: 0,
+            breakRanges: [],
+          };
+          pairs.push(currentPair);
+        } else if (type === "clock_out" && currentPair) {
+          currentPair.clockOut = rowDate;
+          currentPair = null;
+        } else if (type === "break_start") {
+          breakStart = rowDate;
+        } else if (type === "break_end" && breakStart && rowDate > breakStart) {
+          const mins = minutesBetween(breakStart, rowDate);
+          const range = { start: breakStart, end: rowDate };
+          if (currentPair) {
+            currentPair.breakMinutes += mins;
+            currentPair.breakRanges.push(range);
+          }
           breakStart = null;
         }
       }
 
-      let workMinutes = 0;
-      let nightMinutes = 0;
-      if (clockIn && clockOut && clockOut > clockIn) {
-        workMinutes = Math.max(0, minutesBetween(clockIn, clockOut) - breakMinutes);
-        const cursor = new Date(clockIn);
-        cursor.setHours(0, 0, 0, 0);
-        while (cursor < clockOut) {
-          const nightStart = new Date(cursor);
-          nightStart.setHours(22, 0, 0, 0);
-          const nightEnd = new Date(cursor);
-          nightEnd.setDate(nightEnd.getDate() + 1);
-          nightEnd.setHours(5, 0, 0, 0);
-          nightMinutes += overlapMinutes(clockIn, clockOut, nightStart, nightEnd);
-          for (const range of breakRanges) {
-            nightMinutes -= overlapMinutes(range.start, range.end, nightStart, nightEnd);
-          }
-          cursor.setDate(cursor.getDate() + 1);
+      // ── 集計（ペアごとに時給を適用） ──────────────────────────────────────
+      let totalWorkMinutes = 0;
+      let totalBreakMinutes = 0;
+      let totalNightMinutes = 0;
+      let totalWageAmount = 0;
+      let firstClockIn: Date | null = null;
+      let lastClockOut: Date | null = null;
+      const storeNamesOrdered: string[] = [];
+
+      for (const pair of pairs) {
+        if (!firstClockIn) firstClockIn = pair.clockIn;
+        if (pair.clockOut) lastClockOut = pair.clockOut;
+
+        if (pair.workStoreName && !storeNamesOrdered.includes(pair.workStoreName)) {
+          storeNamesOrdered.push(pair.workStoreName);
         }
-        nightMinutes = Math.max(0, nightMinutes);
+
+        if (pair.clockOut && pair.clockOut > pair.clockIn) {
+          const pairWork = Math.max(0, minutesBetween(pair.clockIn, pair.clockOut) - pair.breakMinutes);
+          totalWorkMinutes += pairWork;
+          totalBreakMinutes += pair.breakMinutes;
+
+          // 深夜時間（ペアごとに計算）
+          const cursor = new Date(pair.clockIn);
+          cursor.setHours(0, 0, 0, 0);
+          while (cursor < pair.clockOut) {
+            const nightStart = new Date(cursor);
+            nightStart.setHours(22, 0, 0, 0);
+            const nightEnd = new Date(cursor);
+            nightEnd.setDate(nightEnd.getDate() + 1);
+            nightEnd.setHours(5, 0, 0, 0);
+            let night = overlapMinutes(pair.clockIn, pair.clockOut, nightStart, nightEnd);
+            for (const range of pair.breakRanges) {
+              night -= overlapMinutes(range.start, range.end, nightStart, nightEnd);
+            }
+            totalNightMinutes += Math.max(0, night);
+            cursor.setDate(cursor.getDate() + 1);
+          }
+
+          // 給与（ペアごとの時給で計算して合算）
+          if (pair.hourlyWage !== null && pair.hourlyWage > 0) {
+            totalWageAmount += Math.round((pairWork / 60) * pair.hourlyWage);
+          }
+        }
       }
 
-      const wageSource = sorted.find((row) => typeof row.hourlyWageSnapshot === "number");
-      const hourlyWageSnapshot = wageSource?.hourlyWageSnapshot ?? null;
-      const wageAmount =
-        typeof hourlyWageSnapshot === "number"
-          ? Math.round((workMinutes / 60) * hourlyWageSnapshot)
-          : 0;
+      // 複数店舗は「店舗A / 店舗B」形式で表示
+      const storeName = storeNamesOrdered.join(" / ");
+      const isMissingClockOut = pairs.some((p) => p.clockIn && !p.clockOut);
 
       return {
         key,
         date: date ? dateKey(date) : "",
         storeId: first.storeId,
-        storeName: first.storeId,
+        storeName,
         employeeKey: first.employeeId || first.employeeCode || first.employeeName || "",
         employeeCode: first.employeeCode || "",
         employeeName: first.employeeName || "",
-        clockIn,
-        clockOut,
-        breakMinutes,
-        workMinutes,
-        nightMinutes,
-        hourlyWageSnapshot,
-        wageAmount,
+        clockIn: firstClockIn,
+        clockOut: lastClockOut,
+        breakMinutes: totalBreakMinutes,
+        workMinutes: totalWorkMinutes,
+        nightMinutes: totalNightMinutes,
+        hourlyWageSnapshot: pairs[0]?.hourlyWage ?? null,
+        wageAmount: totalWageAmount,
         isOutsideGps: sorted.some((row) => row.isOutsideGps),
-        isMissingClockOut: Boolean(clockIn && !clockOut),
+        isMissingClockOut,
         logs: sorted,
       } satisfies AttendanceRow;
     })
@@ -1471,7 +1524,7 @@ export default function AdminPage() {
               {attendanceRows.map((row) => (
                 <tr key={row.key} style={row.isOutsideGps ? styles.warningRow : undefined}>
                   <td style={styles.td}>{row.date}</td>
-                  <td style={styles.td}>{storeNameById(row.storeId)}</td>
+                  <td style={styles.td}>{row.storeName || storeNameById(row.storeId)}</td>
                   <td style={row.isMissingClockOut ? styles.dangerTd : styles.td}>
                     {row.employeeName || row.employeeKey}
                     {row.isMissingClockOut && <span style={styles.dangerBadge}>未退勤</span>}
