@@ -258,7 +258,7 @@ function ClockPageContent() {
         query(
           collection(db, "employees"),
           where("employeeCode", "==", code),
-          limit(1),
+          limit(3),
         ),
       );
 
