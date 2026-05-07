@@ -217,6 +217,21 @@ function ClockPageContent() {
     setSuccessMessage("");
   };
 
+  // ─── 直前打刻取得（非同期・並行） ──────────────────────────────────────────
+
+  const fetchLastPunch = async (employeeId: string): Promise<ClockType | null> => {
+    const lastSnap = await getDocs(
+      query(
+        collection(db, "clockLogs"),
+        where("employeeId", "==", employeeId),
+        orderBy("timestamp", "desc"),
+        limit(10),
+      ),
+    );
+    const lastDoc = lastSnap.docs.find((d) => d.data().isDeleted !== true);
+    return lastDoc ? ((lastDoc.data().type as ClockType) ?? null) : null;
+  };
+
   // ─── 社員番号確認 ────────────────────────────────────────────────────────
 
   const handleConfirm = async () => {
@@ -258,32 +273,22 @@ function ClockPageContent() {
         setHomeStoreName(workStore?.name ?? "");
       }
 
+      // 従業員確認完了 → 即座に打刻画面を表示（lastPunchType は null のまま全ボタン有効）
       setEmployee(emp);
       setIsHelp(helpFlag);
       setHourlyWageAtWork(wageAtWork);
-
-      // 直前打刻を取得して allowedActions を決定
-      setIsLastPunchLoading(true);
-      try {
-        const lastSnap = await getDocs(
-          query(
-            collection(db, "clockLogs"),
-            where("employeeId", "==", emp.id),
-            orderBy("timestamp", "desc"),
-            limit(10),
-          ),
-        );
-        // isDeleted フィールドが存在しない旧レコードも含め、論理削除されていない最新打刻を取得
-        const lastDoc = lastSnap.docs.find((d) => d.data().isDeleted !== true);
-        setLastPunchType(lastDoc ? ((lastDoc.data().type as ClockType) ?? null) : null);
-      } catch (err) {
-        console.error("last punch fetch failed", err);
-        setLastPunchType(null);
-      } finally {
-        setIsLastPunchLoading(false);
-      }
-
+      setLastPunchType(null);
       setStep("confirm");
+
+      // clockLogs の最新打刻は並行で非同期取得 → 完了後にボタン制御を更新
+      setIsLastPunchLoading(true);
+      fetchLastPunch(emp.id)
+        .then((lastType) => setLastPunchType(lastType))
+        .catch((err) => {
+          console.error("last punch fetch failed", err);
+          setLastPunchType(null);
+        })
+        .finally(() => setIsLastPunchLoading(false));
     } catch (err) {
       console.error("employee search failed", err);
       setErrorMessage("検索に失敗しました。通信状態を確認してください。");
@@ -411,33 +416,32 @@ function ClockPageContent() {
               {isHelp && <p style={styles.storeInfoRow}>勤務：{workStore.name}</p>}
             </div>
 
-            {isLastPunchLoading ? (
-              <p style={styles.info}>打刻状態を確認中...</p>
-            ) : (
-              <div style={styles.actions}>
-                {clockButtons.map((btn) => {
-                  const allowed = allowedActions.includes(btn.type);
-                  return (
-                    <button
-                      key={btn.type}
-                      type="button"
-                      onClick={() => punch(btn.type)}
-                      disabled={isSubmitting || !allowed}
-                      style={{
-                        ...(btn.tone === "primary"
-                          ? styles.primaryButton
-                          : btn.tone === "dark"
-                            ? styles.darkButton
-                            : styles.lightButton),
-                        ...(!allowed ? styles.disabledButton : {}),
-                      }}
-                    >
-                      {btn.label}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
+            <div style={styles.actions}>
+              {isLastPunchLoading && (
+                <p style={styles.loadingPunch}>打刻状態を確認中...</p>
+              )}
+              {clockButtons.map((btn) => {
+                const allowed = allowedActions.includes(btn.type);
+                return (
+                  <button
+                    key={btn.type}
+                    type="button"
+                    onClick={() => punch(btn.type)}
+                    disabled={isSubmitting || !allowed}
+                    style={{
+                      ...(btn.tone === "primary"
+                        ? styles.primaryButton
+                        : btn.tone === "dark"
+                          ? styles.darkButton
+                          : styles.lightButton),
+                      ...(!allowed ? styles.disabledButton : {}),
+                    }}
+                  >
+                    {btn.label}
+                  </button>
+                );
+              })}
+            </div>
 
             <button type="button" onClick={resetToInput} style={styles.backButton}>
               ← 戻る
@@ -577,6 +581,13 @@ const styles = {
   actions: {
     display: "grid",
     gap: 12,
+  },
+  loadingPunch: {
+    margin: 0,
+    fontSize: 13,
+    color: "#3BAED6",
+    fontWeight: 700,
+    textAlign: "center",
   },
   primaryButton: {
     minHeight: 72,
