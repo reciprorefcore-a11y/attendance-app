@@ -611,6 +611,7 @@ export default function AdminPage() {
   const isManager = profile?.role === "manager";
   const managerStoreId = isManager ? (profile?.storeId ?? "") : "";
   const myStoreIds = (isFcManager || isAreaManager) ? (profile?.storeIds ?? []) : [];
+  const isReadOnlyStore = isFcManager;
   const canChangeStoreFilter = isAdmin || isFcManager || isAreaManager;
   const areaManagerAllowedTabs: TabId[] = ["attendance", "employees", "edits", "exports"];
   const managerAllowedTabs: TabId[] = ["attendance", "employees", "edits"];
@@ -1262,37 +1263,71 @@ export default function AdminPage() {
     }
   };
 
+  const compressImage = (file: File): Promise<Blob> => {
+    return new Promise((resolve, reject) => {
+      const canvas = document.createElement("canvas");
+      const img = new window.Image();
+      img.onload = () => {
+        const MAX_SIZE = 800;
+        let width = img.width;
+        let height = img.height;
+        if (width > MAX_SIZE || height > MAX_SIZE) {
+          if (width > height) {
+            height = Math.round((height / width) * MAX_SIZE);
+            width = MAX_SIZE;
+          } else {
+            width = Math.round((width / height) * MAX_SIZE);
+            height = MAX_SIZE;
+          }
+        }
+        canvas.width = width;
+        canvas.height = height;
+        canvas.getContext("2d")?.drawImage(img, 0, 0, width, height);
+        canvas.toBlob(
+          (blob) => {
+            if (blob) resolve(blob);
+            else reject(new Error("canvas.toBlob failed"));
+          },
+          "image/jpeg",
+          0.8,
+        );
+      };
+      img.onerror = () => reject(new Error("image load failed"));
+      img.src = URL.createObjectURL(file);
+    });
+  };
+
   const uploadStoreLogo = async (file: File) => {
     const storeId = managerStoreId || storeForm.id.trim();
     if (!storeId) {
-      setLogoUploadState({
-        isUploading: false,
-        message: "",
-        error: "先にstoreIdを入力してください。",
-      });
+      setLogoUploadState({ isUploading: false, message: "", error: "先にstoreIdを入力してください。" });
       return;
     }
     if (managerStoreId && storeId !== managerStoreId) {
-      setLogoUploadState({
-        isUploading: false,
-        message: "",
-        error: "自店舗以外のロゴは変更できません。",
-      });
+      setLogoUploadState({ isUploading: false, message: "", error: "自店舗以外のロゴは変更できません。" });
       return;
     }
     if (!supportedLogoTypes.includes(file.type)) {
-      setLogoUploadState({
-        isUploading: false,
-        message: "",
-        error: "png / jpg / svg の画像を選択してください。",
-      });
+      setLogoUploadState({ isUploading: false, message: "", error: "png / jpg / svg の画像を選択してください。" });
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setLogoUploadState({ isUploading: false, message: "", error: "ファイルサイズが大きすぎます（5MB以下にしてください）。" });
       return;
     }
 
-    setLogoUploadState({ isUploading: true, message: "", error: "" });
+    setLogoUploadState({ isUploading: true, message: "アップロード中...", error: "" });
     try {
-      const storageRef = ref(storage, `store-logos/${storeId}.png`);
-      await uploadBytes(storageRef, file, { contentType: file.type });
+      const isSvg = file.type === "image/svg+xml";
+      const uploadBlob = isSvg ? file : await compressImage(file);
+      const storageRef = ref(storage, `store-logos/${storeId}.${isSvg ? "svg" : "jpg"}`);
+      const timeout = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("upload timeout")), 30000),
+      );
+      await Promise.race([
+        uploadBytes(storageRef, uploadBlob, { contentType: isSvg ? "image/svg+xml" : "image/jpeg" }),
+        timeout,
+      ]);
       const logoUrl = await getDownloadURL(storageRef);
       await setDoc(doc(db, "stores", storeId), { logoUrl }, { merge: true });
       setStoreForm((current) => ({ ...current, logoUrl }));
@@ -1300,10 +1335,13 @@ export default function AdminPage() {
       await load();
     } catch (error) {
       console.error("store logo upload failed", error);
+      const isTimeout = error instanceof Error && error.message === "upload timeout";
       setLogoUploadState({
         isUploading: false,
         message: "",
-        error: "ロゴ画像のアップロードに失敗しました。",
+        error: isTimeout
+          ? "アップロードがタイムアウトしました。回線状況を確認して再度お試しください。"
+          : "ロゴ画像のアップロードに失敗しました。",
       });
     }
   };
@@ -1962,9 +2000,14 @@ export default function AdminPage() {
                 /clock?storeId=1〜5 の確認に必要な stores/1〜5 と employees/dev-user を作成できます。
               </p>
             )}
+            {isReadOnlyStore && (
+              <p style={{ padding: "10px 14px", borderRadius: 10, background: "#FFF7ED", border: "1px solid #FCD34D", color: "#92400E", fontSize: 13, fontWeight: 700, marginBottom: 8 }}>
+                店舗情報の変更は本部管理者にお問い合わせください
+              </p>
+            )}
             <form onSubmit={saveStore} style={styles.editForm}>
-              <label style={styles.label}>storeId<input value={managerStoreId || storeForm.id} disabled={Boolean(storeEditingId) || Boolean(managerStoreId)} onChange={(e) => setStoreForm({ ...storeForm, id: e.target.value })} style={styles.input} /></label>
-              <label style={styles.label}>店舗名<input value={storeForm.name} onChange={(e) => setStoreForm({ ...storeForm, name: e.target.value })} style={styles.input} /></label>
+              <label style={styles.label}>storeId<input value={managerStoreId || storeForm.id} disabled={Boolean(storeEditingId) || Boolean(managerStoreId) || isReadOnlyStore} onChange={(e) => setStoreForm({ ...storeForm, id: e.target.value })} style={{ ...styles.input, ...(isReadOnlyStore ? { opacity: 0.6 } : {}) }} /></label>
+              <label style={styles.label}>店舗名<input value={storeForm.name} disabled={isReadOnlyStore} onChange={(e) => setStoreForm({ ...storeForm, name: e.target.value })} style={{ ...styles.input, ...(isReadOnlyStore ? { opacity: 0.6 } : {}) }} /></label>
               <div style={styles.logoUploadBox}>
                 <span style={styles.labelText}>ロゴ画像</span>
                 {storeForm.logoUrl ? (
@@ -1973,47 +2016,49 @@ export default function AdminPage() {
                 ) : (
                   <div style={styles.logoPlaceholder}>ロゴ未登録</div>
                 )}
-                <label style={styles.uploadButton}>
-                  {logoUploadState.isUploading ? "アップロード中..." : "ロゴ画像アップロード"}
-                  <input
-                    type="file"
-                    accept="image/png,image/jpeg,image/svg+xml"
-                    disabled={logoUploadState.isUploading}
-                    onChange={(event) => {
-                      const file = event.target.files?.[0];
-                      event.target.value = "";
-                      if (file) uploadStoreLogo(file);
-                    }}
-                    style={styles.fileInput}
-                  />
-                </label>
+                {!isReadOnlyStore && (
+                  <label style={styles.uploadButton}>
+                    {logoUploadState.isUploading ? "アップロード中..." : "ロゴ画像アップロード"}
+                    <input
+                      type="file"
+                      accept="image/png,image/jpeg,image/svg+xml"
+                      disabled={logoUploadState.isUploading}
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        event.target.value = "";
+                        if (file) uploadStoreLogo(file);
+                      }}
+                      style={styles.fileInput}
+                    />
+                  </label>
+                )}
                 {logoUploadState.message && <span style={styles.uploadSuccess}>{logoUploadState.message}</span>}
                 {logoUploadState.error && <span style={styles.uploadError}>{logoUploadState.error}</span>}
               </div>
-              <label style={styles.label}>緯度<input type="number" step="any" value={storeForm.latitude} onChange={(e) => setStoreForm({ ...storeForm, latitude: e.target.value })} style={styles.input} /></label>
-              <label style={styles.label}>経度<input type="number" step="any" value={storeForm.longitude} onChange={(e) => setStoreForm({ ...storeForm, longitude: e.target.value })} style={styles.input} /></label>
-              <button type="button" onClick={saveCurrentLocation} style={styles.secondaryButton}>現在地取得</button>
-              <label style={styles.label}>GPS半径<input type="number" value={storeForm.gpsRadiusMeters} onChange={(e) => setStoreForm({ ...storeForm, gpsRadiusMeters: e.target.value })} style={styles.input} /></label>
-              <label style={styles.label}>ヘルプ時給<input type="number" value={storeForm.helpWage} onChange={(e) => setStoreForm({ ...storeForm, helpWage: e.target.value })} style={styles.input} /></label>
+              <label style={styles.label}>緯度<input type="number" step="any" value={storeForm.latitude} disabled={isReadOnlyStore} onChange={(e) => setStoreForm({ ...storeForm, latitude: e.target.value })} style={{ ...styles.input, ...(isReadOnlyStore ? { opacity: 0.6 } : {}) }} /></label>
+              <label style={styles.label}>経度<input type="number" step="any" value={storeForm.longitude} disabled={isReadOnlyStore} onChange={(e) => setStoreForm({ ...storeForm, longitude: e.target.value })} style={{ ...styles.input, ...(isReadOnlyStore ? { opacity: 0.6 } : {}) }} /></label>
+              {!isReadOnlyStore && <button type="button" onClick={saveCurrentLocation} style={styles.secondaryButton}>現在地取得</button>}
+              <label style={styles.label}>GPS半径<input type="number" value={storeForm.gpsRadiusMeters} disabled={isReadOnlyStore} onChange={(e) => setStoreForm({ ...storeForm, gpsRadiusMeters: e.target.value })} style={{ ...styles.input, ...(isReadOnlyStore ? { opacity: 0.6 } : {}) }} /></label>
+              <label style={styles.label}>ヘルプ時給<input type="number" value={storeForm.helpWage} disabled={isReadOnlyStore} onChange={(e) => setStoreForm({ ...storeForm, helpWage: e.target.value })} style={{ ...styles.input, ...(isReadOnlyStore ? { opacity: 0.6 } : {}) }} /></label>
               <label style={styles.label}>active
-                <select value={storeForm.active ? "true" : "false"} onChange={(e) => setStoreForm({ ...storeForm, active: e.target.value === "true" })} style={styles.input}>
+                <select value={storeForm.active ? "true" : "false"} disabled={isReadOnlyStore} onChange={(e) => setStoreForm({ ...storeForm, active: e.target.value === "true" })} style={{ ...styles.input, ...(isReadOnlyStore ? { opacity: 0.6 } : {}) }}>
                   <option value="true">active</option>
                   <option value="false">inactive</option>
                 </select>
               </label>
               <label style={styles.label}>GPS打刻チェック
-                <select value={storeForm.gpsEnabled ? "true" : "false"} onChange={(e) => setStoreForm({ ...storeForm, gpsEnabled: e.target.value === "true" })} style={styles.input}>
+                <select value={storeForm.gpsEnabled ? "true" : "false"} disabled={isReadOnlyStore} onChange={(e) => setStoreForm({ ...storeForm, gpsEnabled: e.target.value === "true" })} style={{ ...styles.input, ...(isReadOnlyStore ? { opacity: 0.6 } : {}) }}>
                   <option value="true">ON（GPS確認あり）</option>
                   <option value="false">OFF（GPS確認なし）</option>
                 </select>
               </label>
               <label style={styles.label}>店舗種別
-                <select value={storeForm.isFc ? "true" : "false"} onChange={(e) => setStoreForm({ ...storeForm, isFc: e.target.value === "true" })} style={styles.input}>
+                <select value={storeForm.isFc ? "true" : "false"} disabled={isReadOnlyStore} onChange={(e) => setStoreForm({ ...storeForm, isFc: e.target.value === "true" })} style={{ ...styles.input, ...(isReadOnlyStore ? { opacity: 0.6 } : {}) }}>
                   <option value="false">直営</option>
                   <option value="true">FC</option>
                 </select>
               </label>
-              <button type="submit" style={styles.button}>{storeEditingId ? "更新" : "登録"}</button>
+              {!isReadOnlyStore && <button type="submit" style={styles.button}>{storeEditingId ? "更新" : "登録"}</button>}
             </form>
             <DataTable
               headers={[
