@@ -52,7 +52,6 @@ service cloud.firestore {
     match /stores/{storeId} {
       allow read:  if true;
       allow write: if isAdmin()
-                   || (isFcManager() && storeId in myStoreIds())
                    || (isManager() && myStoreId() == storeId);
     }
 
