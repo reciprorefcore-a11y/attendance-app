@@ -42,6 +42,7 @@ type EmployeeDoc = {
   hourlyWage?: number;
   baseHourlyWage?: number;
   status: "active" | "inactive" | "pending" | "rejected";
+  isDeleted?: boolean;
 };
 
 type GpsState = {
@@ -273,13 +274,16 @@ function ClockPageContent() {
         ),
       );
 
-      if (snap.empty) {
+      const found = snap.docs
+        .map((d) => ({ id: d.id, ...(d.data() as Omit<EmployeeDoc, "id">) }))
+        .find((e) => e.isDeleted !== true);
+
+      if (!found) {
         setErrorMessage("社員番号が見つかりません");
         return;
       }
 
-      const empDoc = snap.docs[0];
-      const emp: EmployeeDoc = { id: empDoc.id, ...(empDoc.data() as Omit<EmployeeDoc, "id">) };
+      const emp: EmployeeDoc = found;
 
       const homeStoreId = emp.storeId;
       const helpFlag = !!homeStoreId && homeStoreId !== workStoreId;
@@ -295,14 +299,15 @@ function ClockPageContent() {
         setHomeStoreName(workStore?.name ?? "");
       }
 
-      // 従業員確認完了 → 即座に打刻画面を表示（lastPunchType は null のまま全ボタン有効）
+      // 従業員確認完了 → 即座に打刻画面を表示
       setEmployee(emp);
       setIsHelp(helpFlag);
       setHourlyWageAtWork(wageAtWork);
       setLastPunchType(null);
       setStep("confirm");
+      setIsSearching(false);
 
-      // clockLogs の最新打刻は並行で非同期取得 → 完了後にボタン制御を更新
+      // clockLogs の最新打刻は画面表示後に非同期取得（ブロックしない）
       fetchLastPunch(emp.id)
         .then((lastType) => setLastPunchType(lastType))
         .catch((err) => {
@@ -312,7 +317,6 @@ function ClockPageContent() {
     } catch (err) {
       console.error("employee search failed", err);
       setErrorMessage("検索に失敗しました。通信状態を確認してください。");
-    } finally {
       setIsSearching(false);
     }
   };
