@@ -1927,7 +1927,7 @@ export default function AdminPage() {
               {storeForm.logoUrl && (
                 // eslint-disable-next-line @next/next/no-img-element
                 <div style={{ gridColumn: "1 / -1" }}>
-                  <img src={storeForm.logoUrl} alt={storeForm.name || "店舗ロゴ"} style={styles.logoPreviewLarge} />
+                  <img src={storeForm.logoUrl} alt={storeForm.name || "店舗ロゴ"} style={styles.logoPreviewLarge} onError={(e) => { e.currentTarget.src = "/assets/logo-placeholder.png"; }} />
                 </div>
               )}
               <label style={styles.label}>緯度<input type="number" step="any" value={storeForm.latitude} disabled={isReadOnlyStore} onChange={(e) => setStoreForm({ ...storeForm, latitude: e.target.value })} style={{ ...styles.input, ...(isReadOnlyStore ? { opacity: 0.6 } : {}) }} /></label>
@@ -1986,12 +1986,13 @@ export default function AdminPage() {
                     <td style={styles.td}>{getStoreRadius(store)}m</td>
                     <td style={styles.td}><span style={store.gpsEnabled === false ? styles.inactiveBadge : styles.activeBadge}>{store.gpsEnabled === false ? "GPS無効" : "GPS有効"}</span></td>
                     <td style={styles.td}>
-                      {store.logoUrl ? (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img src={store.logoUrl} alt={getStoreName(store)} style={styles.logoPreview} />
-                      ) : (
-                        <span style={styles.logoPlaceholderSmall}>未登録</span>
-                      )}
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={store.logoUrl || "/assets/logo-placeholder.png"}
+                        alt={getStoreName(store)}
+                        style={styles.logoPreview}
+                        onError={(e) => { e.currentTarget.src = "/assets/logo-placeholder.png"; }}
+                      />
                     </td>
                     <td style={styles.td}>{qrUrl}</td>
                     <td style={styles.td}>
