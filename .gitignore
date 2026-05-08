@@ -41,5 +41,4 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 google-cloud-cli-darwin-arm.tar.gz
-logo-store-6.png
 *.tar.gz
