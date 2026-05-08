@@ -439,12 +439,12 @@ function buildMonthlyRows(
   targetMonth: string,
   employees: EmployeeRow[],
   stores: StoreRow[],
-  storeFilter: string,
+  selectedStoreIds: string[],
 ) {
   const [year, month] = targetMonth.split("-").map(Number);
   const lastDay = new Date(year, month, 0).getDate();
   const outputEmployees = employees.filter(
-    (employee) => employee.isDeleted !== true && (storeFilter === "all" || employee.storeId === storeFilter),
+    (employee) => employee.isDeleted !== true && selectedStoreIds.includes(employee.storeId),
   );
 
   const newMonthlyHeaders = [
@@ -593,6 +593,7 @@ export default function AdminPage() {
   } | null>(null);
   const [permissionMsg, setPermissionMsg] = useState("");
   const [permissionWorking, setPermissionWorking] = useState(false);
+  const [selectedExportStoreIds, setSelectedExportStoreIds] = useState<string[]>([]);
 
   const isAdmin = !isAuthLoading && profile?.role === "admin";
   const isFcManager = !isAuthLoading && profile?.role === "fc_manager";
@@ -639,12 +640,15 @@ export default function AdminPage() {
         setEmployees(nextEmployees.filter((emp) => emp.storeId === managerStoreId));
         setStores(nextStores.filter((store) => store.id === managerStoreId));
         setStoreFilter(managerStoreId);
+        setSelectedExportStoreIds([managerStoreId]);
       } else if (isFcManager || isAreaManager) {
         setEmployees(nextEmployees.filter((emp) => myStoreIds.includes(emp.storeId)));
         setStores(nextStores.filter((store) => myStoreIds.includes(store.id)));
+        setSelectedExportStoreIds(myStoreIds);
       } else {
         setEmployees(nextEmployees);
         setStores(nextStores);
+        setSelectedExportStoreIds(nextStores.filter((s) => !s.isFc).map((s) => s.id));
       }
     } catch (error) {
       console.error("employees/stores fetch failed", error);
@@ -744,6 +748,15 @@ export default function AdminPage() {
   );
   const needsProductionCheckData = !hasProductionCheckStores || !hasProductionCheckEmployee;
   const attendanceRows = useMemo(() => buildAttendanceRows(filteredTimecards), [filteredTimecards]);
+  const allMonthTimecards = useMemo(
+    () => timecards.filter((row) => {
+      if (row.isDeleted) return false;
+      const date = logDate(row);
+      return date != null && dateKey(date).startsWith(targetMonth);
+    }),
+    [targetMonth, timecards],
+  );
+  const allMonthAttendanceRows = useMemo(() => buildAttendanceRows(allMonthTimecards), [allMonthTimecards]);
   const todayKey = dateKey(new Date());
   const summary = useMemo(() => {
     const todayPunches = timecards.filter((row) => {
@@ -880,7 +893,7 @@ export default function AdminPage() {
 
   const downloadExcel = async () => {
     const XLSX = await import("xlsx");
-    const rows = buildMonthlyRows(attendanceRows, targetMonth, employees, stores, storeFilter);
+    const rows = buildMonthlyRows(allMonthAttendanceRows, targetMonth, employees, stores, selectedExportStoreIds);
     const worksheet = XLSX.utils.aoa_to_sheet(rows);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, "temp");
@@ -2187,17 +2200,95 @@ export default function AdminPage() {
 
         {activeTab === "exports" && (
           <section style={styles.tabPanel}>
-            <h2 style={styles.sectionTitle}>出力履歴</h2>
-            <p style={styles.helpText}>
-              福田勤怠形式の月次Excelを上部のExcel出力ボタンから出力できます。店舗フィルターを全店舗または店舗別に切り替えて出力してください。
-            </p>
+            <h2 style={styles.sectionTitle}>Excel出力</h2>
+
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <span style={{ fontWeight: 700, fontSize: 14 }}>出力対象店舗</span>
+                {isAdmin && (
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedExportStoreIds(stores.map((s) => s.id))}
+                      style={styles.secondaryButton}
+                    >
+                      全選択
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedExportStoreIds([])}
+                      style={styles.secondaryButton}
+                    >
+                      全解除
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedExportStoreIds(stores.filter((s) => !s.isFc).map((s) => s.id))}
+                      style={styles.secondaryButton}
+                    >
+                      直営のみ選択
+                    </button>
+                  </div>
+                )}
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "12px 16px", background: "#F9FAFB", borderRadius: 8, border: "1px solid #E5E7EB" }}>
+                {stores.map((store) => (
+                  <label
+                    key={store.id}
+                    style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, cursor: isAdmin ? "pointer" : "default" }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedExportStoreIds.includes(store.id)}
+                      disabled={!isAdmin}
+                      onChange={(e) => {
+                        if (!isAdmin) return;
+                        setSelectedExportStoreIds(
+                          e.target.checked
+                            ? [...selectedExportStoreIds, store.id]
+                            : selectedExportStoreIds.filter((id) => id !== store.id),
+                        );
+                      }}
+                    />
+                    <span>{getStoreName(store)}</span>
+                    <span style={{
+                      fontSize: 11,
+                      padding: "1px 6px",
+                      borderRadius: 4,
+                      fontWeight: 700,
+                      background: store.isFc ? "#DBEAFE" : "#D1FAE5",
+                      color: store.isFc ? "#1E40AF" : "#065F46",
+                    }}>
+                      {store.isFc ? "FC" : "直営"}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ marginBottom: 20 }}>
+              <button
+                type="button"
+                onClick={downloadExcel}
+                disabled={selectedExportStoreIds.length === 0}
+                style={{ ...styles.button, opacity: selectedExportStoreIds.length === 0 ? 0.5 : 1 }}
+              >
+                Excel出力（{selectedExportStoreIds.length}店舗）
+              </button>
+            </div>
+
+            <h3 style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>出力内容</h3>
             <DataTable headers={["対象年月", "店舗", "形式", "内容"]}>
               <tr>
                 <td style={styles.td}>{targetMonth}</td>
                 <td style={styles.td}>
-                  {storeFilter === "all"
-                    ? "全店舗"
-                    : getStoreName(stores.find((store) => store.id === storeFilter) ?? ({ id: storeFilter } as StoreRow))}
+                  {selectedExportStoreIds.length === 0
+                    ? "（未選択）"
+                    : selectedExportStoreIds.length === stores.length
+                      ? "全店舗"
+                      : selectedExportStoreIds
+                          .map((id) => getStoreName(stores.find((s) => s.id === id) ?? ({ id } as StoreRow)))
+                          .join("、")}
                 </td>
                 <td style={styles.td}>Excel</td>
                 <td style={styles.td}>hourlyWageSnapshot を使って給与計算、労働時間・休憩・深夜・概算給与を反映</td>
