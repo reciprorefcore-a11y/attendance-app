@@ -115,6 +115,114 @@ test("estimated labor cost uses normal wage, night wage, and daily transportatio
   assert.equal(result.isWageMissing, false);
 });
 
+test("an applicable wageHistory takes priority over clock-log snapshots", () => {
+  const rows = buildAttendanceRows(
+    [
+      log("in", "clock_in", "2026-07-24T21:00:00", {
+        hourlyWageAtWork: 900,
+        lateNightHourlyWageAtWork: 1000,
+        dailyTransportationAtWork: 100,
+      }),
+      log("out", "clock_out", "2026-07-24T23:00:00"),
+    ],
+    { "employee-1": [wage] },
+  );
+  assert.equal(rows[0].wageAmount, 3200);
+  assert.equal(rows[0].sessions[0].wageSource, "wage_history");
+});
+
+test("hourlyWageAtWork is used when wageHistory is empty", () => {
+  const rows = buildAttendanceRows([
+    log("in", "clock_in", "2026-07-24T21:00:00", {
+      hourlyWageAtWork: "1200",
+      dailyTransportationAtWork: "500",
+    }),
+    log("out", "clock_out", "2026-07-24T23:00:00"),
+  ]);
+  assert.equal(rows[0].wageAmount, 3200);
+  assert.equal(rows[0].isWageMissing, false);
+  assert.equal(rows[0].sessions[0].wageSource, "hourly_wage_at_work");
+  assert.deepEqual(rows[0].sessions[0].wageDiagnostics, ["wage_history_empty"]);
+});
+
+test("hourlyWageSnapshot is used when wageHistory and at-work wage are absent", () => {
+  const rows = buildAttendanceRows([
+    log("in", "clock_in", "2026-07-24T09:00:00", {
+      hourlyWageSnapshot: 1200,
+    }),
+    log("out", "clock_out", "2026-07-24T10:00:00"),
+  ]);
+  assert.equal(rows[0].wageAmount, 1200);
+  assert.equal(rows[0].isWageMissing, false);
+  assert.equal(rows[0].sessions[0].wageSource, "hourly_wage_snapshot");
+});
+
+test("a wageHistory fetch failure falls back to the clock-in snapshot", () => {
+  const rows = buildAttendanceRows(
+    [
+      log("in", "clock_in", "2026-07-24T09:00:00", {
+        hourlyWageAtWork: 1200,
+      }),
+      log("out", "clock_out", "2026-07-24T10:00:00", {
+        hourlyWageAtWork: 9999,
+      }),
+    ],
+    {},
+    { "employee-1": "failed" },
+  );
+  assert.equal(rows[0].wageAmount, 1200);
+  assert.equal(rows[0].isWageMissing, false);
+  assert.equal(rows[0].sessions[0].wageSource, "hourly_wage_at_work");
+  assert.deepEqual(rows[0].sessions[0].wageDiagnostics, [
+    "wage_history_fetch_failed",
+  ]);
+});
+
+test("other session logs are only used when the clock-in log has no snapshot", () => {
+  const rows = buildAttendanceRows([
+    log("in", "clock_in", "2026-07-24T09:00:00"),
+    log("break", "break_start", "2026-07-24T09:15:00", {
+      hourlyWageSnapshot: 1200,
+    }),
+    log("out", "clock_out", "2026-07-24T10:00:00", {
+      hourlyWageAtWork: 9999,
+    }),
+  ]);
+  assert.equal(rows[0].wageAmount, 1200);
+  assert.equal(rows[0].sessions[0].wageSource, "hourly_wage_snapshot");
+});
+
+test("all missing wage sources are diagnosed as wage missing", () => {
+  const rows = buildAttendanceRows([
+    log("in", "clock_in", "2026-07-24T09:00:00"),
+    log("out", "clock_out", "2026-07-24T10:00:00"),
+  ]);
+  assert.equal(rows[0].wageAmount, 0);
+  assert.equal(rows[0].isWageMissing, true);
+  assert.deepEqual(rows[0].sessions[0].wageDiagnostics, [
+    "wage_history_empty",
+    "clock_log_snapshot_missing",
+    "wage_missing",
+  ]);
+});
+
+test("daily transportation is added once for multiple sessions on the same day", () => {
+  const rows = buildAttendanceRows([
+    log("in-1", "clock_in", "2026-07-24T11:00:00", {
+      hourlyWageAtWork: 1200,
+      dailyTransportationAtWork: 500,
+    }),
+    log("out-1", "clock_out", "2026-07-24T15:00:00"),
+    log("in-2", "clock_in", "2026-07-24T18:00:00", {
+      hourlyWageAtWork: 1200,
+      dailyTransportationAtWork: 500,
+    }),
+    log("out-2", "clock_out", "2026-07-24T22:00:00"),
+  ]);
+  assert.equal(rows[0].sessions.length, 2);
+  assert.equal(rows[0].wageAmount, 10100);
+});
+
 test("labor cost is assigned to the clock-in store, not the employee home store", () => {
   const rows = buildAttendanceRows(
     [

@@ -13,12 +13,22 @@ export type CalculationClockLog = {
 };
 
 export type CalculationWage = {
-  hourlyWage: unknown;
-  lateNightHourlyWage: unknown;
-  dailyTransportation: unknown;
+  hourlyWage?: unknown;
+  lateNightHourlyWage?: unknown;
+  dailyTransportation?: unknown;
   effectiveFrom: string;
   effectiveTo?: string | null;
 };
+
+export type WageHistoryLoadStatus = "loaded" | "failed";
+
+export type WageDiagnosticCode =
+  | "wage_history_fetch_failed"
+  | "wage_history_empty"
+  | "wage_history_not_applicable"
+  | "wage_history_hourly_wage_invalid"
+  | "clock_log_snapshot_missing"
+  | "wage_missing";
 
 export type BreakSession = {
   start: Date;
@@ -41,6 +51,8 @@ export type WorkSession = {
   nightMinutes: number;
   wageAmount: number;
   isWageMissing: boolean;
+  wageSource: "wage_history" | "hourly_wage_at_work" | "hourly_wage_snapshot" | null;
+  wageDiagnostics: WageDiagnosticCode[];
 };
 
 export type CalculatedAttendanceRow = {
@@ -197,6 +209,8 @@ export function pairWorkSessions(logs: CalculationClockLog[]) {
         nightMinutes: end ? calculateNightMinutes(clockIn, end, breaks) : 0,
         wageAmount: 0,
         isWageMissing: false,
+        wageSource: null,
+        wageDiagnostics: [],
         logs: sessionLogs,
       });
       active = null;
@@ -222,6 +236,32 @@ export function pairWorkSessions(logs: CalculationClockLog[]) {
 function safeNonNegativeNumber(value: unknown) {
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function safePositiveNumber(value: unknown) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function findSessionSnapshot(
+  session: WorkSession,
+  atWorkField: string,
+  snapshotField: string,
+  positiveOnly = false,
+) {
+  const clockInLog =
+    session.logs.find((log) => normalizedType(log.type) === "clock_in") ?? session.logs[0];
+  const otherLogs = session.logs.filter((log) => log !== clockInLog);
+  const candidates = [
+    { value: clockInLog?.[atWorkField], source: "at_work" as const },
+    { value: clockInLog?.[snapshotField], source: "snapshot" as const },
+    ...otherLogs.flatMap((log) => [
+      { value: log[atWorkField], source: "at_work" as const },
+      { value: log[snapshotField], source: "snapshot" as const },
+    ]),
+  ];
+  const parse = positiveOnly ? safePositiveNumber : safeNonNegativeNumber;
+  return candidates.find((candidate) => parse(candidate.value) !== null) ?? null;
 }
 
 export function getApplicableWage(wages: CalculationWage[], workDate: string) {
@@ -255,9 +295,84 @@ export function calculateEstimatedLaborCost(
   return { amount, isWageMissing: false };
 }
 
+export function resolveSessionWage(
+  session: WorkSession,
+  wages: CalculationWage[],
+  workDate: string,
+  wageHistoryStatus: WageHistoryLoadStatus = "loaded",
+) {
+  const diagnostics: WageDiagnosticCode[] = [];
+  const applicableWage = getApplicableWage(wages, workDate);
+
+  if (wageHistoryStatus === "failed") {
+    diagnostics.push("wage_history_fetch_failed");
+  } else if (wages.length === 0) {
+    diagnostics.push("wage_history_empty");
+  } else if (!applicableWage) {
+    diagnostics.push("wage_history_not_applicable");
+  }
+
+  const historyHourlyWage = safePositiveNumber(applicableWage?.hourlyWage);
+  if (applicableWage && historyHourlyWage === null) {
+    diagnostics.push("wage_history_hourly_wage_invalid");
+  }
+
+  const hourlySnapshot = findSessionSnapshot(
+    session,
+    "hourlyWageAtWork",
+    "hourlyWageSnapshot",
+    true,
+  );
+  const snapshotHourlyWage = safePositiveNumber(hourlySnapshot?.value);
+  const hourlyWage = historyHourlyWage ?? snapshotHourlyWage;
+
+  if (hourlyWage === null) {
+    diagnostics.push("clock_log_snapshot_missing", "wage_missing");
+    return {
+      wage: null,
+      source: null,
+      diagnostics,
+    };
+  }
+
+  const nightSnapshot = findSessionSnapshot(
+    session,
+    "lateNightHourlyWageAtWork",
+    "lateNightHourlyWageSnapshot",
+    true,
+  );
+  const transportationSnapshot = findSessionSnapshot(
+    session,
+    "dailyTransportationAtWork",
+    "dailyTransportationSnapshot",
+  );
+  const historyNightWage = safePositiveNumber(applicableWage?.lateNightHourlyWage);
+  const snapshotNightWage = safePositiveNumber(nightSnapshot?.value);
+  const historyTransportation = safeNonNegativeNumber(applicableWage?.dailyTransportation);
+  const snapshotTransportation = safeNonNegativeNumber(transportationSnapshot?.value);
+
+  return {
+    wage: {
+      hourlyWage,
+      lateNightHourlyWage: historyNightWage ?? snapshotNightWage ?? hourlyWage * 1.25,
+      dailyTransportation: historyTransportation ?? snapshotTransportation ?? 0,
+      effectiveFrom: workDate,
+      effectiveTo: workDate,
+    } satisfies CalculationWage,
+    source:
+      historyHourlyWage !== null
+        ? ("wage_history" as const)
+        : hourlySnapshot?.source === "at_work"
+          ? ("hourly_wage_at_work" as const)
+          : ("hourly_wage_snapshot" as const),
+    diagnostics,
+  };
+}
+
 export function buildAttendanceRows(
   logs: CalculationClockLog[],
   wagesByEmployee: Record<string, CalculationWage[]> = {},
+  wageHistoryStatusByEmployee: Record<string, WageHistoryLoadStatus> = {},
 ) {
   const sessions = pairWorkSessions(logs);
   const transportationUsed = new Set<string>();
@@ -265,12 +380,19 @@ export function buildAttendanceRows(
   for (const session of sessions) {
     if (!session.clockOut) continue;
     const date = formatWorkDate(session.clockIn);
-    const wage = getApplicableWage(wagesByEmployee[session.employeeId] ?? [], date);
+    const resolution = resolveSessionWage(
+      session,
+      wagesByEmployee[session.employeeId] ?? [],
+      date,
+      wageHistoryStatusByEmployee[session.employeeId] ?? "loaded",
+    );
     const transportationKey = `${session.employeeKey}:${date}`;
     const includeTransportation = !transportationUsed.has(transportationKey);
-    const cost = calculateEstimatedLaborCost(session, wage, includeTransportation);
+    const cost = calculateEstimatedLaborCost(session, resolution.wage, includeTransportation);
     session.wageAmount = cost.amount;
     session.isWageMissing = cost.isWageMissing;
+    session.wageSource = resolution.source;
+    session.wageDiagnostics = resolution.diagnostics;
     if (!cost.isWageMissing && includeTransportation) transportationUsed.add(transportationKey);
   }
 

@@ -28,6 +28,7 @@ import {
   type CalculatedAttendanceRow,
   type CalculationClockLog,
   type CalculationWage,
+  type WageHistoryLoadStatus,
 } from "@/lib/attendance-calculation";
 
 type TabId =
@@ -53,6 +54,10 @@ type TimecardRow = {
   createdAt?: Timestamp | Date | string | null;
   hourlyWageAtWork?: number | null;
   hourlyWageSnapshot?: number | null;
+  lateNightHourlyWageAtWork?: number | null;
+  lateNightHourlyWageSnapshot?: number | null;
+  dailyTransportationAtWork?: number | null;
+  dailyTransportationSnapshot?: number | null;
   wageSource?: "store_help" | "employee_base";
   latitude?: number | null;
   longitude?: number | null;
@@ -376,6 +381,9 @@ export default function AdminPage() {
   const [timecards, setTimecards] = useState<TimecardRow[]>([]);
   const [employees, setEmployees] = useState<EmployeeRow[]>([]);
   const [wagesByEmployee, setWagesByEmployee] = useState<Record<string, CalculationWage[]>>({});
+  const [wageHistoryStatusByEmployee, setWageHistoryStatusByEmployee] = useState<
+    Record<string, WageHistoryLoadStatus>
+  >({});
   const [stores, setStores] = useState<StoreRow[]>([]);
   const [targetMonth, setTargetMonth] = useState(localMonth());
   const [storeFilter, setStoreFilter] = useState("all");
@@ -496,18 +504,30 @@ export default function AdminPage() {
                     orderBy("effectiveFrom", "desc"),
                   ),
                 );
-                return [
-                  employee.id,
-                  snapshot.docs.map((wageDoc) => wageDoc.data() as CalculationWage),
-                ] as const;
+                return {
+                  employeeId: employee.id,
+                  wages: snapshot.docs.map((wageDoc) => wageDoc.data() as CalculationWage),
+                  status: "loaded" as const,
+                };
               } catch (error) {
-                console.error(`wageHistory fetch failed: ${employee.id}`, error);
-                return [employee.id, []] as const;
+                if (process.env.NODE_ENV !== "production") {
+                  console.warn("[attendance] wageHistory fetch failed", error);
+                }
+                return {
+                  employeeId: employee.id,
+                  wages: [],
+                  status: "failed" as const,
+                };
               }
             }),
           )
         : [];
-      setWagesByEmployee(Object.fromEntries(wageEntries));
+      setWagesByEmployee(
+        Object.fromEntries(wageEntries.map((entry) => [entry.employeeId, entry.wages])),
+      );
+      setWageHistoryStatusByEmployee(
+        Object.fromEntries(wageEntries.map((entry) => [entry.employeeId, entry.status])),
+      );
 
       if (isManager) {
         setEmployees(nextEmployees.filter((emp) => emp.storeId === managerStoreId));
@@ -611,9 +631,31 @@ export default function AdminPage() {
   );
   const needsProductionCheckData = !hasProductionCheckStores || !hasProductionCheckEmployee;
   const allAttendanceRows = useMemo(
-    () => buildAttendanceRows(toCalculationLogs(timecards), wagesByEmployee),
-    [timecards, wagesByEmployee],
+    () =>
+      buildAttendanceRows(
+        toCalculationLogs(timecards),
+        wagesByEmployee,
+        wageHistoryStatusByEmployee,
+      ),
+    [timecards, wageHistoryStatusByEmployee, wagesByEmployee],
   );
+  useEffect(() => {
+    if (process.env.NODE_ENV === "production") return;
+    const diagnosticCounts = new Map<string, number>();
+    for (const row of allAttendanceRows) {
+      for (const session of row.sessions) {
+        for (const code of session.wageDiagnostics) {
+          diagnosticCounts.set(code, (diagnosticCounts.get(code) ?? 0) + 1);
+        }
+      }
+    }
+    if (diagnosticCounts.size > 0) {
+      console.warn(
+        "[attendance] wage resolution diagnostics",
+        Object.fromEntries(diagnosticCounts),
+      );
+    }
+  }, [allAttendanceRows]);
   const allMonthAttendanceRows = useMemo(
     () => allAttendanceRows.filter((row) => row.date.startsWith(targetMonth)),
     [allAttendanceRows, targetMonth],
