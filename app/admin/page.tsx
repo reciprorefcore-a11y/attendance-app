@@ -22,6 +22,13 @@ import {
   where,
 } from "firebase/firestore";
 import type { ClockType, Employee, Store } from "@/lib/attendance";
+import {
+  aggregateLaborCostByStore,
+  buildAttendanceRows,
+  type CalculatedAttendanceRow,
+  type CalculationClockLog,
+  type CalculationWage,
+} from "@/lib/attendance-calculation";
 
 type TabId =
   | "attendance"
@@ -60,25 +67,7 @@ type EmployeeRow = Employee & { id: string; hourlyWage?: number | null; hasManag
 type StoreRow = Store & { id: string };
 type AccountManagerRow = { uid: string; name?: string; email?: string; role: "area_manager" | "fc_manager"; storeId?: string; storeIds?: string[] };
 
-type AttendanceRow = {
-  key: string;
-  date: string;
-  storeId: string;
-  storeName: string;
-  employeeKey: string;
-  employeeCode: string;
-  employeeName: string;
-  clockIn: Date | null;
-  clockOut: Date | null;
-  breakMinutes: number;
-  workMinutes: number;
-  nightMinutes: number;
-  hourlyWageSnapshot: number | null;
-  wageAmount: number;
-  isOutsideGps: boolean;
-  isMissingClockOut: boolean;
-  logs: TimecardRow[];
-};
+type AttendanceRow = CalculatedAttendanceRow;
 
 const tabs: { id: TabId; label: string }[] = [
   { id: "attendance", label: "勤怠一覧" },
@@ -273,16 +262,6 @@ function formatMinutesZero(minutes: number) {
   return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, "0")}`;
 }
 
-function minutesBetween(start: Date, end: Date) {
-  return Math.max(0, (end.getTime() - start.getTime()) / 60000);
-}
-
-function overlapMinutes(start: Date, end: Date, rangeStart: Date, rangeEnd: Date) {
-  const from = Math.max(start.getTime(), rangeStart.getTime());
-  const to = Math.min(end.getTime(), rangeEnd.getTime());
-  return Math.max(0, (to - from) / 60000);
-}
-
 function normalizeClockType(row: TimecardRow) {
   const type = row.type ?? row.clockType ?? "";
   if (type === "clockIn" || type === "in" || type === "start") return "clock_in";
@@ -292,146 +271,18 @@ function normalizeClockType(row: TimecardRow) {
   return type;
 }
 
-function buildAttendanceRows(timecards: TimecardRow[]) {
-  // 同一従業員・同一日付でグループ化
-  const groups = new Map<string, TimecardRow[]>();
-  for (const row of timecards) {
-    const date = logDate(row);
-    if (!date) continue;
-    const employeeKey = row.employeeId || row.employeeCode || row.employeeName || "unknown";
-    const key = `${dateKey(date)}:${employeeKey}`;
-    groups.set(key, [...(groups.get(key) ?? []), row]);
-  }
-
-  return Array.from(groups.entries())
-    .map(([key, rows]) => {
-      const sorted = rows.slice().sort((a, b) => {
-        return (logDate(a)?.getTime() ?? 0) - (logDate(b)?.getTime() ?? 0);
-      });
-      const first = sorted[0];
-      const date = logDate(first);
-
-      // ── ペアリング（同一employeeId内でのみ） ──────────────────────────────
-      type WorkPair = {
-        clockIn: Date;
-        clockOut: Date | null;
-        hourlyWage: number | null;
-        workStoreName: string;
-        breakMinutes: number;
-        breakRanges: { start: Date; end: Date }[];
-      };
-
-      const pairs: WorkPair[] = [];
-      let currentPair: WorkPair | null = null;
-      let breakStart: Date | null = null;
-
-      for (const row of sorted) {
-        const type = normalizeClockType(row);
-        const rowDate = logDate(row);
-        if (!rowDate) continue;
-
-        if (type === "clock_in") {
-          // 前のペアが未退勤でも新しいペアを開始
-          const hourlyWage =
-            typeof row.hourlyWageAtWork === "number" ? row.hourlyWageAtWork
-            : typeof row.hourlyWageSnapshot === "number" ? row.hourlyWageSnapshot
-            : null;
-          currentPair = {
-            clockIn: rowDate,
-            clockOut: null,
-            hourlyWage,
-            workStoreName: row.workStoreName ?? row.storeName ?? "",
-            breakMinutes: 0,
-            breakRanges: [],
-          };
-          pairs.push(currentPair);
-        } else if (type === "clock_out" && currentPair) {
-          currentPair.clockOut = rowDate;
-          currentPair = null;
-        } else if (type === "break_start") {
-          breakStart = rowDate;
-        } else if (type === "break_end" && breakStart && rowDate > breakStart) {
-          const mins = minutesBetween(breakStart, rowDate);
-          const range = { start: breakStart, end: rowDate };
-          if (currentPair) {
-            currentPair.breakMinutes += mins;
-            currentPair.breakRanges.push(range);
-          }
-          breakStart = null;
-        }
-      }
-
-      // ── 集計（ペアごとに時給を適用） ──────────────────────────────────────
-      let totalWorkMinutes = 0;
-      let totalBreakMinutes = 0;
-      let totalNightMinutes = 0;
-      let totalWageAmount = 0;
-      let firstClockIn: Date | null = null;
-      let lastClockOut: Date | null = null;
-      const storeNamesOrdered: string[] = [];
-
-      for (const pair of pairs) {
-        if (!firstClockIn) firstClockIn = pair.clockIn;
-        if (pair.clockOut) lastClockOut = pair.clockOut;
-
-        if (pair.workStoreName && !storeNamesOrdered.includes(pair.workStoreName)) {
-          storeNamesOrdered.push(pair.workStoreName);
-        }
-
-        if (pair.clockOut && pair.clockOut > pair.clockIn) {
-          const pairWork = Math.max(0, minutesBetween(pair.clockIn, pair.clockOut) - pair.breakMinutes);
-          totalWorkMinutes += pairWork;
-          totalBreakMinutes += pair.breakMinutes;
-
-          // 深夜時間（ペアごとに計算）
-          const cursor = new Date(pair.clockIn);
-          cursor.setHours(0, 0, 0, 0);
-          while (cursor < pair.clockOut) {
-            const nightStart = new Date(cursor);
-            nightStart.setHours(22, 0, 0, 0);
-            const nightEnd = new Date(cursor);
-            nightEnd.setDate(nightEnd.getDate() + 1);
-            nightEnd.setHours(5, 0, 0, 0);
-            let night = overlapMinutes(pair.clockIn, pair.clockOut, nightStart, nightEnd);
-            for (const range of pair.breakRanges) {
-              night -= overlapMinutes(range.start, range.end, nightStart, nightEnd);
-            }
-            totalNightMinutes += Math.max(0, night);
-            cursor.setDate(cursor.getDate() + 1);
-          }
-
-          // 給与（ペアごとの時給で計算して合算）
-          if (pair.hourlyWage !== null && pair.hourlyWage > 0) {
-            totalWageAmount += Math.round((pairWork / 60) * pair.hourlyWage);
-          }
-        }
-      }
-
-      // 複数店舗は「店舗A / 店舗B」形式で表示
-      const storeName = storeNamesOrdered.join(" / ");
-      const isMissingClockOut = pairs.some((p) => p.clockIn && !p.clockOut);
-
-      return {
-        key,
-        date: date ? dateKey(date) : "",
-        storeId: first.storeId,
-        storeName,
-        employeeKey: first.employeeId || first.employeeCode || first.employeeName || "",
-        employeeCode: first.employeeCode || "",
-        employeeName: first.employeeName || "",
-        clockIn: firstClockIn,
-        clockOut: lastClockOut,
-        breakMinutes: totalBreakMinutes,
-        workMinutes: totalWorkMinutes,
-        nightMinutes: totalNightMinutes,
-        hourlyWageSnapshot: pairs[0]?.hourlyWage ?? null,
-        wageAmount: totalWageAmount,
-        isOutsideGps: sorted.some((row) => row.isOutsideGps),
-        isMissingClockOut,
-        logs: sorted,
-      } satisfies AttendanceRow;
-    })
-    .sort((a, b) => b.date.localeCompare(a.date) || a.employeeName.localeCompare(b.employeeName));
+function toCalculationLogs(rows: TimecardRow[]) {
+  return rows.flatMap((row) => {
+    const timestamp = logDate(row);
+    if (!timestamp || row.isDeleted) return [];
+    return [
+      {
+        ...row,
+        type: normalizeClockType(row),
+        timestamp,
+      } as CalculationClockLog,
+    ];
+  });
 }
 
 function buildMonthlyRows(
@@ -462,7 +313,7 @@ function buildMonthlyRows(
     // Find rows for this employee STRICTLY by employeeId
     const employeeRows = rows.filter((r) => r.employeeKey === employee.id);
 
-    let totalWork = 0, totalNight = 0, totalBreak = 0, totalWage = 0;
+    let totalWork = 0, totalNight = 0, totalBreak = 0;
 
     for (let day = 1; day <= lastDay; day += 1) {
       const date = `${targetMonth}-${String(day).padStart(2, "0")}`;
@@ -472,15 +323,14 @@ function buildMonthlyRows(
         totalWork += row.workMinutes;
         totalNight += row.nightMinutes;
         totalBreak += row.breakMinutes;
-        totalWage += row.wageAmount;
       }
 
       const dailyCost = employee.transportationType === "daily" ? (employee.transportationCost ?? 0) : 0;
       const monthlyCost = employee.transportationType === "monthly" ? (employee.transportationCost ?? 0) : 0;
 
       bodyRows.push([
-        employee.storeId,
-        store ? getStoreName(store) : employee.storeId,
+        row?.storeId ?? employee.storeId,
+        row?.storeName || (store ? getStoreName(store) : employee.storeId),
         employee.employeeCode,
         employee.name,
         date.replaceAll("-", "/"),
@@ -525,6 +375,7 @@ export default function AdminPage() {
   const { user, profile, isLoading: isAuthLoading, error: authError } = useAuthProfile();
   const [timecards, setTimecards] = useState<TimecardRow[]>([]);
   const [employees, setEmployees] = useState<EmployeeRow[]>([]);
+  const [wagesByEmployee, setWagesByEmployee] = useState<Record<string, CalculationWage[]>>({});
   const [stores, setStores] = useState<StoreRow[]>([]);
   const [targetMonth, setTargetMonth] = useState(localMonth());
   const [storeFilter, setStoreFilter] = useState("all");
@@ -635,6 +486,28 @@ export default function AdminPage() {
         id: d.id,
         ...(d.data() as Store),
       }));
+      const wageEntries = isAdmin
+        ? await Promise.all(
+            nextEmployees.map(async (employee) => {
+              try {
+                const snapshot = await getDocs(
+                  query(
+                    collection(db, "employees", employee.id, "wageHistory"),
+                    orderBy("effectiveFrom", "desc"),
+                  ),
+                );
+                return [
+                  employee.id,
+                  snapshot.docs.map((wageDoc) => wageDoc.data() as CalculationWage),
+                ] as const;
+              } catch (error) {
+                console.error(`wageHistory fetch failed: ${employee.id}`, error);
+                return [employee.id, []] as const;
+              }
+            }),
+          )
+        : [];
+      setWagesByEmployee(Object.fromEntries(wageEntries));
 
       if (isManager) {
         setEmployees(nextEmployees.filter((emp) => emp.storeId === managerStoreId));
@@ -727,16 +600,6 @@ export default function AdminPage() {
     setAppBaseUrl(window.location.origin);
   }, [appBaseUrl]);
 
-  const filteredTimecards = useMemo(
-    () =>
-      timecards.filter((row) => {
-        if (row.isDeleted) return false;
-        const date = logDate(row);
-        if (!date || !dateKey(date).startsWith(targetMonth)) return false;
-        return storeFilter === "all" || row.storeId === storeFilter;
-      }),
-    [storeFilter, targetMonth, timecards],
-  );
   const hasProductionCheckStores = productionCheckStores.every(([storeId]) =>
     stores.some((store) => store.id === storeId && store.active !== false),
   );
@@ -747,16 +610,33 @@ export default function AdminPage() {
       employee.status === "active",
   );
   const needsProductionCheckData = !hasProductionCheckStores || !hasProductionCheckEmployee;
-  const attendanceRows = useMemo(() => buildAttendanceRows(filteredTimecards), [filteredTimecards]);
-  const allMonthTimecards = useMemo(
-    () => timecards.filter((row) => {
-      if (row.isDeleted) return false;
-      const date = logDate(row);
-      return date != null && dateKey(date).startsWith(targetMonth);
-    }),
-    [targetMonth, timecards],
+  const allAttendanceRows = useMemo(
+    () => buildAttendanceRows(toCalculationLogs(timecards), wagesByEmployee),
+    [timecards, wagesByEmployee],
   );
-  const allMonthAttendanceRows = useMemo(() => buildAttendanceRows(allMonthTimecards), [allMonthTimecards]);
+  const allMonthAttendanceRows = useMemo(
+    () => allAttendanceRows.filter((row) => row.date.startsWith(targetMonth)),
+    [allAttendanceRows, targetMonth],
+  );
+  const attendanceRows = useMemo(
+    () =>
+      allMonthAttendanceRows.filter(
+        (row) =>
+          storeFilter === "all" ||
+          row.sessions.some((session) => session.storeId === storeFilter),
+      ),
+    [allMonthAttendanceRows, storeFilter],
+  );
+  const filteredTimecards = useMemo(
+    () =>
+      timecards.filter((row) => {
+        if (row.isDeleted) return false;
+        const timestamp = logDate(row);
+        if (!timestamp || !dateKey(timestamp).startsWith(targetMonth)) return false;
+        return storeFilter === "all" || row.storeId === storeFilter;
+      }),
+    [storeFilter, targetMonth, timecards],
+  );
   const todayKey = dateKey(new Date());
   const summary = useMemo(() => {
     const todayPunches = timecards.filter((row) => {
@@ -779,40 +659,20 @@ export default function AdminPage() {
     const jstNow = new Date(now.getTime() + 9 * 60 * 60 * 1000);
     const monthStart = `${jstNow.getUTCFullYear()}-${String(jstNow.getUTCMonth() + 1).padStart(2, "0")}-01`;
 
-    const validCards = timecards.filter((row) => !row.isDeleted);
-
-    const todayCards = validCards.filter((row) => {
-      const d = logDate(row);
-      return d && dateKey(d) === todayStr;
-    });
-    const weekCards = validCards.filter((row) => {
-      const d = logDate(row);
-      if (!d) return false;
-      const k = dateKey(d);
-      return k >= mondayStr && k <= todayStr;
-    });
-    const monthCards = validCards.filter((row) => {
-      const d = logDate(row);
-      if (!d) return false;
-      const k = dateKey(d);
-      return k >= monthStart && k <= todayStr;
-    });
-
-    const calcCosts = (cards: TimecardRow[]) => {
-      const rows = buildAttendanceRows(cards);
-      const costs = new Map<string, number>();
-      for (const row of rows) {
-        costs.set(row.storeId, (costs.get(row.storeId) ?? 0) + row.wageAmount);
-      }
-      return costs;
-    };
+    const todayRows = allAttendanceRows.filter((row) => row.date === todayStr);
+    const weekRows = allAttendanceRows.filter(
+      (row) => row.date >= mondayStr && row.date <= todayStr,
+    );
+    const monthRows = allAttendanceRows.filter(
+      (row) => row.date >= monthStart && row.date <= todayStr,
+    );
 
     return {
-      today: calcCosts(todayCards),
-      week: calcCosts(weekCards),
-      month: calcCosts(monthCards),
+      today: aggregateLaborCostByStore(todayRows),
+      week: aggregateLaborCostByStore(weekRows),
+      month: aggregateLaborCostByStore(monthRows),
     };
-  }, [timecards]);
+  }, [allAttendanceRows]);
 
   const editTarget = timecards.find((row) => row.id === editId) ?? null;
   const storeNameById = (storeId: string) =>
@@ -1602,9 +1462,19 @@ export default function AdminPage() {
                     {stores.map((store) => (
                       <tr key={store.id}>
                         <td style={styles.td}>{getStoreName(store)}</td>
-                        <td style={styles.td}>{(laborCostDashboard.today.get(store.id) ?? 0).toLocaleString()}円</td>
-                        <td style={styles.td}>{(laborCostDashboard.week.get(store.id) ?? 0).toLocaleString()}円</td>
-                        <td style={styles.td}>{(laborCostDashboard.month.get(store.id) ?? 0).toLocaleString()}円</td>
+                        {(["today", "week", "month"] as const).map((period) => {
+                          const cost = laborCostDashboard[period].get(store.id);
+                          return (
+                            <td key={period} style={styles.td}>
+                              {(cost?.amount ?? 0).toLocaleString()}円
+                              {(cost?.missingWageEmployeeKeys.length ?? 0) > 0 && (
+                                <div style={{ color: "#B91C1C", fontSize: 11 }}>
+                                  時給未設定: {cost?.missingWageEmployeeKeys.length}人
+                                </div>
+                              )}
+                            </td>
+                          );
+                        })}
                       </tr>
                     ))}
                   </tbody>
@@ -1633,6 +1503,7 @@ export default function AdminPage() {
                   <td style={row.isMissingClockOut ? styles.dangerTd : styles.td}>
                     {row.employeeName || row.employeeKey}
                     {row.isMissingClockOut && <span style={styles.dangerBadge}>未退勤</span>}
+                    {row.isWageMissing && <span style={styles.dangerBadge}>時給未設定</span>}
                   </td>
                   <td style={styles.td}>{formatTime(row.clockIn)}</td>
                   <td style={styles.td}>{formatTime(row.clockOut)}</td>
@@ -1642,7 +1513,7 @@ export default function AdminPage() {
                   <td style={styles.td}>{row.isOutsideGps ? "範囲外" : ""}</td>
                   <td style={styles.td}>
                     {row.logs[0] && (
-                      <button type="button" onClick={() => startEdit(row.logs[0])} style={styles.linkButton}>
+                      <button type="button" onClick={() => startEdit(row.logs[0] as TimecardRow)} style={styles.linkButton}>
                         修正
                       </button>
                     )}

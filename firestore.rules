@@ -79,6 +79,11 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
+    // 現行 /admin の勤務日時点の概算人件費計算に使用する。
+    match /employees/{employeeId}/wageHistory/{wageId} {
+      allow read, write: if isAdmin();
+    }
+
     // ── clockLogs ────────────────────────────────────────────────────────────
     // 作成：誰でも可（未認証の QR 打刻）。storeId が文字列であることを最低限検証。
     // 読み取り：admin（全店舗）、fc_manager・area_manager（担当店舗）、manager（自店舗のみ）、未認証（打刻ページ）
