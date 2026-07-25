@@ -630,14 +630,26 @@ export default function AdminPage() {
       employee.status === "active",
   );
   const needsProductionCheckData = !hasProductionCheckStores || !hasProductionCheckEmployee;
+  const employeeBaseWages = useMemo(
+    () =>
+      Object.fromEntries(
+        employees.flatMap((emp) => {
+          const wage = getEmployeeBaseWage(emp);
+          if (!wage || wage <= 0) return [];
+          return [[emp.id, wage]];
+        }),
+      ),
+    [employees],
+  );
   const allAttendanceRows = useMemo(
     () =>
       buildAttendanceRows(
         toCalculationLogs(timecards),
         wagesByEmployee,
         wageHistoryStatusByEmployee,
+        employeeBaseWages,
       ),
-    [timecards, wageHistoryStatusByEmployee, wagesByEmployee],
+    [timecards, wageHistoryStatusByEmployee, wagesByEmployee, employeeBaseWages],
   );
   useEffect(() => {
     if (process.env.NODE_ENV === "production") return;

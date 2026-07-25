@@ -283,3 +283,83 @@ test("night calculation also handles a session starting after midnight", () => {
     240,
   );
 });
+
+test("employee base wage is used as last resort when wageHistory and snapshots are absent", () => {
+  const rows = buildAttendanceRows(
+    [
+      log("in", "clock_in", "2026-07-24T09:00:00"),
+      log("out", "clock_out", "2026-07-24T10:00:00"),
+    ],
+    {},
+    {},
+    { "employee-1": 1200 },
+  );
+  assert.equal(rows[0].isWageMissing, false);
+  assert.equal(rows[0].sessions[0].wageSource, "employee_base");
+  assert.deepEqual(rows[0].sessions[0].wageDiagnostics, [
+    "wage_history_empty",
+    "clock_log_snapshot_missing",
+  ]);
+});
+
+test("employee base wage fallback applies 1.25x night rate with no transportation", () => {
+  // 21:00-23:00: workMinutes=120, nightMinutes=60
+  // normal: 60/60 * 1200 = 1200, night: 60/60 * 1500 = 1500, transport: 0
+  const rows = buildAttendanceRows(
+    [
+      log("in", "clock_in", "2026-07-24T21:00:00"),
+      log("out", "clock_out", "2026-07-24T23:00:00"),
+    ],
+    {},
+    {},
+    { "employee-1": 1200 },
+  );
+  assert.equal(rows[0].wageAmount, 2700);
+  assert.equal(rows[0].isWageMissing, false);
+});
+
+test("employee base wage is not used when wageHistory is applicable", () => {
+  const rows = buildAttendanceRows(
+    [
+      log("in", "clock_in", "2026-07-24T09:00:00"),
+      log("out", "clock_out", "2026-07-24T10:00:00"),
+    ],
+    { "employee-1": [wage] },
+    {},
+    { "employee-1": 800 },
+  );
+  assert.equal(rows[0].sessions[0].wageSource, "wage_history");
+  assert.equal(rows[0].wageAmount, 1700);
+});
+
+test("employee base wage is not used when clock-log snapshot is present", () => {
+  const rows = buildAttendanceRows(
+    [
+      log("in", "clock_in", "2026-07-24T09:00:00", { hourlyWageSnapshot: 1200 }),
+      log("out", "clock_out", "2026-07-24T10:00:00"),
+    ],
+    {},
+    {},
+    { "employee-1": 800 },
+  );
+  assert.equal(rows[0].sessions[0].wageSource, "hourly_wage_snapshot");
+  assert.equal(rows[0].wageAmount, 1200);
+});
+
+test("employee base wage fallback does not count transportation for same-day multiple sessions", () => {
+  // transportation is 0 for employee_base, so two sessions share no transportation
+  const rows = buildAttendanceRows(
+    [
+      log("in-1", "clock_in", "2026-07-24T09:00:00"),
+      log("out-1", "clock_out", "2026-07-24T11:00:00"),
+      log("in-2", "clock_in", "2026-07-24T13:00:00"),
+      log("out-2", "clock_out", "2026-07-24T15:00:00"),
+    ],
+    {},
+    {},
+    { "employee-1": 1200 },
+  );
+  // 4 hours normal: 4 * 1200 = 4800, no night, no transportation
+  assert.equal(rows[0].wageAmount, 4800);
+  assert.equal(rows[0].isWageMissing, false);
+});

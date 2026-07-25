@@ -51,7 +51,7 @@ export type WorkSession = {
   nightMinutes: number;
   wageAmount: number;
   isWageMissing: boolean;
-  wageSource: "wage_history" | "hourly_wage_at_work" | "hourly_wage_snapshot" | null;
+  wageSource: "wage_history" | "hourly_wage_at_work" | "hourly_wage_snapshot" | "employee_base" | null;
   wageDiagnostics: WageDiagnosticCode[];
 };
 
@@ -300,6 +300,7 @@ export function resolveSessionWage(
   wages: CalculationWage[],
   workDate: string,
   wageHistoryStatus: WageHistoryLoadStatus = "loaded",
+  employeeBaseWage?: number | null,
 ) {
   const diagnostics: WageDiagnosticCode[] = [];
   const applicableWage = getApplicableWage(wages, workDate);
@@ -327,7 +328,22 @@ export function resolveSessionWage(
   const hourlyWage = historyHourlyWage ?? snapshotHourlyWage;
 
   if (hourlyWage === null) {
-    diagnostics.push("clock_log_snapshot_missing", "wage_missing");
+    diagnostics.push("clock_log_snapshot_missing");
+    const baseWage = safePositiveNumber(employeeBaseWage);
+    if (baseWage !== null) {
+      return {
+        wage: {
+          hourlyWage: baseWage,
+          lateNightHourlyWage: baseWage * 1.25,
+          dailyTransportation: 0,
+          effectiveFrom: workDate,
+          effectiveTo: workDate,
+        } satisfies CalculationWage,
+        source: "employee_base" as const,
+        diagnostics,
+      };
+    }
+    diagnostics.push("wage_missing");
     return {
       wage: null,
       source: null,
@@ -373,6 +389,7 @@ export function buildAttendanceRows(
   logs: CalculationClockLog[],
   wagesByEmployee: Record<string, CalculationWage[]> = {},
   wageHistoryStatusByEmployee: Record<string, WageHistoryLoadStatus> = {},
+  employeeBaseWages: Record<string, number> = {},
 ) {
   const sessions = pairWorkSessions(logs);
   const transportationUsed = new Set<string>();
@@ -385,6 +402,7 @@ export function buildAttendanceRows(
       wagesByEmployee[session.employeeId] ?? [],
       date,
       wageHistoryStatusByEmployee[session.employeeId] ?? "loaded",
+      employeeBaseWages[session.employeeId],
     );
     const transportationKey = `${session.employeeKey}:${date}`;
     const includeTransportation = !transportationUsed.has(transportationKey);
