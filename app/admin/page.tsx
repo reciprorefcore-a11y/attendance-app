@@ -1466,6 +1466,22 @@ export default function AdminPage() {
     <main style={styles.page}>
       <style>{`
         @media (max-width: 860px) {
+          .correction-modal {
+            padding: 18px !important;
+          }
+          .correction-form-grid {
+            grid-template-columns: 1fr !important;
+          }
+          .correction-break-header,
+          .correction-break-summary {
+            grid-template-columns: 1fr !important;
+          }
+          .correction-break-header {
+            align-items: flex-start !important;
+          }
+          .correction-break-row {
+            grid-template-columns: 1fr !important;
+          }
           .admin-layout {
             grid-template-columns: 1fr !important;
           }
@@ -2333,43 +2349,43 @@ export default function AdminPage() {
 
       {/* 勤務セット修正モーダル */}
       {editWorkSet && editForm && (
-        <div style={styles.modalOverlay} onClick={() => { if (!isSavingCorrection) { setEditWorkSet(null); setEditForm(null); } }}>
-          <form onSubmit={saveEdit} style={{ ...styles.modal, maxWidth: 620 }} onClick={(event) => event.stopPropagation()}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-              <h3 style={{ margin: 0, fontSize: 18, fontWeight: 800 }}>勤務セットを修正</h3>
-              <button type="button" disabled={isSavingCorrection} onClick={() => { setEditWorkSet(null); setEditForm(null); }} style={styles.linkButton}>✕ 閉じる</button>
+        <div style={{ ...styles.modalOverlay, padding: 24, overflowX: "hidden" }} onClick={() => { if (!isSavingCorrection) { setEditWorkSet(null); setEditForm(null); } }}>
+          <form className="correction-modal" onSubmit={saveEdit} style={{ ...styles.modal, maxWidth: 900, maxHeight: "90vh", padding: 24, overflowX: "hidden" }} onClick={(event) => event.stopPropagation()}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 16, marginBottom: 16 }}>
+              <h3 style={{ margin: 0, fontSize: 27, lineHeight: 1.2, fontWeight: 800 }}>勤務セットを修正</h3>
+              <button type="button" disabled={isSavingCorrection} onClick={() => { setEditWorkSet(null); setEditForm(null); }} style={{ ...styles.linkButton, flexShrink: 0, padding: "7px 11px", borderRadius: 9, fontSize: 14 }}>✕ 閉じる</button>
             </div>
-            <div style={styles.editForm}>
-              <label style={styles.label}>従業員
-                <select required value={editForm.employeeId} onChange={(event) => setEditForm({ ...editForm, employeeId: event.target.value })} style={styles.input}>
+            <div className="correction-form-grid" style={{ ...styles.editForm, marginTop: 0, gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 16, padding: 0, background: "transparent", alignItems: "start" }}>
+              <label style={{ ...styles.label, fontSize: 15 }}>従業員
+                <select required value={editForm.employeeId} onChange={(event) => setEditForm({ ...editForm, employeeId: event.target.value })} style={{ ...styles.input, minHeight: 50, fontSize: 17 }}>
                   <option value="">選択してください</option>
                   {employees.filter((employee) => employee.isDeleted !== true).map((employee) => (
                     <option key={employee.id} value={employee.id}>{employee.employeeCode} {employee.name}</option>
                   ))}
                 </select>
               </label>
-              <label style={styles.label}>勤務店舗
-                <select required value={editForm.storeId} onChange={(event) => setEditForm({ ...editForm, storeId: event.target.value })} style={styles.input}>
+              <label style={{ ...styles.label, fontSize: 15 }}>勤務店舗
+                <select required value={editForm.storeId} onChange={(event) => setEditForm({ ...editForm, storeId: event.target.value })} style={{ ...styles.input, minHeight: 50, fontSize: 17 }}>
                   <option value="">選択してください</option>
                   {stores.filter((store) => store.active !== false).map((store) => (
                     <option key={store.id} value={store.id}>{getStoreName(store)}</option>
                   ))}
                 </select>
               </label>
-              <label style={styles.label}>勤務日
+              <label style={{ ...styles.label, fontSize: 15 }}>勤務日
                 <input
                   required
                   type="date"
                   value={editForm.workDate}
                   onChange={(event) => setEditForm(shiftCorrectionWorkDate(editForm, event.target.value))}
-                  style={styles.input}
+                  style={{ ...styles.input, minHeight: 50, fontSize: 17 }}
                 />
               </label>
-              <label style={styles.label}>出勤日時
-                <input required type="datetime-local" value={editForm.clockIn} onChange={(event) => setEditForm({ ...editForm, clockIn: event.target.value, workDate: event.target.value.slice(0, 10) })} style={styles.input} />
+              <label style={{ ...styles.label, fontSize: 15 }}>出勤日時
+                <input required type="datetime-local" value={editForm.clockIn} onChange={(event) => setEditForm({ ...editForm, clockIn: event.target.value, workDate: event.target.value.slice(0, 10) })} style={{ ...styles.input, minHeight: 50, fontSize: 17 }} />
               </label>
-              <label style={styles.label}>退勤日時
-                <input type="datetime-local" value={editForm.clockOut} onChange={(event) => setEditForm({ ...editForm, clockOut: event.target.value })} style={styles.input} />
+              <label style={{ ...styles.label, fontSize: 15 }}>退勤日時
+                <input type="datetime-local" value={editForm.clockOut} onChange={(event) => setEditForm({ ...editForm, clockOut: event.target.value })} style={{ ...styles.input, minHeight: 50, fontSize: 17 }} />
               </label>
               <BreakEditorSection
                 editor={editForm}
@@ -2380,15 +2396,15 @@ export default function AdminPage() {
                 hasIncompleteBreak={editWorkSet.breaks.some((item) => !item.start || !item.end)}
                 formatMinutes={formatMinutesZero}
               />
-              <label style={{ ...styles.label, gridColumn: "1 / -1" }}>修正理由
-                <textarea required value={editForm.reason} onChange={(event) => setEditForm({ ...editForm, reason: event.target.value })} style={{ ...styles.input, minHeight: 88, paddingTop: 10 }} />
+              <label style={{ ...styles.label, gridColumn: "1 / -1", fontSize: 15 }}>修正理由
+                <textarea required value={editForm.reason} onChange={(event) => setEditForm({ ...editForm, reason: event.target.value })} style={{ ...styles.input, height: 88, minHeight: 88, padding: 12, fontSize: 17, resize: "vertical" }} />
               </label>
-              {correctionError && <p style={styles.error}>{correctionError}</p>}
-              <div style={styles.inlineActions}>
-                <button type="submit" disabled={isSavingCorrection} style={{ ...styles.button, opacity: isSavingCorrection ? 0.5 : 1 }}>
+              {correctionError && <p style={{ ...styles.error, gridColumn: "1 / -1" }}>{correctionError}</p>}
+              <div style={{ ...styles.inlineActions, gridColumn: "1 / -1", position: "sticky", bottom: -1, zIndex: 2, padding: "12px 0 0", background: "#ffffff" }}>
+                <button type="submit" disabled={isSavingCorrection} style={{ ...styles.button, minHeight: 46, opacity: isSavingCorrection ? 0.5 : 1 }}>
                   {isSavingCorrection ? "保存中..." : "保存"}
                 </button>
-                <button type="button" disabled={isSavingCorrection} onClick={() => { setEditWorkSet(null); setEditForm(null); }} style={styles.secondaryButton}>キャンセル</button>
+                <button type="button" disabled={isSavingCorrection} onClick={() => { setEditWorkSet(null); setEditForm(null); }} style={{ ...styles.secondaryButton, minHeight: 46 }}>キャンセル</button>
               </div>
             </div>
           </form>
