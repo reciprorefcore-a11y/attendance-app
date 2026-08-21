@@ -7,6 +7,7 @@ import { signOut, getAuth, createUserWithEmailAndPassword } from "firebase/auth"
 import { initializeApp, deleteApp } from "firebase/app";
 import { auth, db, firebaseConfig } from "@/lib/firebase";
 import { useAuthProfile } from "@/lib/auth";
+import { BreakEditorSection } from "@/components/BreakEditorSection";
 import {
   Timestamp,
   addDoc,
@@ -2339,6 +2340,7 @@ export default function AdminPage() {
               <button type="button" disabled={isSavingCorrection} onClick={() => { setEditWorkSet(null); setEditForm(null); }} style={styles.linkButton}>✕ 閉じる</button>
             </div>
             <div style={styles.editForm}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
               <label style={styles.label}>従業員
                 <select required value={editForm.employeeId} onChange={(event) => setEditForm({ ...editForm, employeeId: event.target.value })} style={styles.input}>
                   <option value="">選択してください</option>
@@ -2370,51 +2372,16 @@ export default function AdminPage() {
               <label style={styles.label}>退勤日時
                 <input type="datetime-local" value={editForm.clockOut} onChange={(event) => setEditForm({ ...editForm, clockOut: event.target.value })} style={styles.input} />
               </label>
-              <div style={{ borderTop: "1px solid #E2E8F0", paddingTop: 14 }}>
-                <h4 style={{ margin: "0 0 10px", fontSize: 15 }}>休憩</h4>
-                {editForm.breaks.filter((item) => !item.isDeleted).length === 0 && (
-                  <p style={{ margin: "0 0 10px", color: "#64748B", fontSize: 13 }}>登録された休憩はありません</p>
-                )}
-                {editForm.breaks.map((item, index) => item.isDeleted ? null : (
-                  <div key={item.key} style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 8, alignItems: "end", marginBottom: 10 }}>
-                    <label style={styles.label}>休憩開始日時
-                      <input type="datetime-local" value={item.start} onChange={(event) => setEditForm({
-                        ...editForm,
-                        breaks: editForm.breaks.map((value, itemIndex) => itemIndex === index ? { ...value, start: event.target.value } : value),
-                      })} style={styles.input} />
-                    </label>
-                    <label style={styles.label}>休憩終了日時
-                      <input type="datetime-local" value={item.end} onChange={(event) => setEditForm({
-                        ...editForm,
-                        breaks: editForm.breaks.map((value, itemIndex) => itemIndex === index ? { ...value, end: event.target.value } : value),
-                      })} style={styles.input} />
-                    </label>
-                    <button type="button" onClick={() => setEditForm({
-                      ...editForm,
-                      breaks: editForm.breaks.map((value, itemIndex) => itemIndex === index ? { ...value, isDeleted: true } : value),
-                    })} style={{ ...styles.linkButton, color: "#B91C1C", marginBottom: 2 }}>削除</button>
-                  </div>
-                ))}
-                <button type="button" onClick={() => setEditForm({
-                  ...editForm,
-                  breaks: [...editForm.breaks, {
-                    key: `new-${Date.now()}-${editForm.breaks.length}`,
-                    startLogId: null,
-                    endLogId: null,
-                    start: "",
-                    end: "",
-                    isDeleted: false,
-                  }],
-                })} style={styles.secondaryButton}>＋休憩を追加</button>
-                {editWorkSet.breaks.some((item) => !item.start || !item.end) && (
-                  <p style={{ ...styles.error, marginTop: 10 }}>休憩打刻が未完了です。空欄を補完するか、不要な休憩を削除してください。</p>
-                )}
-                <div style={{ marginTop: 12, padding: 10, background: "#F8FAFC", borderRadius: 8, fontSize: 13 }}>
-                  <div>休憩合計：{formatMinutesZero(correctionPreview?.breakMinutes ?? 0)}</div>
-                  <div>修正後労働時間：{correctionPreview?.workMinutes == null ? "未確定" : formatMinutesZero(correctionPreview.workMinutes)}</div>
-                  <div>修正後深夜時間：{correctionPreview?.nightMinutes == null ? "未確定" : formatMinutesZero(correctionPreview.nightMinutes)}</div>
-                </div>
               </div>
+              <BreakEditorSection
+                editor={editForm}
+                setEditor={setEditForm}
+                breakMinutes={correctionPreview?.breakMinutes ?? 0}
+                workMinutes={correctionPreview?.workMinutes ?? null}
+                nightMinutes={correctionPreview?.nightMinutes ?? null}
+                hasIncompleteBreak={editWorkSet.breaks.some((item) => !item.start || !item.end)}
+                formatMinutes={formatMinutesZero}
+              />
               <label style={styles.label}>修正理由
                 <textarea required value={editForm.reason} onChange={(event) => setEditForm({ ...editForm, reason: event.target.value })} style={{ ...styles.input, minHeight: 88, paddingTop: 10 }} />
               </label>

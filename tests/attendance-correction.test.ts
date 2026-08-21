@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { renderToStaticMarkup } from "react-dom/server";
+import { BreakEditorSection } from "../components/BreakEditorSection.ts";
 import {
+  addCorrectionBreak,
   buildCorrectionAudit,
   buildCorrectionWorkSets,
   calculateCorrectionPreview,
@@ -15,6 +18,33 @@ const at = (value: string) => new Date(`${value}+09:00`);
 const log = (id: string, type: "clock_in" | "clock_out" | "break_start" | "break_end", value: string, storeId = "a"): CalculationClockLog => ({
   id, type, timestamp: at(value), storeId, workStoreName: `店舗${storeId.toUpperCase()}`,
   employeeId: "employee-1", employeeCode: "001", employeeName: "テスト従業員",
+});
+
+test("休憩0件でも休憩UIを常時表示し、追加後に開始・終了入力欄を描画する", () => {
+  const [set] = buildCorrectionWorkSets([
+    log("in", "clock_in", "2026-08-15T17:00:00"),
+    log("out", "clock_out", "2026-08-15T23:10:00"),
+  ]);
+  const editor = openCorrectionEditor(set);
+  const render = (current: typeof editor) => renderToStaticMarkup(BreakEditorSection({
+    editor: current,
+    setEditor: () => undefined,
+    breakMinutes: 0,
+    workMinutes: 370,
+    nightMinutes: 70,
+    hasIncompleteBreak: false,
+    formatMinutes: (minutes) => `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, "0")}`,
+  }));
+
+  const emptyMarkup = render(editor);
+  assert.match(emptyMarkup, />休憩</);
+  assert.match(emptyMarkup, /登録された休憩はありません/);
+  assert.match(emptyMarkup, /＋休憩を追加/);
+
+  const addedMarkup = render(addCorrectionBreak(editor, "new-test"));
+  assert.match(addedMarkup, /aria-label="休憩1開始日時"/);
+  assert.match(addedMarkup, /aria-label="休憩1終了日時"/);
+  assert.doesNotMatch(addedMarkup, /登録された休憩はありません/);
 });
 
 test("17:00-23:00勤務を23:10退勤へ編集でき、クリック用editorが開く", () => {

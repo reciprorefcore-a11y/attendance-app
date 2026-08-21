@@ -303,6 +303,31 @@ export function calculateCorrectionPreview(editor: CorrectionEditor) {
   };
 }
 
+export function addCorrectionBreak(editor: CorrectionEditor, key: string): CorrectionEditor {
+  return {
+    ...editor,
+    breaks: [...editor.breaks, {
+      key,
+      startLogId: null,
+      endLogId: null,
+      start: "",
+      end: "",
+      isDeleted: false,
+    }],
+  };
+}
+
+export function updateCorrectionBreak(
+  editor: CorrectionEditor,
+  index: number,
+  patch: Partial<CorrectionBreakEditor>,
+): CorrectionEditor {
+  return {
+    ...editor,
+    breaks: editor.breaks.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item),
+  };
+}
+
 export function buildCorrectionAudit(
   workSet: CorrectionWorkSet,
   editor: CorrectionEditor,
