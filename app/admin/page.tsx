@@ -324,7 +324,7 @@ function buildMonthlyRows(
     // Find rows for this employee STRICTLY by employeeId
     const employeeRows = rows.filter((r) => r.employeeKey === employee.id);
 
-    let totalWork = 0, totalNight = 0, totalBreak = 0;
+    let totalWork = 0, totalNight = 0, totalBreak = 0, totalHelp = 0;
 
     for (let day = 1; day <= lastDay; day += 1) {
       const date = `${targetMonth}-${String(day).padStart(2, "0")}`;
@@ -334,6 +334,7 @@ function buildMonthlyRows(
         totalWork += row.workMinutes;
         totalNight += row.nightMinutes;
         totalBreak += row.breakMinutes;
+        totalHelp += row.helpMinutes;
       }
 
       const dailyCost = employee.transportationType === "daily" ? (employee.transportationCost ?? 0) : 0;
@@ -351,7 +352,7 @@ function buildMonthlyRows(
         row ? "0:00" : "", row ? "0:00" : "", row ? "0:00" : "", row ? "0:00" : "",
         row ? formatMinutesZero(row.nightMinutes) : "",
         row ? formatMinutesZero(row.breakMinutes) : "",
-        "", "",
+        row ? formatMinutesZero(row.helpMinutes) : "", "",
         row && row.workMinutes > 0 ? "通常" : "",
         "",
         "", "",
@@ -368,7 +369,7 @@ function buildMonthlyRows(
       "", "", "", "",
       formatMinutes(totalNight),
       formatMinutes(totalBreak),
-      "", "", "",
+      formatMinutes(totalHelp), "", "",
       "",
       "", "", "", "", "", "", "", "", "",
     ]);
@@ -648,6 +649,16 @@ export default function AdminPage() {
     [employees],
   );
   const calculationLogs = useMemo(() => toCalculationLogs(timecards), [timecards]);
+  const homeStoreByEmployee = useMemo(
+    () => Object.fromEntries(employees.map((employee) => {
+      const store = stores.find((item) => item.id === employee.storeId);
+      return [employee.id, {
+        storeId: employee.storeId,
+        storeName: store ? getStoreName(store) : employee.storeId,
+      }];
+    })),
+    [employees, stores],
+  );
   const allAttendanceRows = useMemo(
     () =>
       buildAttendanceRows(
@@ -655,8 +666,9 @@ export default function AdminPage() {
         wagesByEmployee,
         wageHistoryStatusByEmployee,
         employeeBaseWages,
+        homeStoreByEmployee,
       ),
-    [calculationLogs, wageHistoryStatusByEmployee, wagesByEmployee, employeeBaseWages],
+    [calculationLogs, wageHistoryStatusByEmployee, wagesByEmployee, employeeBaseWages, homeStoreByEmployee],
   );
   useEffect(() => {
     if (process.env.NODE_ENV === "production") return;
@@ -1565,13 +1577,15 @@ export default function AdminPage() {
             <DataTable
               headers={[
                 "日付",
-                "店舗名",
+                "所属店舗",
                 "従業員名",
                 "出勤",
                 "退勤",
                 "休憩",
                 "労働時間",
                 "深夜時間",
+                "ヘルプ時間",
+                "店舗別内訳",
                 "GPS範囲外",
                 "操作",
               ]}
@@ -1590,6 +1604,18 @@ export default function AdminPage() {
                   <td style={styles.td}>{formatMinutes(row.breakMinutes)}</td>
                   <td style={styles.td}>{formatMinutes(row.workMinutes)}</td>
                   <td style={styles.td}>{formatMinutes(row.nightMinutes)}</td>
+                  <td style={styles.td}>{formatMinutesZero(row.helpMinutes)}</td>
+                  <td style={styles.td}>
+                    {row.sessions.map((session) => (
+                      <div key={`${session.storeId}:${session.clockIn.toISOString()}`}>
+                        {session.storeName || storeNameById(session.storeId)}：{formatTime(session.clockIn)}〜{formatTime(session.clockOut)}
+                        {!session.clockOut && "（未退勤）"}
+                      </div>
+                    ))}
+                    {row.diagnostics.map((diagnostic) => (
+                      <div key={diagnostic.code} style={{ color: "#B91C1C", fontSize: 11 }}>{diagnostic.message}</div>
+                    ))}
+                  </td>
                   <td style={styles.td}>{row.isOutsideGps ? "範囲外" : ""}</td>
                   <td style={styles.td}>
                     {row.logs[0] && (

@@ -384,15 +384,20 @@ test("4101 on 2026-08-13 keeps cross-store punches in their original sessions", 
       storeId: "3", workStoreName: "Pescara 綱島店",
     }),
   ];
-  const rows = buildAttendanceRows(logs);
+  const rows = buildAttendanceRows(logs, {}, {}, {}, {
+    vwuoA0qj0Us1iFEmTO9r: { storeId: "3", storeName: "Pescara 綱島店" },
+  });
   const target = rows.find((row) => row.date === "2026-08-13");
   assert.ok(target);
   assert.equal(target.workMinutes, 42);
   assert.equal(target.nightMinutes, 0);
   assert.equal(target.breakMinutes, 0);
+  assert.equal(target.helpMinutes, 0);
+  assert.equal(target.storeName, "Pescara 綱島店");
   assert.equal(target.clockIn.getHours(), 17);
   assert.equal(target.clockOut?.getHours(), 18);
   assert.equal(target.isMissingClockOut, true);
+  assert.equal(target.diagnostics[0]?.message, "Graine Marche 綱島店の退勤が打刻されていません");
   assert.deepEqual(target.sessions.map((session) => [session.storeId, session.clockOut !== null]), [
     ["3", true],
     ["4", false],
@@ -413,4 +418,24 @@ test("overlapping cross-store sessions use elapsed-time union instead of double 
   assert.equal(row.workMinutes, 360);
   assert.equal(row.nightMinutes, 180);
   assert.ok(row.diagnostics.some((diagnostic) => diagnostic.code === "overlapping_sessions"));
+});
+
+test("a completed multi-store day is one home-store row with help time and no travel gap", () => {
+  const logs = [
+    log("home-in", "clock_in", "2026-08-13T16:00:00", { storeId: "a", workStoreName: "所属店舗A" }),
+    log("home-out", "clock_out", "2026-08-13T16:30:00", { storeId: "a", workStoreName: "所属店舗A" }),
+    log("help-in", "clock_in", "2026-08-13T17:30:00", { storeId: "b", workStoreName: "ヘルプ店舗B" }),
+    log("help-out", "clock_out", "2026-08-13T21:00:00", { storeId: "b", workStoreName: "ヘルプ店舗B" }),
+  ];
+  const [row] = buildAttendanceRows(logs, {}, {}, {}, {
+    "employee-1": { storeId: "a", storeName: "所属店舗A" },
+  });
+  assert.equal(row.storeId, "a");
+  assert.equal(row.storeName, "所属店舗A");
+  assert.equal(row.clockIn.getHours(), 16);
+  assert.equal(row.clockOut?.getHours(), 21);
+  assert.equal(row.workMinutes, 240);
+  assert.equal(row.helpMinutes, 210);
+  assert.equal(row.nightMinutes, 0);
+  assert.equal(row.sessions.length, 2);
 });

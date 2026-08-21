@@ -68,6 +68,7 @@ export type CalculatedAttendanceRow = {
   breakMinutes: number;
   workMinutes: number;
   nightMinutes: number;
+  helpMinutes: number;
   wageAmount: number;
   isWageMissing: boolean;
   isOutsideGps: boolean;
@@ -76,6 +77,8 @@ export type CalculatedAttendanceRow = {
   sessions: WorkSession[];
   diagnostics: AttendanceDiagnostic[];
 };
+
+export type EmployeeHomeStore = { storeId: string; storeName: string };
 
 export type StoreLaborCost = {
   amount: number;
@@ -418,6 +421,7 @@ export function buildAttendanceRows(
   wagesByEmployee: Record<string, CalculationWage[]> = {},
   wageHistoryStatusByEmployee: Record<string, WageHistoryLoadStatus> = {},
   employeeBaseWages: Record<string, number> = {},
+  homeStoreByEmployee: Record<string, EmployeeHomeStore> = {},
 ) {
   const sessions = pairWorkSessions(logs);
   const transportationUsed = new Set<string>();
@@ -461,13 +465,17 @@ export function buildAttendanceRows(
         0,
       );
       const breakMinutes = sumIntervals(breakIntervals);
+      const homeStore = homeStoreByEmployee[grouped[0].employeeKey];
+      const helpIntervals = completed
+        .filter((session) => homeStore && session.storeId !== homeStore.storeId)
+        .flatMap(sessionWorkIntervals);
+      const helpMinutes = sumIntervals(mergeIntervals(helpIntervals));
       const diagnostics = buildAttendanceDiagnostics(grouped, workMinutes, nightMinutes);
-      const storeNames = [...new Set(grouped.map((session) => session.storeName).filter(Boolean))];
       return {
         key,
         date: formatWorkDate(grouped[0].clockIn),
-        storeId: grouped[0].storeId,
-        storeName: storeNames.join(" / "),
+        storeId: homeStore?.storeId ?? grouped[0].storeId,
+        storeName: homeStore?.storeName ?? grouped[0].storeName,
         employeeKey: grouped[0].employeeKey,
         employeeCode: grouped[0].employeeCode,
         employeeName: grouped[0].employeeName,
@@ -476,6 +484,7 @@ export function buildAttendanceRows(
         breakMinutes,
         workMinutes,
         nightMinutes,
+        helpMinutes,
         wageAmount: Math.round(completed.reduce((sum, session) => sum + session.wageAmount, 0)),
         isWageMissing: completed.some((session) => session.isWageMissing),
         isOutsideGps: grouped.some((session) =>
@@ -552,7 +561,13 @@ function buildAttendanceDiagnostics(
     diagnostics.push({ code: "work_at_least_24_hours", message: "1日の労働時間が24時間以上です" });
   }
   if (sessions.some((session) => !session.clockOut)) {
-    diagnostics.push({ code: "missing_clock_out", message: "退勤のない勤務区間があります" });
+    const stores = [...new Set(
+      sessions.filter((session) => !session.clockOut).map((session) => session.storeName || session.storeId),
+    )];
+    diagnostics.push({
+      code: "missing_clock_out",
+      message: `${stores.join("、")}の退勤が打刻されていません`,
+    });
   }
   for (let index = 1; index < sorted.length; index += 1) {
     if (sorted[index - 1].clockOut && sorted[index].clockIn < sorted[index - 1].clockOut!) {
