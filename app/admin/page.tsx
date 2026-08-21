@@ -35,6 +35,7 @@ import {
 import {
   buildCorrectionWorkSets,
   buildCorrectionAudit,
+  calculateCorrectionPreview,
   fromJstDateTimeInput,
   openCorrectionEditor,
   shiftCorrectionWorkDate,
@@ -346,7 +347,7 @@ function buildMonthlyRows(
         row ? formatTime(row.clockIn) : "",
         row ? formatTime(row.clockOut) : "",
         row ? formatMinutes(row.workMinutes) : "",
-        row ? "0:00" : "", row ? "0:00" : "", row ? "0:00" : "", row ? "0:00" : "",
+        row ? "0:00" : "", row ? "0:00" : "", row ? "0:00" : "", row ? formatMinutesZero(row.overtimeMinutes) : "",
         row ? formatMinutesZero(row.nightMinutes) : "",
         row ? formatMinutesZero(row.breakMinutes) : "",
         row ? formatMinutesZero(row.helpMinutes) : "", "",
@@ -399,6 +400,10 @@ export default function AdminPage() {
   const [isSavingCorrection, setIsSavingCorrection] = useState(false);
   const [correctionError, setCorrectionError] = useState("");
   const correctionSaveLock = useRef(false);
+  const correctionPreview = useMemo(
+    () => editForm ? calculateCorrectionPreview(editForm) : null,
+    [editForm],
+  );
   const [message, setMessage] = useState("");
   const [employeeEditingId, setEmployeeEditingId] = useState("");
   const [employeeForm, setEmployeeForm] = useState({
@@ -787,8 +792,8 @@ export default function AdminPage() {
       setCorrectionError(errors.join("。"));
       return;
     }
-    const clockIn = fromJstDateTimeInput(editForm.clockIn)!;
-    const clockOut = fromJstDateTimeInput(editForm.clockOut)!;
+    const clockIn = fromJstDateTimeInput(editForm.clockIn);
+    const clockOut = fromJstDateTimeInput(editForm.clockOut);
     const employee = employees.find((item) => item.id === editForm.employeeId);
     const store = stores.find((item) => item.id === editForm.storeId);
     if (!employee || !store) {
@@ -814,6 +819,9 @@ export default function AdminPage() {
         storeId: store.id,
         workStoreId: store.id,
         workStoreName: getStoreName(store),
+        homeStoreId: employee.storeId ?? "",
+        homeStoreName: storeNameById(employee.storeId ?? ""),
+        isHelp: Boolean(employee.storeId && employee.storeId !== store.id),
         isManualEdited: true,
         isCorrected: true,
         correctedAt: serverTimestamp(),
@@ -823,21 +831,53 @@ export default function AdminPage() {
       const writeLog = (
         ref: ReturnType<typeof doc>,
         existing: CalculationClockLog | null,
-        type: "clock_in" | "clock_out",
+        type: "clock_in" | "clock_out" | "break_start" | "break_end",
         timestamp: Date,
       ) => {
         const value = { ...common, type, timestamp: Timestamp.fromDate(timestamp) };
         if (existing) batch.update(ref, value);
         else batch.set(ref, { ...value, createdAt: serverTimestamp(), isOutsideGps: false });
       };
-      writeLog(inRef, editWorkSet.clockInLog, "clock_in", clockIn);
-      writeLog(outRef, editWorkSet.clockOutLog, "clock_out", clockOut);
+      if (clockIn) writeLog(inRef, editWorkSet.clockInLog, "clock_in", clockIn);
+      if (clockOut) writeLog(outRef, editWorkSet.clockOutLog, "clock_out", clockOut);
+
+      const breakActions: { targetLogId: string; action: "create" | "update" | "delete"; type: "break_start" | "break_end" }[] = [];
+      const breakTargetIds: string[] = [];
+      for (const [index, item] of editForm.breaks.entries()) {
+        const breakKey = item.key.replace(/[^a-zA-Z0-9_-]/g, "_");
+        const startRef = item.startLogId
+          ? doc(db, "clockLogs", item.startLogId)
+          : doc(db, "clockLogs", `correction_${safeKey}_${breakKey}_${index}_break_start`);
+        const endRef = item.endLogId
+          ? doc(db, "clockLogs", item.endLogId)
+          : doc(db, "clockLogs", `correction_${safeKey}_${breakKey}_${index}_break_end`);
+        if (item.isDeleted) {
+          if (item.startLogId) {
+            batch.update(startRef, { ...common, isDeleted: true, deletedAt: serverTimestamp(), deletedBy: common.correctedBy });
+            breakActions.push({ targetLogId: startRef.id, action: "delete", type: "break_start" });
+            breakTargetIds.push(startRef.id);
+          }
+          if (item.endLogId) {
+            batch.update(endRef, { ...common, isDeleted: true, deletedAt: serverTimestamp(), deletedBy: common.correctedBy });
+            breakActions.push({ targetLogId: endRef.id, action: "delete", type: "break_end" });
+            breakTargetIds.push(endRef.id);
+          }
+          continue;
+        }
+        const start = fromJstDateTimeInput(item.start)!;
+        const end = fromJstDateTimeInput(item.end)!;
+        writeLog(startRef, item.startLogId ? ({ id: item.startLogId } as CalculationClockLog) : null, "break_start", start);
+        writeLog(endRef, item.endLogId ? ({ id: item.endLogId } as CalculationClockLog) : null, "break_end", end);
+        breakActions.push({ targetLogId: startRef.id, action: item.startLogId ? "update" : "create", type: "break_start" });
+        breakActions.push({ targetLogId: endRef.id, action: item.endLogId ? "update" : "create", type: "break_end" });
+        breakTargetIds.push(startRef.id, endRef.id);
+      }
 
       const editedIds = new Set([editWorkSet.clockInLog?.id, editWorkSet.clockOutLog?.id].filter(Boolean));
       const latestOtherPunch = calculationLogs
         .filter((log) => log.employeeId === editWorkSet.employeeId && !editedIds.has(log.id))
         .reduce((latest, log) => Math.max(latest, log.timestamp.getTime()), 0);
-      if (employee.id === editWorkSet.employeeId && clockOut.getTime() >= latestOtherPunch) {
+      if (clockOut && employee.id === editWorkSet.employeeId && clockOut.getTime() >= latestOtherPunch) {
         batch.set(doc(db, "clockStates", employee.id), {
           employeeId: employee.id,
           lastType: "clock_out",
@@ -852,8 +892,9 @@ export default function AdminPage() {
         ...buildCorrectionAudit(
           editWorkSet,
           editForm,
-          [inRef.id, outRef.id],
+          [inRef.id, outRef.id, ...breakTargetIds],
           user?.uid ?? profile?.uid ?? "unknown-admin",
+          breakActions,
         ),
         correctedAt: serverTimestamp(),
       });
@@ -2160,7 +2201,7 @@ export default function AdminPage() {
         {activeTab === "edits" && (
           <section style={styles.tabPanel}>
             <h2 style={styles.sectionTitle}>打刻修正</h2>
-            <DataTable headers={["勤務日", "従業員名", "勤務店舗", "出勤", "退勤", "労働時間", "状態", "操作"]}>
+            <DataTable headers={["勤務日", "従業員名", "勤務店舗", "出勤", "退勤", "休憩", "労働時間", "状態", "操作"]}>
               {filteredCorrectionWorkSets.map((workSet) => (
                 <tr key={workSet.key} style={workSet.status === "normal" ? undefined : styles.warningRow}>
                   <td style={styles.td}>{workSet.workDate}</td>
@@ -2168,6 +2209,7 @@ export default function AdminPage() {
                   <td style={styles.td}>{workSet.storeName || storeNameById(workSet.storeId)}</td>
                   <td style={styles.td}>{formatTime(workSet.clockIn)}</td>
                   <td style={styles.td}>{workSet.clockOut ? formatTime(workSet.clockOut) : "未入力"}</td>
+                  <td style={styles.td}>{formatMinutesZero(workSet.breakMinutes)}</td>
                   <td style={styles.td}>{formatMinutesZero(workSet.workMinutes)}</td>
                   <td style={styles.td}>
                     <span style={workSet.status === "normal" ? styles.chainBadge : styles.dangerBadge}>
@@ -2326,8 +2368,53 @@ export default function AdminPage() {
                 <input required type="datetime-local" value={editForm.clockIn} onChange={(event) => setEditForm({ ...editForm, clockIn: event.target.value, workDate: event.target.value.slice(0, 10) })} style={styles.input} />
               </label>
               <label style={styles.label}>退勤日時
-                <input required type="datetime-local" value={editForm.clockOut} onChange={(event) => setEditForm({ ...editForm, clockOut: event.target.value })} style={styles.input} />
+                <input type="datetime-local" value={editForm.clockOut} onChange={(event) => setEditForm({ ...editForm, clockOut: event.target.value })} style={styles.input} />
               </label>
+              <div style={{ borderTop: "1px solid #E2E8F0", paddingTop: 14 }}>
+                <h4 style={{ margin: "0 0 10px", fontSize: 15 }}>休憩</h4>
+                {editForm.breaks.filter((item) => !item.isDeleted).length === 0 && (
+                  <p style={{ margin: "0 0 10px", color: "#64748B", fontSize: 13 }}>登録された休憩はありません</p>
+                )}
+                {editForm.breaks.map((item, index) => item.isDeleted ? null : (
+                  <div key={item.key} style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 8, alignItems: "end", marginBottom: 10 }}>
+                    <label style={styles.label}>休憩開始日時
+                      <input type="datetime-local" value={item.start} onChange={(event) => setEditForm({
+                        ...editForm,
+                        breaks: editForm.breaks.map((value, itemIndex) => itemIndex === index ? { ...value, start: event.target.value } : value),
+                      })} style={styles.input} />
+                    </label>
+                    <label style={styles.label}>休憩終了日時
+                      <input type="datetime-local" value={item.end} onChange={(event) => setEditForm({
+                        ...editForm,
+                        breaks: editForm.breaks.map((value, itemIndex) => itemIndex === index ? { ...value, end: event.target.value } : value),
+                      })} style={styles.input} />
+                    </label>
+                    <button type="button" onClick={() => setEditForm({
+                      ...editForm,
+                      breaks: editForm.breaks.map((value, itemIndex) => itemIndex === index ? { ...value, isDeleted: true } : value),
+                    })} style={{ ...styles.linkButton, color: "#B91C1C", marginBottom: 2 }}>削除</button>
+                  </div>
+                ))}
+                <button type="button" onClick={() => setEditForm({
+                  ...editForm,
+                  breaks: [...editForm.breaks, {
+                    key: `new-${Date.now()}-${editForm.breaks.length}`,
+                    startLogId: null,
+                    endLogId: null,
+                    start: "",
+                    end: "",
+                    isDeleted: false,
+                  }],
+                })} style={styles.secondaryButton}>＋休憩を追加</button>
+                {editWorkSet.breaks.some((item) => !item.start || !item.end) && (
+                  <p style={{ ...styles.error, marginTop: 10 }}>休憩打刻が未完了です。空欄を補完するか、不要な休憩を削除してください。</p>
+                )}
+                <div style={{ marginTop: 12, padding: 10, background: "#F8FAFC", borderRadius: 8, fontSize: 13 }}>
+                  <div>休憩合計：{formatMinutesZero(correctionPreview?.breakMinutes ?? 0)}</div>
+                  <div>修正後労働時間：{correctionPreview?.workMinutes == null ? "未確定" : formatMinutesZero(correctionPreview.workMinutes)}</div>
+                  <div>修正後深夜時間：{correctionPreview?.nightMinutes == null ? "未確定" : formatMinutesZero(correctionPreview.nightMinutes)}</div>
+                </div>
+              </div>
               <label style={styles.label}>修正理由
                 <textarea required value={editForm.reason} onChange={(event) => setEditForm({ ...editForm, reason: event.target.value })} style={{ ...styles.input, minHeight: 88, paddingTop: 10 }} />
               </label>

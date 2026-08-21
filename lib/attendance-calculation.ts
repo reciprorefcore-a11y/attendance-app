@@ -69,6 +69,7 @@ export type CalculatedAttendanceRow = {
   workMinutes: number;
   nightMinutes: number;
   helpMinutes: number;
+  overtimeMinutes: number;
   wageAmount: number;
   isWageMissing: boolean;
   isOutsideGps: boolean;
@@ -485,6 +486,7 @@ export function buildAttendanceRows(
         workMinutes,
         nightMinutes,
         helpMinutes,
+        overtimeMinutes: Math.max(0, workMinutes - 8 * 60),
         wageAmount: Math.round(completed.reduce((sum, session) => sum + session.wageAmount, 0)),
         isWageMissing: completed.some((session) => session.isWageMissing),
         isOutsideGps: grouped.some((session) =>
