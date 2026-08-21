@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   aggregateLaborCostByStore,
+  auditAttendance,
   buildAttendanceRows,
   calculateEstimatedLaborCost,
   calculateNightMinutes,
@@ -362,4 +363,54 @@ test("employee base wage fallback does not count transportation for same-day mul
   // 4 hours normal: 4 * 1200 = 4800, no night, no transportation
   assert.equal(rows[0].wageAmount, 4800);
   assert.equal(rows[0].isWageMissing, false);
+});
+
+test("4101 on 2026-08-13 keeps cross-store punches in their original sessions", () => {
+  const logs = [
+    log("pescara-in", "clock_in", "2026-08-13T17:57:13", {
+      employeeId: "vwuoA0qj0Us1iFEmTO9r", employeeCode: "4101", employeeName: "溝上 太康",
+      storeId: "3", workStoreName: "Pescara 綱島店",
+    }),
+    log("pescara-out", "clock_out", "2026-08-13T18:39:11", {
+      employeeId: "vwuoA0qj0Us1iFEmTO9r", employeeCode: "4101", employeeName: "溝上 太康",
+      storeId: "3", workStoreName: "Pescara 綱島店",
+    }),
+    log("graine-in", "clock_in", "2026-08-13T18:44:12", {
+      employeeId: "vwuoA0qj0Us1iFEmTO9r", employeeCode: "4101", employeeName: "溝上 太康",
+      storeId: "4", workStoreName: "Graine Marche 綱島店",
+    }),
+    log("next-day-pescara-out", "clock_out", "2026-08-14T23:04:06", {
+      employeeId: "vwuoA0qj0Us1iFEmTO9r", employeeCode: "4101", employeeName: "溝上 太康",
+      storeId: "3", workStoreName: "Pescara 綱島店",
+    }),
+  ];
+  const rows = buildAttendanceRows(logs);
+  const target = rows.find((row) => row.date === "2026-08-13");
+  assert.ok(target);
+  assert.equal(target.workMinutes, 42);
+  assert.equal(target.nightMinutes, 0);
+  assert.equal(target.breakMinutes, 0);
+  assert.equal(target.clockIn.getHours(), 17);
+  assert.equal(target.clockOut?.getHours(), 18);
+  assert.equal(target.isMissingClockOut, true);
+  assert.deepEqual(target.sessions.map((session) => [session.storeId, session.clockOut !== null]), [
+    ["3", true],
+    ["4", false],
+  ]);
+  const issues = auditAttendance(logs, rows);
+  assert.ok(issues.some((issue) => issue.code === "missing_clock_out" && issue.date === "2026-08-13"));
+  assert.ok(issues.some((issue) => issue.code === "orphan_clock_out" && issue.date === "2026-08-14"));
+});
+
+test("overlapping cross-store sessions use elapsed-time union instead of double counting", () => {
+  const logs = [
+    log("a-in", "clock_in", "2026-08-13T19:00:00", { storeId: "a", workStoreName: "店舗A" }),
+    log("a-out", "clock_out", "2026-08-13T23:00:00", { storeId: "a", workStoreName: "店舗A" }),
+    log("b-in", "clock_in", "2026-08-13T21:00:00", { storeId: "b", workStoreName: "店舗B" }),
+    log("b-out", "clock_out", "2026-08-14T01:00:00", { storeId: "b", workStoreName: "店舗B" }),
+  ];
+  const [row] = buildAttendanceRows(logs);
+  assert.equal(row.workMinutes, 360);
+  assert.equal(row.nightMinutes, 180);
+  assert.ok(row.diagnostics.some((diagnostic) => diagnostic.code === "overlapping_sessions"));
 });

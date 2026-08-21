@@ -1,26 +1,37 @@
 "use client";
 
-import { db } from "@/lib/firebase";
+import { auth, db } from "@/lib/firebase";
 import {
-  addDoc,
+  createPunchId,
+  FIRESTORE_TIMEOUT_MS,
+  getAllowedActions,
+  getCurrentPosition,
+  PunchError,
+  retryTransient,
+  toPunchError,
+  validateAccuracy,
+  withTimeout,
+  type ClockType,
+} from "@/lib/clock-punch";
+import {
   collection,
   doc,
   getDoc,
+  getDocFromServer,
   getDocs,
   limit,
   onSnapshot,
   orderBy,
   query,
+  runTransaction,
   serverTimestamp,
   where,
 } from "firebase/firestore";
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import { useSearchParams } from "next/navigation";
 
 // ─── 型定義 ───────────────────────────────────────────────────────────────
-
-type ClockType = "clock_in" | "clock_out" | "break_start" | "break_end";
 
 type StoreDoc = {
   name?: string;
@@ -52,18 +63,12 @@ type GpsState = {
   isOutsideGps: boolean;
   isBlocked: boolean;
   message: string;
+  accuracy: number | null;
 };
 
 type Step = "input" | "confirm";
 
 // ─── 打刻許可ロジック ──────────────────────────────────────────────────────────
-
-function getAllowedActions(last: ClockType | null): ClockType[] {
-  if (last === null || last === "clock_out") return ["clock_in"];
-  if (last === "clock_in" || last === "break_end") return ["break_start", "clock_out"];
-  if (last === "break_start") return ["break_end"];
-  return [];
-}
 
 // ─── ボタン定義 ─────────────────────────────────────────────────────────────
 
@@ -108,6 +113,7 @@ function ClockPageContent() {
 
   const [lastPunchType, setLastPunchType] = useState<ClockType | null>(null);
   const [isLastPunchLoading, setIsLastPunchLoading] = useState(false);
+  const [lastPunchLoadFailed, setLastPunchLoadFailed] = useState(false);
 
   const [gps, setGps] = useState<GpsState>({
     latitude: null,
@@ -116,22 +122,26 @@ function ClockPageContent() {
     isOutsideGps: false,
     isBlocked: false,
     message: "位置情報は未取得です",
+    accuracy: null,
   });
 
   const [isSearching, setIsSearching] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
+  const [retryType, setRetryType] = useState<ClockType | null>(null);
+  const submissionLock = useRef(false);
+  const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ─── 店舗データ購読 ──────────────────────────────────────────────────────
 
   useEffect(() => {
     if (!workStoreId) {
-      setIsStoreLoading(false);
+      queueMicrotask(() => setIsStoreLoading(false));
       return;
     }
 
-    setIsStoreLoading(true);
+    queueMicrotask(() => setIsStoreLoading(true));
     const unsubscribe = onSnapshot(
       doc(db, "stores", workStoreId),
       (snap) => {
@@ -166,7 +176,7 @@ function ClockPageContent() {
   useEffect(() => {
     if (!workStore) return;
     if (workStore.gpsEnabled === false) {
-      setGps({ latitude: null, longitude: null, distanceMeters: null, isOutsideGps: false, isBlocked: false, message: "GPS打刻チェック無効" });
+      queueMicrotask(() => setGps({ latitude: null, longitude: null, distanceMeters: null, isOutsideGps: false, isBlocked: false, message: "GPS打刻チェック無効", accuracy: null }));
       return;
     }
     const lat = workStore.latitude ?? null;
@@ -174,46 +184,29 @@ function ClockPageContent() {
     const radius = workStore.gpsRadiusMeters ?? 0;
 
     if (lat === null || lng === null || !radius || !navigator.geolocation) {
-      setGps((prev) => ({ ...prev, distanceMeters: null, isOutsideGps: false, isBlocked: false, message: "GPS取得不可のため位置未確認で打刻できます" }));
+      queueMicrotask(() => setGps((prev) => ({ ...prev, distanceMeters: null, isOutsideGps: false, isBlocked: true, message: "店舗のGPS設定または端末の位置情報を確認してください", accuracy: null })));
       return;
     }
 
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        const dist = calcDistance(pos.coords.latitude, pos.coords.longitude, lat, lng);
+    getCurrentPosition(navigator.geolocation)
+      .then((pos) => {
+        validateAccuracy(pos.accuracy, radius);
+        const dist = calcDistance(pos.latitude, pos.longitude, lat, lng);
         const outside = dist > radius;
         setGps({
-          latitude: pos.coords.latitude,
-          longitude: pos.coords.longitude,
+          latitude: pos.latitude,
+          longitude: pos.longitude,
           distanceMeters: dist,
           isOutsideGps: outside,
           isBlocked: false,
           message: outside ? "GPS許可範囲外です。打刻は可能です。" : "GPS確認OK",
+          accuracy: pos.accuracy,
         });
-      },
-      (error) => {
-        if (error.code === 1) {
-          setGps({
-            latitude: null,
-            longitude: null,
-            distanceMeters: null,
-            isOutsideGps: false,
-            isBlocked: true,
-            message: "位置情報の許可が必要です。スマホの設定からブラウザの位置情報を許可してください。",
-          });
-        } else {
-          setGps({
-            latitude: null,
-            longitude: null,
-            distanceMeters: null,
-            isOutsideGps: false,
-            isBlocked: false,
-            message: "GPS取得不可のため位置未確認で打刻できます",
-          });
-        }
-      },
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 },
-    );
+      })
+      .catch((error) => {
+        const message = toPunchError(error).message;
+        setGps({ latitude: null, longitude: null, distanceMeters: null, isOutsideGps: false, isBlocked: true, message, accuracy: null });
+      });
   }, [workStore]);
 
   // ─── リセット ─────────────────────────────────────────────────────────────
@@ -225,21 +218,24 @@ function ClockPageContent() {
     setHomeStoreName("");
     setIsHelp(false);
     setLastPunchType(null);
+    setLastPunchLoadFailed(false);
     setErrorMessage("");
     setSuccessMessage("");
+    setRetryType(null);
   };
 
   // ─── 直前打刻取得（非同期・並行） ──────────────────────────────────────────
 
   const fetchLastPunch = async (employeeId: string): Promise<ClockType | null> => {
-    const lastSnap = await getDocs(
+    await auth.authStateReady();
+    const lastSnap = await withTimeout(getDocs(
       query(
         collection(db, "clockLogs"),
         where("employeeId", "==", employeeId),
         orderBy("timestamp", "desc"),
         limit(5),
       ),
-    );
+    ), FIRESTORE_TIMEOUT_MS, "直前の打刻状態の取得がタイムアウトしました。再試行してください。");
     const lastDoc = lastSnap.docs.find((d) => d.data().isDeleted !== true);
     return lastDoc ? ((lastDoc.data().type as ClockType) ?? null) : null;
   };
@@ -254,13 +250,14 @@ function ClockPageContent() {
     setErrorMessage("");
 
     try {
-      const snap = await getDocs(
+      await auth.authStateReady();
+      const snap = await withTimeout(getDocs(
         query(
           collection(db, "employees"),
           where("employeeCode", "==", code),
           limit(3),
         ),
-      );
+      ), FIRESTORE_TIMEOUT_MS, "社員情報の取得がタイムアウトしました。通信状態を確認してください。");
 
       const found = snap.docs
         .map((d) => ({ id: d.id, ...(d.data() as Omit<EmployeeDoc, "id">) }))
@@ -282,6 +279,7 @@ function ClockPageContent() {
       setIsHelp(helpFlag);
       setHomeStoreName(helpFlag ? "" : workStore?.name ?? "");
       setLastPunchType(null);
+      setLastPunchLoadFailed(false);
       setStep("confirm");
       setIsSearching(false);
 
@@ -297,10 +295,14 @@ function ClockPageContent() {
       // 最新打刻を非同期取得（完了まで打刻ボタンを disabled に）
       setIsLastPunchLoading(true);
       fetchLastPunch(emp.id)
-        .then((lastType) => setLastPunchType(lastType))
+        .then((lastType) => {
+          setLastPunchType(lastType);
+          setLastPunchLoadFailed(false);
+        })
         .catch((err) => {
           console.error("last punch fetch failed", err);
-          setLastPunchType(null);
+          setErrorMessage(toPunchError(err).message);
+          setLastPunchLoadFailed(true);
         })
         .finally(() => setIsLastPunchLoading(false));
     } catch (err) {
@@ -314,22 +316,72 @@ function ClockPageContent() {
 
   const allowedActions = useMemo(() => getAllowedActions(lastPunchType), [lastPunchType]);
 
+  const retryLastPunch = async () => {
+    if (!employee || isLastPunchLoading) return;
+    setIsLastPunchLoading(true);
+    setErrorMessage("");
+    try {
+      setLastPunchType(await fetchLastPunch(employee.id));
+      setLastPunchLoadFailed(false);
+    } catch (error) {
+      setErrorMessage(toPunchError(error).message);
+      setLastPunchLoadFailed(true);
+    } finally {
+      setIsLastPunchLoading(false);
+    }
+  };
+
   const punch = async (type: ClockType) => {
+    if (submissionLock.current) return;
     if (!workStoreId || !workStore || !employee) return;
     if (!allowedActions.includes(type)) {
       setErrorMessage("この操作は現在実行できません");
       return;
     }
 
+    submissionLock.current = true;
     setIsSubmitting(true);
     setErrorMessage("");
+    setSuccessMessage("");
+    setRetryType(null);
 
+    let observedGpsAccuracy = gps.accuracy;
     try {
+      await withTimeout(auth.authStateReady(), 5_000, "認証状態の確認がタイムアウトしました。再試行してください。");
+
+      let currentGps = gps;
+      if (workStore.gpsEnabled !== false) {
+        const storeLat = workStore.latitude;
+        const storeLng = workStore.longitude;
+        const radius = workStore.gpsRadiusMeters ?? 0;
+        if (storeLat === undefined || storeLng === undefined || radius <= 0) {
+          throw new PunchError("location", "店舗の位置情報設定が不完全です。管理者に連絡してください。", false);
+        }
+        const position = await getCurrentPosition(navigator.geolocation);
+        observedGpsAccuracy = position.accuracy;
+        validateAccuracy(position.accuracy, radius);
+        const distance = calcDistance(position.latitude, position.longitude, storeLat, storeLng);
+        currentGps = {
+          latitude: position.latitude,
+          longitude: position.longitude,
+          accuracy: position.accuracy,
+          distanceMeters: distance,
+          isOutsideGps: distance > radius,
+          isBlocked: false,
+          message: distance > radius ? "GPS許可範囲外です。打刻は可能です。" : "GPS確認OK",
+        };
+        setGps(currentGps);
+      }
+
       let wageAtWork = employee.hourlyWage ?? employee.baseHourlyWage ?? 0;
       let resolvedHomeStoreName = homeStoreName;
 
       if (isHelp) {
-        const homeSnap = await getDoc(doc(db, "stores", employee.storeId));
+        const homeSnap = await withTimeout(
+          getDoc(doc(db, "stores", employee.storeId)),
+          FIRESTORE_TIMEOUT_MS,
+          "所属店舗情報の取得がタイムアウトしました。再試行してください。",
+        );
         const homeData = homeSnap.exists() ? (homeSnap.data() as StoreDoc) : null;
         if (homeData?.name) resolvedHomeStoreName = homeData.name;
         const helpWage = homeData?.helpHourlyWage ?? homeData?.helpWage ?? 0;
@@ -349,20 +401,68 @@ function ClockPageContent() {
         hourlyWageAtWork: wageAtWork,
         type,
         timestamp: serverTimestamp(),
-        latitude: gps.latitude ?? null,
-        longitude: gps.longitude ?? null,
-        isOutsideGps: !!gps.isOutsideGps,
+        latitude: currentGps.latitude ?? null,
+        longitude: currentGps.longitude ?? null,
+        isOutsideGps: !!currentGps.isOutsideGps,
+        gpsAccuracy: currentGps.accuracy ?? null,
       };
-      await addDoc(collection(db, "clockLogs"), payload);
 
-      // ローカル state を直接更新（Firestore 再取得なし）
+      const punchId = createPunchId(employee.id, type, Date.now());
+      const logRef = doc(db, "clockLogs", punchId);
+      const stateRef = doc(db, "clockStates", employee.id);
+      await retryTransient(
+        () => withTimeout(runTransaction(db, async (transaction) => {
+          const [logSnap, stateSnap] = await Promise.all([
+            transaction.get(logRef),
+            transaction.get(stateRef),
+          ]);
+          if (logSnap.exists()) return;
+
+          const atomicLastType = stateSnap.exists()
+            ? (stateSnap.data().lastType as ClockType | null)
+            : lastPunchType;
+          if (!getAllowedActions(atomicLastType).includes(type)) {
+            throw new PunchError("state", "別の端末で打刻状態が更新されました。社員番号から確認し直してください。", false);
+          }
+
+          transaction.set(logRef, payload);
+          transaction.set(stateRef, {
+            employeeId: employee.id,
+            lastType: type,
+            lastLogId: punchId,
+            storeId: workStoreId,
+            updatedAt: serverTimestamp(),
+          });
+        }), FIRESTORE_TIMEOUT_MS, "通信がタイムアウトしました。保存状況を確認して再試行してください。"),
+        1,
+      );
+
+      await retryTransient(
+        () => withTimeout(getDocFromServer(logRef), FIRESTORE_TIMEOUT_MS, "保存確認がタイムアウトしました。再試行してください。"),
+        1,
+      ).then((snapshot) => {
+        if (!snapshot.exists()) throw new PunchError("network", "保存を確認できませんでした。再試行してください。", true);
+      });
+
       setLastPunchType(type);
-      setSuccessMessage("打刻しました");
-      setTimeout(resetToInput, 3000);
+      setSuccessMessage("打刻が完了しました");
+      if (resetTimer.current) clearTimeout(resetTimer.current);
+      resetTimer.current = setTimeout(resetToInput, 3000);
     } catch (err) {
-      console.error("clock save failed", err);
-      setErrorMessage("打刻の保存に失敗しました。通信状態を確認してください。");
+      const punchError = toPunchError(err);
+      console.error("[clock-punch] failed", {
+        errorKind: punchError.kind,
+        errorCode: err && typeof err === "object" && "code" in err ? String(err.code) : undefined,
+        employeeId: employee.id,
+        storeId: workStoreId,
+        clockType: type,
+        occurredAt: new Date().toISOString(),
+        gpsAccuracy: observedGpsAccuracy,
+      });
+      setErrorMessage(punchError.message);
+      setRetryType(punchError.retryable ? type : null);
     } finally {
+      submissionLock.current = false;
       setIsSubmitting(false);
     }
   };
@@ -388,6 +488,11 @@ function ClockPageContent() {
         {workStoreId && isStoreLoading && <p style={styles.info}>読み込み中</p>}
         {errorMessage && <p style={styles.error}>{errorMessage}</p>}
         {successMessage && <p style={styles.success}>{successMessage}</p>}
+        {errorMessage && retryType && step === "confirm" && (
+          <button type="button" onClick={() => punch(retryType)} disabled={isSubmitting} style={styles.retryButton}>
+            {isSubmitting ? "再試行中..." : "再試行"}
+          </button>
+        )}
 
         {/* 社員番号入力 */}
         {workStore && step === "input" && (
@@ -436,9 +541,14 @@ function ClockPageContent() {
               {isLastPunchLoading && (
                 <p style={styles.loadingPunch}>打刻状態を確認中...</p>
               )}
+              {lastPunchLoadFailed && (
+                <button type="button" onClick={retryLastPunch} disabled={isLastPunchLoading} style={styles.retryButton}>
+                  打刻状態を再確認
+                </button>
+              )}
               {clockButtons.map((btn) => {
                 const allowed = allowedActions.includes(btn.type);
-                const isDisabled = isSubmitting || isLastPunchLoading || !allowed || gps.isBlocked;
+                const isDisabled = isSubmitting || isLastPunchLoading || lastPunchLoadFailed || !allowed;
                 return (
                   <button
                     key={btn.type}
@@ -475,6 +585,7 @@ function ClockPageContent() {
                 距離 {Math.round(gps.distanceMeters)}m / 許可範囲 {workStore.gpsRadiusMeters ?? 0}m
               </p>
             )}
+            {gps.accuracy !== null && <p style={styles.gpsSub}>GPS精度 ±{Math.round(gps.accuracy)}m</p>}
           </div>
         )}
       </section>
@@ -653,6 +764,16 @@ const styles = {
     cursor: "pointer",
     padding: "4px 0",
     textAlign: "left" as const,
+  },
+  retryButton: {
+    minHeight: 48,
+    border: 0,
+    borderRadius: 14,
+    background: "#991B1B",
+    color: "#ffffff",
+    fontSize: 16,
+    fontWeight: 800,
+    cursor: "pointer",
   },
   gpsBox: {
     borderRadius: 14,

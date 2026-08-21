@@ -24,6 +24,7 @@ import {
 import type { ClockType, Employee, Store } from "@/lib/attendance";
 import {
   aggregateLaborCostByStore,
+  auditAttendance,
   buildAttendanceRows,
   type CalculatedAttendanceRow,
   type CalculationClockLog,
@@ -250,10 +251,15 @@ function formatDateTime(date: Date | null) {
 
 function formatTime(date: Date | null) {
   if (!date) return "";
-  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(
-    2,
-    "0",
-  )}`;
+  const parts = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+  const hour = parts.find((part) => part.type === "hour")?.value ?? "00";
+  const minute = parts.find((part) => part.type === "minute")?.value ?? "00";
+  return `${hour}:${minute}`;
 }
 
 function formatMinutes(minutes: number) {
@@ -641,15 +647,16 @@ export default function AdminPage() {
       ),
     [employees],
   );
+  const calculationLogs = useMemo(() => toCalculationLogs(timecards), [timecards]);
   const allAttendanceRows = useMemo(
     () =>
       buildAttendanceRows(
-        toCalculationLogs(timecards),
+        calculationLogs,
         wagesByEmployee,
         wageHistoryStatusByEmployee,
         employeeBaseWages,
       ),
-    [timecards, wageHistoryStatusByEmployee, wagesByEmployee, employeeBaseWages],
+    [calculationLogs, wageHistoryStatusByEmployee, wagesByEmployee, employeeBaseWages],
   );
   useEffect(() => {
     if (process.env.NODE_ENV === "production") return;
@@ -672,6 +679,20 @@ export default function AdminPage() {
     () => allAttendanceRows.filter((row) => row.date.startsWith(targetMonth)),
     [allAttendanceRows, targetMonth],
   );
+  const attendanceAuditIssues = useMemo(
+    () => auditAttendance(calculationLogs, allAttendanceRows).filter((issue) => issue.date.startsWith(targetMonth)),
+    [allAttendanceRows, calculationLogs, targetMonth],
+  );
+  useEffect(() => {
+    if (attendanceAuditIssues.length === 0) return;
+    const counts = new Map<string, number>();
+    for (const issue of attendanceAuditIssues) counts.set(issue.code, (counts.get(issue.code) ?? 0) + 1);
+    console.warn("[attendance] calculation diagnostics", {
+      targetMonth,
+      total: attendanceAuditIssues.length,
+      counts: Object.fromEntries(counts),
+    });
+  }, [attendanceAuditIssues, targetMonth]);
   const attendanceRows = useMemo(
     () =>
       allMonthAttendanceRows.filter(
@@ -806,6 +827,11 @@ export default function AdminPage() {
   };
 
   const downloadExcel = async () => {
+    if (attendanceAuditIssues.length > 0) {
+      window.alert(
+        `勤怠データに${attendanceAuditIssues.length}件の異常を検出しました。未退勤や対応する出勤のない退勤を確認してください。Excelは検証済みの勤務区間だけで出力します。`,
+      );
+    }
     const XLSX = await import("xlsx");
     const rows = buildMonthlyRows(allMonthAttendanceRows, targetMonth, employees, stores, selectedExportStoreIds);
     const worksheet = XLSX.utils.aoa_to_sheet(rows);

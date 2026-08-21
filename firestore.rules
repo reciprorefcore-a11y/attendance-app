@@ -86,21 +86,30 @@ service cloud.firestore {
 
     // ── clockLogs ────────────────────────────────────────────────────────────
     // 作成：誰でも可（未認証の QR 打刻）。storeId が文字列であることを最低限検証。
-    // 読み取り：admin（全店舗）、fc_manager・area_manager（担当店舗）、manager（自店舗のみ）、未認証（打刻ページ）
+    // 読み取り：打刻ページはログイン状態にかかわらず直前打刻を取得するため許可。
     // 更新（打刻修正・論理削除）：admin・fc_manager・area_manager（担当店舗）、manager（自店舗のみ）
     // 物理削除：admin のみ
     match /clockLogs/{logId} {
       allow create: if request.resource.data.storeId is string
                     && request.resource.data.storeId.size() > 0;
-      allow read:   if isAdmin()
-                    || (isFcManager() && resource.data.storeId in myStoreIds())
-                    || (isAreaManager() && resource.data.storeId in myStoreIds())
-                    || (isManager() && resource.data.storeId == myStoreId())
-                    || request.auth == null; // 打刻ページ（未認証）の直前打刻取得を許可
+      allow read: if true;
       allow update: if isAdmin()
                     || (isFcManager() && resource.data.storeId in myStoreIds())
                     || (isAreaManager() && resource.data.storeId in myStoreIds())
                     || (isManager() && resource.data.storeId == myStoreId());
+      allow delete: if isAdmin();
+    }
+
+    // 打刻ページの原子的な状態遷移にだけ使用する。個人情報は保持しない。
+    match /clockStates/{employeeId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.employeeId == employeeId
+                            && request.resource.data.lastType in [
+                              'clock_in', 'break_start', 'break_end', 'clock_out'
+                            ]
+                            && request.resource.data.lastLogId is string
+                            && request.resource.data.storeId is string
+                            && request.resource.data.updatedAt == request.time;
       allow delete: if isAdmin();
     }
 

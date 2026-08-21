@@ -74,11 +74,31 @@ export type CalculatedAttendanceRow = {
   isMissingClockOut: boolean;
   logs: CalculationClockLog[];
   sessions: WorkSession[];
+  diagnostics: AttendanceDiagnostic[];
 };
 
 export type StoreLaborCost = {
   amount: number;
   missingWageEmployeeKeys: string[];
+};
+
+export type AttendanceDiagnosticCode =
+  | "work_exceeds_elapsed"
+  | "night_exceeds_work"
+  | "work_at_least_24_hours"
+  | "missing_clock_out"
+  | "orphan_clock_out"
+  | "overlapping_sessions";
+
+export type AttendanceDiagnostic = {
+  code: AttendanceDiagnosticCode;
+  message: string;
+};
+
+export type AttendanceAuditIssue = AttendanceDiagnostic & {
+  employeeKey: string;
+  date: string;
+  storeId?: string;
 };
 
 export function truncateToMinute(date: Date) {
@@ -94,9 +114,12 @@ export function diffMinutes(start: Date, end: Date) {
 }
 
 export function formatWorkDate(date: Date) {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(
-    date.getDate(),
-  ).padStart(2, "0")}`;
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
 }
 
 function normalizedType(type: string) {
@@ -146,24 +169,25 @@ export function calculateNightMinutes(
 ) {
   if (end <= start) return 0;
   let total = 0;
-  const cursor = truncateToMinute(start);
-  cursor.setHours(0, 0, 0, 0);
-  cursor.setDate(cursor.getDate() - 1);
+  let dateKey = addDays(formatWorkDate(start), -1);
 
-  while (cursor < end) {
-    const nightStart = new Date(cursor);
-    nightStart.setHours(22, 0, 0, 0);
-    const nightEnd = new Date(cursor);
-    nightEnd.setDate(nightEnd.getDate() + 1);
-    nightEnd.setHours(5, 0, 0, 0);
+  while (new Date(`${dateKey}T22:00:00+09:00`) < end) {
+    const nightStart = new Date(`${dateKey}T22:00:00+09:00`);
+    const nightEnd = new Date(`${addDays(dateKey, 1)}T05:00:00+09:00`);
     let minutes = overlapMinutes(start, end, nightStart, nightEnd);
     for (const item of breaks) {
       minutes -= overlapMinutes(item.start, item.end, nightStart, nightEnd);
     }
     total += Math.max(0, minutes);
-    cursor.setDate(cursor.getDate() + 1);
+    dateKey = addDays(dateKey, 1);
   }
   return total;
+}
+
+function addDays(dateKey: string, days: number) {
+  const date = new Date(`${dateKey}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
 }
 
 export function calculateWorkMinutes(
@@ -178,11 +202,15 @@ export function pairWorkSessions(logs: CalculationClockLog[]) {
   const byEmployee = new Map<string, CalculationClockLog[]>();
   for (const log of logs) {
     const employeeKey = log.employeeId || log.employeeCode || log.employeeName || "unknown";
-    byEmployee.set(employeeKey, [...(byEmployee.get(employeeKey) ?? []), log]);
+    // A clock-out at another store must never close this store's active session.
+    const pairingKey = `${employeeKey}:${log.storeId}`;
+    byEmployee.set(pairingKey, [...(byEmployee.get(pairingKey) ?? []), log]);
   }
 
   const sessions: WorkSession[] = [];
-  for (const [employeeKey, employeeLogs] of byEmployee) {
+  for (const employeeLogs of byEmployee.values()) {
+    const firstLog = employeeLogs[0];
+    const employeeKey = firstLog.employeeId || firstLog.employeeCode || firstLog.employeeName || "unknown";
     const sorted = employeeLogs
       .slice()
       .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
@@ -424,6 +452,16 @@ export function buildAttendanceRows(
   return Array.from(groups.entries())
     .map(([key, grouped]) => {
       const completed = grouped.filter((session) => session.clockOut);
+      const workIntervals = completed.flatMap(sessionWorkIntervals);
+      const mergedWorkIntervals = mergeIntervals(workIntervals);
+      const breakIntervals = mergeIntervals(completed.flatMap((session) => session.breaks));
+      const workMinutes = sumIntervals(mergedWorkIntervals);
+      const nightMinutes = mergedWorkIntervals.reduce(
+        (sum, interval) => sum + calculateNightMinutes(interval.start, interval.end),
+        0,
+      );
+      const breakMinutes = sumIntervals(breakIntervals);
+      const diagnostics = buildAttendanceDiagnostics(grouped, workMinutes, nightMinutes);
       const storeNames = [...new Set(grouped.map((session) => session.storeName).filter(Boolean))];
       return {
         key,
@@ -435,9 +473,9 @@ export function buildAttendanceRows(
         employeeName: grouped[0].employeeName,
         clockIn: grouped[0].clockIn,
         clockOut: completed.at(-1)?.clockOut ?? null,
-        breakMinutes: completed.reduce((sum, session) => sum + session.breakMinutes, 0),
-        workMinutes: completed.reduce((sum, session) => sum + session.workMinutes, 0),
-        nightMinutes: completed.reduce((sum, session) => sum + session.nightMinutes, 0),
+        breakMinutes,
+        workMinutes,
+        nightMinutes,
         wageAmount: Math.round(completed.reduce((sum, session) => sum + session.wageAmount, 0)),
         isWageMissing: completed.some((session) => session.isWageMissing),
         isOutsideGps: grouped.some((session) =>
@@ -446,9 +484,122 @@ export function buildAttendanceRows(
         isMissingClockOut: grouped.some((session) => !session.clockOut),
         logs: grouped.flatMap((session) => session.logs),
         sessions: grouped,
+        diagnostics,
       } satisfies CalculatedAttendanceRow;
     })
     .sort((a, b) => b.date.localeCompare(a.date) || a.employeeName.localeCompare(b.employeeName));
+}
+
+type TimeInterval = { start: Date; end: Date };
+
+function sessionWorkIntervals(session: WorkSession): TimeInterval[] {
+  if (!session.clockOut || session.clockOut <= session.clockIn) return [];
+  let intervals: TimeInterval[] = [{ start: session.clockIn, end: session.clockOut }];
+  for (const item of session.breaks) {
+    intervals = intervals.flatMap((interval) => {
+      if (item.end <= interval.start || item.start >= interval.end) return [interval];
+      const parts: TimeInterval[] = [];
+      if (item.start > interval.start) parts.push({ start: interval.start, end: item.start });
+      if (item.end < interval.end) parts.push({ start: item.end, end: interval.end });
+      return parts;
+    });
+  }
+  return intervals;
+}
+
+function mergeIntervals(intervals: TimeInterval[]): TimeInterval[] {
+  const sorted = intervals
+    .filter((item) => item.end > item.start)
+    .map((item) => ({ start: truncateToMinute(item.start), end: truncateToMinute(item.end) }))
+    .sort((a, b) => a.start.getTime() - b.start.getTime());
+  const merged: TimeInterval[] = [];
+  for (const interval of sorted) {
+    const previous = merged.at(-1);
+    if (!previous || interval.start > previous.end) {
+      merged.push(interval);
+    } else if (interval.end > previous.end) {
+      previous.end = interval.end;
+    }
+  }
+  return merged;
+}
+
+function sumIntervals(intervals: TimeInterval[]) {
+  return intervals.reduce((sum, item) => sum + diffMinutes(item.start, item.end), 0);
+}
+
+function buildAttendanceDiagnostics(
+  sessions: WorkSession[],
+  workMinutes: number,
+  nightMinutes: number,
+): AttendanceDiagnostic[] {
+  const diagnostics: AttendanceDiagnostic[] = [];
+  const completed = sessions.filter((session) => session.clockOut);
+  const sorted = completed.slice().sort((a, b) => a.clockIn.getTime() - b.clockIn.getTime());
+  const earliest = sorted[0]?.clockIn;
+  const latest = sorted.reduce<Date | null>(
+    (value, session) =>
+      !value || (session.clockOut && session.clockOut > value) ? session.clockOut : value,
+    null,
+  );
+  if (earliest && latest && workMinutes > diffMinutes(earliest, latest)) {
+    diagnostics.push({ code: "work_exceeds_elapsed", message: "労働時間が出勤から退勤までの実時間を超えています" });
+  }
+  if (nightMinutes > workMinutes) {
+    diagnostics.push({ code: "night_exceeds_work", message: "深夜時間が労働時間を超えています" });
+  }
+  if (workMinutes >= 24 * 60) {
+    diagnostics.push({ code: "work_at_least_24_hours", message: "1日の労働時間が24時間以上です" });
+  }
+  if (sessions.some((session) => !session.clockOut)) {
+    diagnostics.push({ code: "missing_clock_out", message: "退勤のない勤務区間があります" });
+  }
+  for (let index = 1; index < sorted.length; index += 1) {
+    if (sorted[index - 1].clockOut && sorted[index].clockIn < sorted[index - 1].clockOut!) {
+      diagnostics.push({ code: "overlapping_sessions", message: "複数店舗の勤務区間が重複しています" });
+      break;
+    }
+  }
+  return diagnostics;
+}
+
+export function auditAttendance(
+  logs: CalculationClockLog[],
+  rows: CalculatedAttendanceRow[],
+): AttendanceAuditIssue[] {
+  const issues: AttendanceAuditIssue[] = rows.flatMap((row) =>
+    row.diagnostics.map((diagnostic) => ({
+      ...diagnostic,
+      employeeKey: row.employeeKey,
+      date: row.date,
+    })),
+  );
+  const groups = new Map<string, CalculationClockLog[]>();
+  for (const log of logs) {
+    const employeeKey = log.employeeId || log.employeeCode || log.employeeName || "unknown";
+    const key = `${employeeKey}:${log.storeId}`;
+    groups.set(key, [...(groups.get(key) ?? []), log]);
+  }
+  for (const group of groups.values()) {
+    let active = false;
+    for (const log of group.slice().sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())) {
+      const type = normalizedType(log.type);
+      if (type === "clock_in") active = true;
+      if (type === "clock_out") {
+        if (!active) {
+          issues.push({
+            code: "orphan_clock_out",
+            message: "対応する出勤のない退勤があります",
+            employeeKey: log.employeeId || log.employeeCode || log.employeeName || "unknown",
+            date: formatWorkDate(log.timestamp),
+            storeId: log.storeId,
+          });
+        }
+        active = false;
+      }
+    }
+  }
+  return issues;
 }
 
 export function aggregateLaborCostByStore(rows: CalculatedAttendanceRow[]) {

@@ -6,7 +6,7 @@ import {
   assertSucceeds,
   initializeTestEnvironment,
 } from "@firebase/rules-unit-testing";
-import { doc, getDoc, setDoc } from "firebase/firestore";
+import { doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
 
 let environment;
 
@@ -116,4 +116,34 @@ test("staff users cannot write wageHistory", async () => {
       hourlyWage: 9999,
     }),
   );
+});
+
+test("clock page can read clock logs even while signed in", async () => {
+  await environment.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(context.firestore(), "clockLogs", "punch-1"), {
+      employeeId: "employee-1",
+      storeId: "store-a",
+      type: "clock_in",
+    });
+  });
+  const firestore = environment.authenticatedContext("staff-user").firestore();
+  await assertSucceeds(getDoc(doc(firestore, "clockLogs", "punch-1")));
+});
+
+test("clock state accepts valid atomic state and rejects malformed state", async () => {
+  const firestore = environment.unauthenticatedContext().firestore();
+  await assertSucceeds(setDoc(doc(firestore, "clockStates", "employee-1"), {
+    employeeId: "employee-1",
+    lastType: "clock_in",
+    lastLogId: "employee-1_clock_in_1",
+    storeId: "store-a",
+    updatedAt: serverTimestamp(),
+  }));
+  await assertFails(setDoc(doc(firestore, "clockStates", "employee-2"), {
+    employeeId: "different-employee",
+    lastType: "invalid",
+    lastLogId: "bad",
+    storeId: "store-a",
+    updatedAt: serverTimestamp(),
+  }));
 });
