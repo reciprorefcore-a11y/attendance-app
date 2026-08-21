@@ -40,7 +40,7 @@ export function BreakEditorSection(props: Props) {
 
   return createElement(
     "section",
-    { "data-testid": "break-editor-section", style: { border: "2px solid #BDEBFA", background: "#F8FDFF", borderRadius: 12, padding: 14 } },
+    { "data-testid": "break-editor-section", style: { gridColumn: "1 / -1", border: "2px solid #BDEBFA", background: "#F8FDFF", borderRadius: 12, padding: 14 } },
     createElement("h4", { style: { margin: "0 0 10px", fontSize: 16 } }, "休憩"),
     activeBreaks.length === 0
       ? createElement("p", { style: { margin: "0 0 10px", color: "#64748B", fontSize: 13 } }, "登録された休憩はありません")

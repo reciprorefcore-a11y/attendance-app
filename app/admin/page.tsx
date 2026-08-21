@@ -2340,7 +2340,6 @@ export default function AdminPage() {
               <button type="button" disabled={isSavingCorrection} onClick={() => { setEditWorkSet(null); setEditForm(null); }} style={styles.linkButton}>✕ 閉じる</button>
             </div>
             <div style={styles.editForm}>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
               <label style={styles.label}>従業員
                 <select required value={editForm.employeeId} onChange={(event) => setEditForm({ ...editForm, employeeId: event.target.value })} style={styles.input}>
                   <option value="">選択してください</option>
@@ -2372,7 +2371,6 @@ export default function AdminPage() {
               <label style={styles.label}>退勤日時
                 <input type="datetime-local" value={editForm.clockOut} onChange={(event) => setEditForm({ ...editForm, clockOut: event.target.value })} style={styles.input} />
               </label>
-              </div>
               <BreakEditorSection
                 editor={editForm}
                 setEditor={setEditForm}
@@ -2382,7 +2380,7 @@ export default function AdminPage() {
                 hasIncompleteBreak={editWorkSet.breaks.some((item) => !item.start || !item.end)}
                 formatMinutes={formatMinutesZero}
               />
-              <label style={styles.label}>修正理由
+              <label style={{ ...styles.label, gridColumn: "1 / -1" }}>修正理由
                 <textarea required value={editForm.reason} onChange={(event) => setEditForm({ ...editForm, reason: event.target.value })} style={{ ...styles.input, minHeight: 88, paddingTop: 10 }} />
               </label>
               {correctionError && <p style={styles.error}>{correctionError}</p>}
