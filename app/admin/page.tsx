@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { signOut, getAuth, createUserWithEmailAndPassword } from "firebase/auth";
@@ -20,8 +20,9 @@ import {
   setDoc,
   updateDoc,
   where,
+  writeBatch,
 } from "firebase/firestore";
-import type { ClockType, Employee, Store } from "@/lib/attendance";
+import type { Employee, Store } from "@/lib/attendance";
 import {
   aggregateLaborCostByStore,
   auditAttendance,
@@ -31,6 +32,17 @@ import {
   type CalculationWage,
   type WageHistoryLoadStatus,
 } from "@/lib/attendance-calculation";
+import {
+  buildCorrectionWorkSets,
+  buildCorrectionAudit,
+  fromJstDateTimeInput,
+  openCorrectionEditor,
+  shiftCorrectionWorkDate,
+  validateCorrection,
+  type CorrectionEditor,
+  type CorrectionStatus,
+  type CorrectionWorkSet,
+} from "@/lib/attendance-correction";
 
 type TabId =
   | "attendance"
@@ -67,6 +79,10 @@ type TimecardRow = {
   isDeleted?: boolean;
   deletedAt?: Timestamp | null;
   deletedBy?: string | null;
+  isCorrected?: boolean;
+  correctedAt?: Timestamp | null;
+  correctedBy?: string | null;
+  correctionReason?: string | null;
 };
 
 type EmployeeRow = Employee & { id: string; hourlyWage?: number | null; hasManagerAccount?: boolean; managerUid?: string | null; accountRole?: "manager" | "area_manager" | "fc_manager" | null; accountStoreIds?: string[] };
@@ -84,15 +100,12 @@ const tabs: { id: TabId; label: string }[] = [
   { id: "exports", label: "Excel出力" },
 ];
 
-const clockTypeLabels: Record<string, string> = {
-  clock_in: "出勤",
-  clockIn: "出勤",
-  break_start: "休憩開始",
-  breakStart: "休憩開始",
-  break_end: "休憩終了",
-  breakEnd: "休憩終了",
-  clock_out: "退勤",
-  clockOut: "退勤",
+const correctionStatusLabels: Record<CorrectionStatus, string> = {
+  normal: "正常",
+  missing_clock_out: "未退勤",
+  orphan_clock_out: "孤立退勤",
+  corrected: "修正済み",
+  needs_review: "要確認",
 };
 const csvEmployeeFields = ["name", "nameKana", "employeeCode", "storeId", "baseHourlyWage", "pin", "status"] as const;
 
@@ -231,22 +244,6 @@ function dateKey(date: Date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(
     date.getDate(),
   ).padStart(2, "0")}`;
-}
-
-function dateTimeInputValue(date: Date) {
-  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
-  return local.toISOString().slice(0, 16);
-}
-
-function formatDateTime(date: Date | null) {
-  if (!date) return "";
-  return new Intl.DateTimeFormat("ja-JP", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
 }
 
 function formatTime(date: Date | null) {
@@ -397,12 +394,11 @@ export default function AdminPage() {
   const [activeTab, setActiveTab] = useState<TabId>("attendance");
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState("");
-  const [editId, setEditId] = useState("");
-  const [editForm, setEditForm] = useState({
-    type: "clock_in" as ClockType,
-    createdAt: "",
-    reason: "",
-  });
+  const [editWorkSet, setEditWorkSet] = useState<CorrectionWorkSet | null>(null);
+  const [editForm, setEditForm] = useState<CorrectionEditor | null>(null);
+  const [isSavingCorrection, setIsSavingCorrection] = useState(false);
+  const [correctionError, setCorrectionError] = useState("");
+  const correctionSaveLock = useRef(false);
   const [message, setMessage] = useState("");
   const [employeeEditingId, setEmployeeEditingId] = useState("");
   const [employeeForm, setEmployeeForm] = useState({
@@ -649,6 +645,16 @@ export default function AdminPage() {
     [employees],
   );
   const calculationLogs = useMemo(() => toCalculationLogs(timecards), [timecards]);
+  const correctionWorkSets = useMemo(
+    () => buildCorrectionWorkSets(calculationLogs),
+    [calculationLogs],
+  );
+  const filteredCorrectionWorkSets = useMemo(
+    () => correctionWorkSets.filter((set) =>
+      set.workDate.startsWith(targetMonth) &&
+      (storeFilter === "all" || set.storeId === storeFilter)),
+    [correctionWorkSets, storeFilter, targetMonth],
+  );
   const homeStoreByEmployee = useMemo(
     () => Object.fromEntries(employees.map((employee) => {
       const store = stores.find((item) => item.id === employee.storeId);
@@ -714,16 +720,6 @@ export default function AdminPage() {
       ),
     [allMonthAttendanceRows, storeFilter],
   );
-  const filteredTimecards = useMemo(
-    () =>
-      timecards.filter((row) => {
-        if (row.isDeleted) return false;
-        const timestamp = logDate(row);
-        if (!timestamp || !dateKey(timestamp).startsWith(targetMonth)) return false;
-        return storeFilter === "all" || row.storeId === storeFilter;
-      }),
-    [storeFilter, targetMonth, timecards],
-  );
   const todayKey = dateKey(new Date());
   const summary = useMemo(() => {
     const todayPunches = timecards.filter((row) => {
@@ -761,80 +757,124 @@ export default function AdminPage() {
     };
   }, [allAttendanceRows]);
 
-  const editTarget = timecards.find((row) => row.id === editId) ?? null;
   const storeNameById = (storeId: string) =>
     getStoreName(stores.find((store) => store.id === storeId) ?? ({ id: storeId } as StoreRow)) ||
     storeId;
 
-  const startEdit = (row: TimecardRow) => {
-    const date = logDate(row) ?? new Date();
-    setEditId(row.id);
-    setEditForm({
-      type: normalizeClockType(row) as ClockType,
-      createdAt: dateTimeInputValue(date),
-      reason: "",
-    });
+  const startEdit = (workSet: CorrectionWorkSet) => {
+    setEditWorkSet(workSet);
+    setEditForm(openCorrectionEditor(workSet));
+    setCorrectionError("");
     setMessage("");
     setActiveTab("edits");
   };
 
+  const startEditFromAttendance = (row: AttendanceRow) => {
+    const ids = new Set(row.logs.map((log) => log.id));
+    const workSet = correctionWorkSets.find((item) =>
+      (item.clockInLog && ids.has(item.clockInLog.id)) ||
+      (item.clockOutLog && ids.has(item.clockOutLog.id)),
+    );
+    if (workSet) startEdit(workSet);
+    else setMessage("修正対象の勤務セットを特定できませんでした。再読み込みしてください。");
+  };
+
   const saveEdit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!editTarget) return;
-    if (!editForm.reason.trim()) {
-      setMessage("修正理由を入力してください。");
+    if (!editWorkSet || !editForm || correctionSaveLock.current) return;
+    const errors = validateCorrection(editForm, editWorkSet.key, correctionWorkSets);
+    if (errors.length > 0) {
+      setCorrectionError(errors.join("。"));
       return;
     }
-
-    const before = {
-      type: normalizeClockType(editTarget),
-      timestamp: logDate(editTarget)?.toISOString() ?? "",
-    };
-    const after = {
-      type: editForm.type,
-      timestamp: new Date(editForm.createdAt).toISOString(),
-    };
-
+    const clockIn = fromJstDateTimeInput(editForm.clockIn)!;
+    const clockOut = fromJstDateTimeInput(editForm.clockOut)!;
+    const employee = employees.find((item) => item.id === editForm.employeeId);
+    const store = stores.find((item) => item.id === editForm.storeId);
+    if (!employee || !store) {
+      setCorrectionError("従業員または勤務店舗が見つかりません。再読み込みしてください。");
+      return;
+    }
+    correctionSaveLock.current = true;
+    setIsSavingCorrection(true);
+    setCorrectionError("");
     try {
-      await updateDoc(doc(db, "clockLogs", editTarget.id), {
-        type: editForm.type,
-        timestamp: Timestamp.fromDate(new Date(editForm.createdAt)),
+      const batch = writeBatch(db);
+      const safeKey = editWorkSet.key.replace(/[^a-zA-Z0-9_-]/g, "_");
+      const inRef = editWorkSet.clockInLog
+        ? doc(db, "clockLogs", editWorkSet.clockInLog.id)
+        : doc(db, "clockLogs", `correction_${safeKey}_clock_in`);
+      const outRef = editWorkSet.clockOutLog
+        ? doc(db, "clockLogs", editWorkSet.clockOutLog.id)
+        : doc(db, "clockLogs", `correction_${safeKey}_clock_out`);
+      const common = {
+        employeeId: employee.id,
+        employeeCode: employee.employeeCode ?? "",
+        employeeName: employee.name ?? "",
+        storeId: store.id,
+        workStoreId: store.id,
+        workStoreName: getStoreName(store),
         isManualEdited: true,
-        updatedAt: serverTimestamp(),
-        updatedBy: "admin",
-        editReason: editForm.reason.trim(),
+        isCorrected: true,
+        correctedAt: serverTimestamp(),
+        correctedBy: user?.uid ?? profile?.uid ?? "unknown-admin",
+        correctionReason: editForm.reason.trim(),
+      };
+      const writeLog = (
+        ref: ReturnType<typeof doc>,
+        existing: CalculationClockLog | null,
+        type: "clock_in" | "clock_out",
+        timestamp: Date,
+      ) => {
+        const value = { ...common, type, timestamp: Timestamp.fromDate(timestamp) };
+        if (existing) batch.update(ref, value);
+        else batch.set(ref, { ...value, createdAt: serverTimestamp(), isOutsideGps: false });
+      };
+      writeLog(inRef, editWorkSet.clockInLog, "clock_in", clockIn);
+      writeLog(outRef, editWorkSet.clockOutLog, "clock_out", clockOut);
+
+      const editedIds = new Set([editWorkSet.clockInLog?.id, editWorkSet.clockOutLog?.id].filter(Boolean));
+      const latestOtherPunch = calculationLogs
+        .filter((log) => log.employeeId === editWorkSet.employeeId && !editedIds.has(log.id))
+        .reduce((latest, log) => Math.max(latest, log.timestamp.getTime()), 0);
+      if (employee.id === editWorkSet.employeeId && clockOut.getTime() >= latestOtherPunch) {
+        batch.set(doc(db, "clockStates", employee.id), {
+          employeeId: employee.id,
+          lastType: "clock_out",
+          lastLogId: outRef.id,
+          storeId: store.id,
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      const auditRef = doc(collection(db, "auditLogs"));
+      batch.set(auditRef, {
+        ...buildCorrectionAudit(
+          editWorkSet,
+          editForm,
+          [inRef.id, outRef.id],
+          user?.uid ?? profile?.uid ?? "unknown-admin",
+        ),
+        correctedAt: serverTimestamp(),
       });
-      await addDoc(collection(db, "auditLogs"), {
-        targetLogId: editTarget.id,
-        before,
-        after,
-        reason: editForm.reason.trim(),
-        updatedAt: serverTimestamp(),
-        updatedBy: "admin",
-      });
+      await batch.commit();
       setMessage("打刻を修正しました。");
-      setEditId("");
+      setEditWorkSet(null);
+      setEditForm(null);
       await load();
     } catch (error) {
       console.error("timecard edit failed", error);
-      setMessage("打刻修正に失敗しました。");
-    }
-  };
-
-  const deleteTimecard = async (row: TimecardRow) => {
-    const confirmed = window.confirm("この打刻を削除しますか？");
-    if (!confirmed) return;
-    try {
-      await updateDoc(doc(db, "clockLogs", row.id), {
-        isDeleted: true,
-        deletedAt: serverTimestamp(),
-        deletedBy: user?.uid ?? "admin",
-      });
-      setMessage("打刻を削除しました。");
-      await load();
-    } catch (error) {
-      console.error("timecard delete failed", error);
-      setMessage("打刻の削除に失敗しました。");
+      const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+      setCorrectionError(
+        code.includes("permission-denied")
+          ? "権限がないため保存できません。担当店舗と管理者権限を確認してください。"
+          : code.includes("unavailable") || code.includes("deadline-exceeded")
+            ? "通信エラーで保存できませんでした。通信状態を確認して再試行してください。"
+            : "打刻修正を保存できませんでした。入力内容を確認して再試行してください。",
+      );
+    } finally {
+      correctionSaveLock.current = false;
+      setIsSavingCorrection(false);
     }
   };
 
@@ -1619,7 +1659,7 @@ export default function AdminPage() {
                   <td style={styles.td}>{row.isOutsideGps ? "範囲外" : ""}</td>
                   <td style={styles.td}>
                     {row.logs[0] && (
-                      <button type="button" onClick={() => startEdit(row.logs[0] as TimecardRow)} style={styles.linkButton}>
+                      <button type="button" onClick={() => startEditFromAttendance(row)} style={styles.linkButton}>
                         修正
                       </button>
                     )}
@@ -2120,57 +2160,28 @@ export default function AdminPage() {
         {activeTab === "edits" && (
           <section style={styles.tabPanel}>
             <h2 style={styles.sectionTitle}>打刻修正</h2>
-            <DataTable headers={["日時", "従業員", "店舗", "種別", "操作"]}>
-              {filteredTimecards.slice(0, 80).map((row) => (
-                <tr key={row.id}>
-                  <td style={styles.td}>{formatDateTime(logDate(row))}</td>
-                  <td style={styles.td}>{row.employeeName || row.employeeId || row.employeeCode}</td>
-                  <td style={styles.td}>{storeNameById(row.storeId)}</td>
-                  <td style={styles.td}>{clockTypeLabels[normalizeClockType(row)] ?? normalizeClockType(row)}</td>
+            <DataTable headers={["勤務日", "従業員名", "勤務店舗", "出勤", "退勤", "労働時間", "状態", "操作"]}>
+              {filteredCorrectionWorkSets.map((workSet) => (
+                <tr key={workSet.key} style={workSet.status === "normal" ? undefined : styles.warningRow}>
+                  <td style={styles.td}>{workSet.workDate}</td>
+                  <td style={styles.td}>{workSet.employeeName || workSet.employeeCode || workSet.employeeId}</td>
+                  <td style={styles.td}>{workSet.storeName || storeNameById(workSet.storeId)}</td>
+                  <td style={styles.td}>{formatTime(workSet.clockIn)}</td>
+                  <td style={styles.td}>{workSet.clockOut ? formatTime(workSet.clockOut) : "未入力"}</td>
+                  <td style={styles.td}>{formatMinutesZero(workSet.workMinutes)}</td>
                   <td style={styles.td}>
-                    <button type="button" onClick={() => startEdit(row)} style={styles.linkButton}>修正</button>
-                    <button type="button" onClick={() => deleteTimecard(row)} style={{...styles.linkButton, marginLeft: 8, color: "#B91C1C", borderColor: "#FCA5A5", background: "#FEF2F2"}}>削除</button>
+                    <span style={workSet.status === "normal" ? styles.chainBadge : styles.dangerBadge}>
+                      {correctionStatusLabels[workSet.status]}
+                    </span>
+                    {workSet.warnings.map((warning) => <div key={warning} style={{ color: "#B91C1C", fontSize: 11, marginTop: 4 }}>{warning}</div>)}
+                  </td>
+                  <td style={styles.td}>
+                    <button type="button" onClick={() => startEdit(workSet)} style={styles.linkButton}>修正</button>
                   </td>
                 </tr>
               ))}
             </DataTable>
-            {editTarget && (
-              <form onSubmit={saveEdit} style={styles.editForm}>
-                <h3 style={styles.subTitle}>選択中の打刻を修正</h3>
-                <label style={styles.label}>
-                  種別
-                  <select
-                    value={editForm.type}
-                    onChange={(event) => setEditForm({ ...editForm, type: event.target.value as ClockType })}
-                    style={styles.input}
-                  >
-                    <option value="clock_in">出勤</option>
-                    <option value="break_start">休憩開始</option>
-                    <option value="break_end">休憩終了</option>
-                    <option value="clock_out">退勤</option>
-                  </select>
-                </label>
-                <label style={styles.label}>
-                  日時
-                  <input
-                    type="datetime-local"
-                    value={editForm.createdAt}
-                    onChange={(event) => setEditForm({ ...editForm, createdAt: event.target.value })}
-                    style={styles.input}
-                  />
-                </label>
-                <label style={styles.label}>
-                  修正理由
-                  <input
-                    required
-                    value={editForm.reason}
-                    onChange={(event) => setEditForm({ ...editForm, reason: event.target.value })}
-                    style={styles.input}
-                  />
-                </label>
-                <button type="submit" style={styles.button}>修正して auditLogs に保存</button>
-              </form>
-            )}
+            {filteredCorrectionWorkSets.length === 0 && <p style={styles.empty}>対象の勤務セットがありません</p>}
             {message && <p style={styles.message}>{message}</p>}
           </section>
         )}
@@ -2276,6 +2287,61 @@ export default function AdminPage() {
         </section>
         </div>
       </div>
+
+      {/* 勤務セット修正モーダル */}
+      {editWorkSet && editForm && (
+        <div style={styles.modalOverlay} onClick={() => { if (!isSavingCorrection) { setEditWorkSet(null); setEditForm(null); } }}>
+          <form onSubmit={saveEdit} style={{ ...styles.modal, maxWidth: 620 }} onClick={(event) => event.stopPropagation()}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <h3 style={{ margin: 0, fontSize: 18, fontWeight: 800 }}>勤務セットを修正</h3>
+              <button type="button" disabled={isSavingCorrection} onClick={() => { setEditWorkSet(null); setEditForm(null); }} style={styles.linkButton}>✕ 閉じる</button>
+            </div>
+            <div style={styles.editForm}>
+              <label style={styles.label}>従業員
+                <select required value={editForm.employeeId} onChange={(event) => setEditForm({ ...editForm, employeeId: event.target.value })} style={styles.input}>
+                  <option value="">選択してください</option>
+                  {employees.filter((employee) => employee.isDeleted !== true).map((employee) => (
+                    <option key={employee.id} value={employee.id}>{employee.employeeCode} {employee.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label style={styles.label}>勤務店舗
+                <select required value={editForm.storeId} onChange={(event) => setEditForm({ ...editForm, storeId: event.target.value })} style={styles.input}>
+                  <option value="">選択してください</option>
+                  {stores.filter((store) => store.active !== false).map((store) => (
+                    <option key={store.id} value={store.id}>{getStoreName(store)}</option>
+                  ))}
+                </select>
+              </label>
+              <label style={styles.label}>勤務日
+                <input
+                  required
+                  type="date"
+                  value={editForm.workDate}
+                  onChange={(event) => setEditForm(shiftCorrectionWorkDate(editForm, event.target.value))}
+                  style={styles.input}
+                />
+              </label>
+              <label style={styles.label}>出勤日時
+                <input required type="datetime-local" value={editForm.clockIn} onChange={(event) => setEditForm({ ...editForm, clockIn: event.target.value, workDate: event.target.value.slice(0, 10) })} style={styles.input} />
+              </label>
+              <label style={styles.label}>退勤日時
+                <input required type="datetime-local" value={editForm.clockOut} onChange={(event) => setEditForm({ ...editForm, clockOut: event.target.value })} style={styles.input} />
+              </label>
+              <label style={styles.label}>修正理由
+                <textarea required value={editForm.reason} onChange={(event) => setEditForm({ ...editForm, reason: event.target.value })} style={{ ...styles.input, minHeight: 88, paddingTop: 10 }} />
+              </label>
+              {correctionError && <p style={styles.error}>{correctionError}</p>}
+              <div style={styles.inlineActions}>
+                <button type="submit" disabled={isSavingCorrection} style={{ ...styles.button, opacity: isSavingCorrection ? 0.5 : 1 }}>
+                  {isSavingCorrection ? "保存中..." : "保存"}
+                </button>
+                <button type="button" disabled={isSavingCorrection} onClick={() => { setEditWorkSet(null); setEditForm(null); }} style={styles.secondaryButton}>キャンセル</button>
+              </div>
+            </div>
+          </form>
+        </div>
+      )}
 
       {/* 権限設定モーダル */}
       {permissionModal && (() => {

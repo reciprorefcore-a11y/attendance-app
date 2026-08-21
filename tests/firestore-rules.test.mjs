@@ -6,7 +6,7 @@ import {
   assertSucceeds,
   initializeTestEnvironment,
 } from "@firebase/rules-unit-testing";
-import { doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
+import { doc, getDoc, serverTimestamp, setDoc, writeBatch } from "firebase/firestore";
 
 let environment;
 
@@ -146,4 +146,30 @@ test("clock state accepts valid atomic state and rejects malformed state", async
     storeId: "store-a",
     updatedAt: serverTimestamp(),
   }));
+});
+
+test("admin can atomically correct a punch and create its audit history", async () => {
+  await environment.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(context.firestore(), "clockLogs", "correct-target"), {
+      employeeId: "employee-1", storeId: "store-a", type: "clock_in", timestamp: new Date(),
+    });
+  });
+  const firestore = environment.authenticatedContext("admin-user").firestore();
+  const batch = writeBatch(firestore);
+  batch.update(doc(firestore, "clockLogs", "correct-target"), {
+    isCorrected: true,
+    correctedAt: serverTimestamp(),
+    correctedBy: "admin-user",
+    correctionReason: "テスト修正",
+  });
+  batch.set(doc(firestore, "auditLogs", "audit-correction"), {
+    targetLogIds: ["correct-target"],
+    before: { timestamp: "before" },
+    after: { timestamp: "after" },
+    correctedAt: serverTimestamp(),
+    correctedBy: "admin-user",
+    correctionReason: "テスト修正",
+    actions: [{ targetLogId: "correct-target", action: "update" }],
+  });
+  await assertSucceeds(batch.commit());
 });
