@@ -78,6 +78,21 @@ test("幹部は前月確定値の税額を使用し、前月値がなければ�
   assert.ok(issues.some((item) => item.code === "missing_previous_fixed_payroll" && item.severity === "error"));
 });
 
+test("指定幹部3名は時給0円でも固定給として扱う", () => {
+  for (const [code, name] of [["0003", "中村鏡太郎"], ["0064", "小林彗太"], ["0083", "佐藤雅信"]]) {
+    const executive = employee(code, { employeeCode: code, name, payrollType: undefined, employmentType: undefined, hourlyWage: null, baseWage: 0 });
+    const issues = validatePayrollInput([executive], [], "2026-07");
+    assert.equal(issues.some((item) => item.code === "missing_hourly_wage"), false);
+    assert.equal(calculatePayrollEmployee(executive, []).payrollType, "fixed");
+  }
+});
+
+test("時給制の時給未設定エラーには社員コードと氏名を含む", () => {
+  const hourly = employee("hourly", { employeeCode: "1234", name: "時給 花子", payrollType: "hourly", hourlyWage: null, baseWage: 0 });
+  const issue = validatePayrollInput([hourly], [], "2026-07").find((item) => item.code === "missing_hourly_wage");
+  assert.match(issue?.message ?? "", /1234 時給 花子：時給が未設定です/);
+});
+
 test("令和8年税額表の甲欄・乙欄・扶養人数を参照する", () => {
   assert.equal(calculateWithholdingTax2026(104999, "kou", 0), 0); assert.equal(calculateWithholdingTax2026(105558, "kou", 0), 170); assert.equal(calculateWithholdingTax2026(105558, "kou", 1), 0); assert.equal(calculateWithholdingTax2026(105558, "otsu", 0), 3800);
 });
@@ -90,7 +105,7 @@ test("給与Excelと振込Excelの人数・合計が一致する", () => {
 });
 
 test("給与テンプレート定員超過時は全従業員を複数シートへ出力する", () => {
-  const results = calculatePayroll(Array.from({ length: 38 }, (_, i) => employee(String(i + 1))), []);
+  const results = calculatePayroll(Array.from({ length: 38 }, (_, i) => employee(String(1001 + i))), []);
   const workbook = XLSX.read(createPayrollWorkbook(results, "2026-08"));
   assert.equal(workbook.SheetNames.length, 2);
   const codes = workbook.SheetNames.flatMap((name) => {

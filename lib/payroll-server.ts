@@ -1,7 +1,13 @@
 import { createHash } from "node:crypto";
 import type { FirestoreRest } from "./firebase-rest.ts";
 import { buildAttendanceRows, type CalculationClockLog } from "./attendance-calculation.ts";
-import { calculatePayroll, isPayrollMonthClosed, summarizePayroll, validatePayrollInput, type PayrollAttendanceDay, type PayrollEmployee, type PayrollResult } from "./payroll.ts";
+import { calculatePayroll, isPayrollMonthClosed, resolvePayrollType, summarizePayroll, validatePayrollInput, type PayrollAttendanceDay, type PayrollEmployee, type PayrollResult } from "./payroll.ts";
+
+const FIXED_PAYROLL_TEMPLATE: Record<string, Partial<PayrollEmployee>> = {
+  "0003": { fixedBaseSalary: 185000, positionAllowance: 9000, holidayAllowance: 10694, businessAllowance: 110000, monthlyTransportation: 15670, healthInsurance: 15872, childSupportContribution: 368, careInsurance: 2592, employeePension: 29280, employmentInsurance: 1651, incomeTax: 6650, residentTax: 10000 },
+  "0064": { fixedBaseSalary: 183000, positionAllowance: 8000, fixedOvertimeAllowance: 27678, holidayAllowance: 30891, businessAllowance: 56417, monthlyTransportation: 10110, healthInsurance: 13888, childSupportContribution: 322, careInsurance: 0, employeePension: 25620, employmentInsurance: 1580, incomeTax: 6650, residentTax: 10000 },
+  "0083": { fixedBaseSalary: 175000, positionAllowance: 34000, holidayAllowance: 0, businessAllowance: 100000, monthlyTransportation: 5960, healthInsurance: 14880, childSupportContribution: 345, careInsurance: 2430, employeePension: 27450, employmentInsurance: 1574, incomeTax: 6530, residentTax: 12300 },
+};
 
 function asDate(value: unknown) {
   if (value instanceof Date) return value;
@@ -22,16 +28,19 @@ export async function loadPayrollSource(db: FirestoreRest, targetMonth: string) 
   const employees: PayrollEmployee[] = employeeSnapshot.docs.map((item) => {
     const data = item.data();
     const settings = payrollSettings.get(item.id) ?? {};
-    return { id: item.id, ...data, ...settings, storeName: data.storeName || stores.get(data.storeId)?.storeName || stores.get(data.storeId)?.name || data.storeId } as PayrollEmployee;
+    const employee = { id: item.id, ...data, ...settings, storeName: data.storeName || stores.get(data.storeId)?.storeName || stores.get(data.storeId)?.name || data.storeId } as PayrollEmployee;
+    employee.payrollType = resolvePayrollType(employee);
+    const template = FIXED_PAYROLL_TEMPLATE[String(employee.employeeCode).padStart(4, "0")];
+    return template ? { ...employee, ...template, payrollType: "fixed" as const } : employee;
   }).filter((item) => item.payrollEnabled !== false && !(item as PayrollEmployee & { isDeleted?: boolean }).isDeleted);
   if (!prevConfirmedSnapshot.empty) {
     const prevRunId = prevConfirmedSnapshot.docs[0].id;
     const prevEmployeesSnapshot = await db.collection("payrollRuns").doc(prevRunId).collection("employees").get();
     const prevResults = new Map(prevEmployeesSnapshot.docs.map((item) => [item.id, item.data() as PayrollResult]));
     for (const emp of employees) {
-      if (emp.payrollType !== "fixed") continue;
+      if (resolvePayrollType(emp) !== "fixed") continue;
       const prev = prevResults.get(emp.id);
-      if (!prev) { emp.previousConfirmedPayrollMissing = true; continue; }
+      if (!prev) { emp.previousConfirmedPayrollMissing = !FIXED_PAYROLL_TEMPLATE[String(emp.employeeCode).padStart(4, "0")]; continue; }
       emp.fixedBaseSalary = prev.earnings.baseSalary;
       emp.directorCompensation = prev.earnings.directorCompensation;
       emp.positionAllowance = prev.earnings.positionAllowance;
@@ -50,7 +59,7 @@ export async function loadPayrollSource(db: FirestoreRest, targetMonth: string) 
       emp.advanceExpense = prev.deductions.advanceExpense;
     }
   } else {
-    for (const emp of employees) if (emp.payrollType === "fixed") emp.previousConfirmedPayrollMissing = true;
+    for (const emp of employees) if (resolvePayrollType(emp) === "fixed") emp.previousConfirmedPayrollMissing = !FIXED_PAYROLL_TEMPLATE[String(emp.employeeCode).padStart(4, "0")];
   }
   const employeeIds = new Set(employees.map((item) => item.id));
   const employeeById = new Map(employees.map((item) => [item.id, item]));

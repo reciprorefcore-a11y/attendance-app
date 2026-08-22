@@ -12,6 +12,7 @@ export type PayrollEmployee = {
   storeName?: string;
   payrollEnabled?: boolean;
   payrollType?: PayrollType;
+  employmentType?: string;
   hourlyWage?: number | null;
   baseWage?: number | null;
   transportationType?: "daily" | "monthly" | "none";
@@ -142,6 +143,16 @@ export type PayrollResult = {
 };
 
 const yen = (value: unknown) => Math.max(0, Math.trunc(Number(value) || 0));
+const FIXED_EMPLOYEE_CODES = new Set(["0003", "0064", "0083"]);
+
+export function resolvePayrollType(employee: PayrollEmployee): PayrollType {
+  if (FIXED_EMPLOYEE_CODES.has(String(employee.employeeCode).padStart(4, "0")) || employee.payrollType === "fixed") return "fixed";
+  return "hourly";
+}
+
+function employeeLabel(employee: PayrollEmployee) {
+  return `${employee.employeeCode || "社員コード不明"} ${employee.name || "氏名不明"}`;
+}
 
 export function calculateWithholdingTax2026(taxableIncome: number, type: TaxTableType, dependentCount: number) {
   const amount = Math.max(0, Math.trunc(taxableIncome));
@@ -168,9 +179,10 @@ export function validatePayrollInput(employees: PayrollEmployee[], attendance: P
     const previous = codes.get(employee.employeeCode);
     if (previous && previous !== employee.id) issues.push({ severity: "warning", code: "duplicate_employee_code", employeeId: employee.id, message: `社員コード${employee.employeeCode}が重複しています` });
     codes.set(employee.employeeCode, employee.id);
-    const type = employee.payrollType ?? (employee.fixedBaseSalary ? "fixed" : "hourly");
-    if (type === "hourly" && !yen(employee.hourlyWage ?? employee.baseWage)) issues.push({ severity: "error", code: "missing_hourly_wage", employeeId: employee.id, message: "時給が未設定です" });
-    if (type === "fixed" && employee.previousConfirmedPayrollMissing) issues.push({ severity: "error", code: "missing_previous_fixed_payroll", employeeId: employee.id, message: "幹部の前月確定値がありません" });
+    const type = resolvePayrollType(employee);
+    const hourlyWageRequired = employee.payrollType === "hourly" || employee.employmentType === "hourly" || employee.employmentType === "part_time";
+    if (type === "hourly" && hourlyWageRequired && !yen(employee.hourlyWage ?? employee.baseWage)) issues.push({ severity: "error", code: "missing_hourly_wage", employeeId: employee.id, message: `${employeeLabel(employee)}：時給が未設定です` });
+    if (type === "fixed" && employee.previousConfirmedPayrollMissing) issues.push({ severity: "error", code: "missing_previous_fixed_payroll", employeeId: employee.id, message: `${employeeLabel(employee)}：幹部の前月確定値または給与テンプレート固定値がありません` });
     if (employee.healthInsurance == null || employee.employeePension == null || employee.employmentInsurance == null) issues.push({ severity: "warning", code: "missing_social_insurance_setting", employeeId: employee.id, message: "社会保険設定に未入力項目があります" });
     if (!employee.transportationType) issues.push({ severity: "warning", code: "missing_transportation_setting", employeeId: employee.id, message: "交通費区分が未設定です" });
   }
@@ -196,7 +208,7 @@ export function calculatePayrollEmployee(employee: PayrollEmployee, allAttendanc
     help: sum.help + day.helpMinutes, break: sum.break + day.breakMinutes,
   }), { work: 0, overtime: 0, night: 0, help: 0, break: 0 });
   const attendanceDays = new Set(days.filter((day) => day.workMinutes > 0).map((day) => day.date)).size;
-  const payrollType = employee.payrollType ?? (employee.fixedBaseSalary ? "fixed" : "hourly");
+  const payrollType = resolvePayrollType(employee);
   const hourlyWage = yen(employee.hourlyWage ?? employee.baseWage);
   const baseSalary = payrollType === "hourly" ? Math.floor(totals.work * hourlyWage / 60) : yen(employee.fixedBaseSalary);
   const overtimePremium = payrollType === "hourly" ? Math.floor(totals.overtime * hourlyWage * 0.25 / 60) : 0;
