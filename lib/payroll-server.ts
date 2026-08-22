@@ -80,3 +80,14 @@ export async function loadLatestPayrollRun(db: firestore.Firestore, targetMonth:
   const latest = snapshot.docs.sort((a, b) => asDate(b.data().calculatedAt).getTime() - asDate(a.data().calculatedAt).getTime())[0];
   return latest ? loadPayrollRun(db, latest.id) : null;
 }
+
+export async function loadPayrollWorkspace(db: firestore.Firestore, targetMonth: string) {
+  // Payroll settings belong exclusively to the payroll workspace. Keep this
+  // server-side read out of the shared admin stores/employees/attendance load.
+  const payrollSettingsSnapshot = await db.collection("payrollSettings").get();
+  const run = await loadLatestPayrollRun(db, targetMonth);
+  return {
+    run,
+    payrollSettings: payrollSettingsSnapshot.docs.map((item) => ({ id: item.id, ...item.data() })),
+  };
+}

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyAdminToken } from "@/lib/firebase-admin";
-import { createPayrollDraft, loadLatestPayrollRun } from "@/lib/payroll-server";
+import { createPayrollDraft, loadPayrollWorkspace } from "@/lib/payroll-server";
 
 export const runtime = "nodejs";
 
@@ -9,7 +9,12 @@ export async function GET(request: NextRequest) {
   if (!admin) return NextResponse.json({ error: "本部管理者権限が必要です" }, { status: 403 });
   const targetMonth = request.nextUrl.searchParams.get("targetMonth") ?? "";
   if (!/^\d{4}-\d{2}$/.test(targetMonth)) return NextResponse.json({ error: "対象月を確認してください" }, { status: 400 });
-  return NextResponse.json(await loadLatestPayrollRun(admin.db, targetMonth));
+  try {
+    return NextResponse.json(await loadPayrollWorkspace(admin.db, targetMonth));
+  } catch (error) {
+    console.error("payroll workspace load failed", error);
+    return NextResponse.json({ error: "給与情報を取得できません" }, { status: 500 });
+  }
 }
 
 export async function POST(request: NextRequest) {

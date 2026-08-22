@@ -11,6 +11,7 @@ type PayrollRun = {
   incomeTaxTotal: number; residentTaxTotal: number; deductionTotal: number; netTotal: number; bankTransferTotal: number;
   canConfirm?: boolean; issues: PayrollIssue[]; results: PayrollResult[];
 };
+type PayrollWorkspace = { run: PayrollRun | null; payrollSettings: Array<{ id: string; [key: string]: unknown }> };
 
 const monthValue = (offset: number) => { const now = new Date(); now.setMonth(now.getMonth() + offset, 1); return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`; };
 const nextMonth = (month: string) => { const [y, m] = month.split("-").map(Number); const date = new Date(y, m, 1); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`; };
@@ -22,7 +23,7 @@ const dateTime = (value?: PayrollRun["calculatedAt"]) => { if (!value) return "�
 async function token() { const value = await auth.currentUser?.getIdToken(); if (!value) throw new Error("認証情報を取得できません"); return value; }
 async function fetchLatestRun(month: string) {
   const response = await fetch(`/api/payroll/calculate?targetMonth=${month}`, { headers: { Authorization: `Bearer ${await token()}` } });
-  const data = await response.json(); if (!response.ok) throw new Error(data.error ?? "給与計算状況を取得できません"); return data as PayrollRun | null;
+  const data = await response.json(); if (!response.ok) throw new Error(data.error ?? "給与計算状況を取得できません"); return (data as PayrollWorkspace).run;
 }
 
 export default function PayrollPage() {
@@ -51,7 +52,7 @@ export default function PayrollPage() {
   };
   const loadLatest = async (month: string) => {
     setBusy(true); setMessage("");
-    try { const data = await request(`/api/payroll/calculate?targetMonth=${month}`); setRun(data); if (data) { setPaymentMonth(data.paymentMonth); setPaymentDate(data.paymentDate); } }
+    try { const data = await request(`/api/payroll/calculate?targetMonth=${month}`) as PayrollWorkspace; setRun(data.run); if (data.run) { setPaymentMonth(data.run.paymentMonth); setPaymentDate(data.run.paymentDate); } }
     catch (error) { setMessage(error instanceof Error ? error.message : "給与計算状況を取得できません"); } finally { setBusy(false); }
   };
   useEffect(() => {

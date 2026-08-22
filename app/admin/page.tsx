@@ -11,7 +11,6 @@ import { useAuthProfile } from "@/lib/auth";
 import { BreakEditorSection } from "@/components/BreakEditorSection";
 import {
   Timestamp,
-  arrayUnion,
   addDoc,
   collection,
   doc,
@@ -95,11 +94,6 @@ type StoreRow = Store & { id: string };
 const emptyEmployeeForm = () => ({
   name: "", nameKana: "", employeeCode: "", pin: "", storeId: "", baseWage: "", status: "active",
   transportationCost: "", transportationType: "daily" as "daily" | "monthly" | "none",
-  payrollType: "hourly" as "hourly" | "fixed", payrollTransferOrder: "", paymentMethod: "bank" as "bank" | "cash",
-  taxTableType: "kou" as "kou" | "otsu", dependentCount: "0", healthInsurance: "0", childSupportContribution: "0",
-  careInsurance: "0", employeePension: "0", employmentInsurance: "0", residentTax: "0", fixedBaseSalary: "0",
-  directorCompensation: "0", positionAllowance: "0", businessAllowance: "0", holidayAllowance: "0",
-  fixedOvertimeAllowance: "0", otherAllowance: "0", otherDeduction: "0", advanceExpense: "0", payrollEnabled: true,
 });
 type AccountManagerRow = { uid: string; name?: string; email?: string; role: "area_manager" | "fc_manager"; storeId?: string; storeIds?: string[] };
 
@@ -493,16 +487,13 @@ export default function AdminPage() {
 
     // ── Phase 1: stores / employees（allow read: if true → 必ず成功）────────
     try {
-      const [employeeSnapshot, storeSnapshot, payrollSettingsSnapshot] = await Promise.all([
+      const [employeeSnapshot, storeSnapshot] = await Promise.all([
         getDocs(query(collection(db, "employees"), orderBy("employeeCode"))),
         getDocs(collection(db, "stores")),
-        isAdmin ? getDocs(collection(db, "payrollSettings")) : Promise.resolve(null),
       ]);
-      const payrollSettings = new Map(payrollSettingsSnapshot?.docs.map((item) => [item.id, item.data()]) ?? []);
       const nextEmployees = employeeSnapshot.docs.map((d) => ({
         id: d.id,
         ...(d.data() as Employee),
-        ...(payrollSettings.get(d.id) ?? {}),
       }));
       const nextStores = storeSnapshot.docs.map((d) => ({
         id: d.id,
@@ -997,31 +988,12 @@ export default function AdminPage() {
       transportationCost: Number(employeeForm.transportationCost) || 0,
       transportationType: employeeForm.transportationType,
     };
-    const payrollPayload = {
-      payrollType: employeeForm.payrollType,
-      payrollTransferOrder: employeeForm.payrollTransferOrder === "" ? null : Number(employeeForm.payrollTransferOrder),
-      paymentMethod: employeeForm.paymentMethod, taxTableType: employeeForm.taxTableType,
-      dependentCount: Number(employeeForm.dependentCount) || 0, healthInsurance: Number(employeeForm.healthInsurance) || 0,
-      childSupportContribution: Number(employeeForm.childSupportContribution) || 0, careInsurance: Number(employeeForm.careInsurance) || 0,
-      employeePension: Number(employeeForm.employeePension) || 0, employmentInsurance: Number(employeeForm.employmentInsurance) || 0,
-      residentTax: Number(employeeForm.residentTax) || 0, fixedBaseSalary: Number(employeeForm.fixedBaseSalary) || 0,
-      directorCompensation: Number(employeeForm.directorCompensation) || 0, positionAllowance: Number(employeeForm.positionAllowance) || 0,
-      businessAllowance: Number(employeeForm.businessAllowance) || 0, holidayAllowance: Number(employeeForm.holidayAllowance) || 0,
-      fixedOvertimeAllowance: Number(employeeForm.fixedOvertimeAllowance) || 0, otherAllowance: Number(employeeForm.otherAllowance) || 0,
-      otherDeduction: Number(employeeForm.otherDeduction) || 0, advanceExpense: Number(employeeForm.advanceExpense) || 0,
-      payrollEnabled: employeeForm.payrollEnabled,
-    };
     try {
-      let savedEmployeeId = employeeEditingId;
       if (employeeEditingId) {
         await updateDoc(doc(db, "employees", employeeEditingId), payload);
       } else {
-        savedEmployeeId = (await addDoc(collection(db, "employees"), payload)).id;
+        await addDoc(collection(db, "employees"), payload);
       }
-      if (isAdmin && savedEmployeeId) await setDoc(doc(db, "payrollSettings", savedEmployeeId), {
-        ...payrollPayload,
-        history: arrayUnion({ effectiveFrom: localMonth(), settings: payrollPayload }),
-      }, { merge: true });
       setEmployeeEditingId("");
       setEmployeeForm(emptyEmployeeForm());
       setEmployeeFormError("");
@@ -1045,18 +1017,6 @@ export default function AdminPage() {
       status: employee.status === "inactive" ? "inactive" : "active",
       transportationCost: String(employee.transportationCost || ""),
       transportationType: employee.transportationType ?? "daily",
-      payrollType: employee.payrollType ?? (employee.fixedBaseSalary ? "fixed" : "hourly"),
-      payrollTransferOrder: employee.payrollTransferOrder == null ? "" : String(employee.payrollTransferOrder),
-      paymentMethod: employee.paymentMethod ?? "bank", taxTableType: employee.taxTableType ?? "kou",
-      dependentCount: String(employee.dependentCount ?? 0), healthInsurance: String(employee.healthInsurance ?? 0),
-      childSupportContribution: String(employee.childSupportContribution ?? 0), careInsurance: String(employee.careInsurance ?? 0),
-      employeePension: String(employee.employeePension ?? 0), employmentInsurance: String(employee.employmentInsurance ?? 0),
-      residentTax: String(employee.residentTax ?? 0), fixedBaseSalary: String(employee.fixedBaseSalary ?? 0),
-      directorCompensation: String(employee.directorCompensation ?? 0), positionAllowance: String(employee.positionAllowance ?? 0),
-      businessAllowance: String(employee.businessAllowance ?? 0), holidayAllowance: String(employee.holidayAllowance ?? 0),
-      fixedOvertimeAllowance: String(employee.fixedOvertimeAllowance ?? 0), otherAllowance: String(employee.otherAllowance ?? 0),
-      otherDeduction: String(employee.otherDeduction ?? 0), advanceExpense: String(employee.advanceExpense ?? 0),
-      payrollEnabled: employee.payrollEnabled !== false,
     });
     setActiveTab("employees");
   };
@@ -1850,15 +1810,6 @@ export default function AdminPage() {
                   <option value="none">なし</option>
                 </select>
               </label>
-              {isAdmin && <>
-                <label style={styles.label}>給与区分<select value={employeeForm.payrollType} onChange={(e) => setEmployeeForm({ ...employeeForm, payrollType: e.target.value as "hourly" | "fixed" })} style={styles.input}><option value="hourly">時給</option><option value="fixed">固定給</option></select></label>
-                <label style={styles.label}>給与対象<select value={employeeForm.payrollEnabled ? "yes" : "no"} onChange={(e) => setEmployeeForm({ ...employeeForm, payrollEnabled: e.target.value === "yes" })} style={styles.input}><option value="yes">対象</option><option value="no">対象外</option></select></label>
-                <label style={styles.label}>振込順<input type="number" value={employeeForm.payrollTransferOrder} onChange={(e) => setEmployeeForm({ ...employeeForm, payrollTransferOrder: e.target.value })} style={styles.input}/></label>
-                <label style={styles.label}>支給方法<select value={employeeForm.paymentMethod} onChange={(e) => setEmployeeForm({ ...employeeForm, paymentMethod: e.target.value as "bank" | "cash" })} style={styles.input}><option value="bank">振込</option><option value="cash">現金</option></select></label>
-                <label style={styles.label}>税額表<select value={employeeForm.taxTableType} onChange={(e) => setEmployeeForm({ ...employeeForm, taxTableType: e.target.value as "kou" | "otsu" })} style={styles.input}><option value="kou">甲欄</option><option value="otsu">乙欄</option></select></label>
-                <label style={styles.label}>扶養人数<input type="number" min="0" value={employeeForm.dependentCount} onChange={(e) => setEmployeeForm({ ...employeeForm, dependentCount: e.target.value })} style={styles.input}/></label>
-                {([['fixedBaseSalary','固定基本給'],['directorCompensation','役員報酬'],['positionAllowance','職能手当'],['fixedOvertimeAllowance','固定残業手当'],['holidayAllowance','休日手当'],['businessAllowance','業務手当'],['otherAllowance','その他手当'],['healthInsurance','健康保険'],['childSupportContribution','子育て支援金'],['careInsurance','介護保険'],['employeePension','厚生年金'],['employmentInsurance','雇用保険'],['residentTax','住民税'],['otherDeduction','その他控除'],['advanceExpense','立替経費']] as const).map(([key,label]) => <label key={key} style={styles.label}>{label}<input type="number" min="0" value={employeeForm[key]} onChange={(e) => setEmployeeForm({ ...employeeForm, [key]: e.target.value })} style={styles.input}/></label>)}
-              </>}
               <div style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 8 }}>
                 {employeeFormError && (
                   <p style={{ margin: 0, color: "#B91C1C", fontWeight: 700, fontSize: 13, padding: "8px 12px", background: "#FEF2F2", borderRadius: 8, border: "1px solid #FCA5A5" }}>
