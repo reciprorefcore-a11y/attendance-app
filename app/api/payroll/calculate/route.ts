@@ -13,7 +13,8 @@ export async function GET(request: NextRequest) {
     return NextResponse.json(await loadPayrollWorkspace(admin.db, targetMonth));
   } catch (error) {
     console.error("payroll workspace load failed", error);
-    return NextResponse.json({ error: "給与情報を取得できません" }, { status: 500 });
+    const detail = error instanceof Error ? error.message : String(error);
+    return NextResponse.json({ error: `給与情報を取得できません: ${detail}` }, { status: 500 });
   }
 }
 
@@ -27,6 +28,8 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error("payroll calculation failed", error);
     if (error instanceof Error && error.message === "already_confirmed") return NextResponse.json({ error: "この対象月の給与は確定済みです。再計算する場合は先に確定取消を行ってください" }, { status: 409 });
-    return NextResponse.json({ error: "給与計算に失敗しました" }, { status: 500 });
+    // 本部管理者専用APIのため、原因究明できるよう実際の例外内容を返す。
+    const detail = error instanceof Error ? `${error.message}` : String(error);
+    return NextResponse.json({ error: `給与計算に失敗しました: ${detail}` }, { status: 500 });
   }
 }

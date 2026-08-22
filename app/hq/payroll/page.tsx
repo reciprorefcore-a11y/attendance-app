@@ -35,21 +35,35 @@ async function getToken() {
 
 async function apiCall(url: string, init?: RequestInit) {
   const res = await fetch(url, { ...init, headers: { ...(init?.headers ?? {}), Authorization: `Bearer ${await getToken()}` } });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error ?? "処理に失敗しました");
-  return data;
+  // エラー応答がJSONとは限らない（504のHTML等）。JSON.parseで落とさず中身を見せる。
+  const text = await res.text();
+  let data: { error?: string } = {};
+  try { data = JSON.parse(text) as { error?: string }; } catch { /* non-JSON */ }
+  if (!res.ok) throw new Error(data.error ?? `処理に失敗しました (HTTP ${res.status}) ${text.slice(0, 200)}`);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return data as any;
 }
 
 async function downloadFile(url: string) {
   const res = await fetch(url, { headers: { Authorization: `Bearer ${await getToken()}` } });
   if (!res.ok) { const d = await res.json(); throw new Error(d.error ?? "ダウンロードに失敗しました"); }
   const blob = await res.blob();
-  const obj = URL.createObjectURL(blob);
+  if (blob.size === 0) throw new Error("サーバーが空のファイルを返しました");
   const disposition = res.headers.get("content-disposition") ?? "";
   const match = disposition.match(/filename\*=UTF-8''([^;]+)/);
+  const name = match ? decodeURIComponent(match[1]) : "payroll-download.xlsx";
+  const obj = URL.createObjectURL(blob);
   const a = document.createElement("a");
-  a.href = obj; a.download = match ? decodeURIComponent(match[1]) : "payroll-download";
-  a.click(); setTimeout(() => URL.revokeObjectURL(obj), 1000);
+  a.href = obj;
+  a.download = name;
+  a.rel = "noopener";
+  a.style.display = "none";
+  // Safari は document に挿入されていない <a> の click() を無視するため必ず append する。
+  document.body.appendChild(a);
+  a.click();
+  // Safari は revoke が早すぎるとダウンロードが始まらないため十分に待ってから破棄する。
+  setTimeout(() => { a.remove(); URL.revokeObjectURL(obj); }, 60000);
+  return name;
 }
 
 export default function PayrollPage() {
@@ -110,15 +124,15 @@ export default function PayrollPage() {
         body: JSON.stringify({ targetMonth, paymentMonth, paymentDate }),
       });
       setRun(data);
-      await downloadFile(`/api/payroll/export/payroll?runId=${data.id}`);
-      setMessage("給与計算Excelを出力しました。内容を確認してから「給与を確定」してください。");
+      const name = await downloadFile(`/api/payroll/export/payroll?runId=${data.id}`);
+      setMessage(`「${name}」をダウンロードしました。内容を確認してから「給与を確定」してください。`);
     } catch (e) { setMessage(e instanceof Error ? e.message : "給与計算に失敗しました"); }
     finally { setBusy(false); }
   };
 
   const downloadTransfer = async () => {
     if (!run) return; setBusy(true); setMessage("");
-    try { await downloadFile(`/api/payroll/export/transfer?runId=${run.id}`); setMessage("振込確認Excelを出力しました。"); }
+    try { const name = await downloadFile(`/api/payroll/export/transfer?runId=${run.id}`); setMessage(`「${name}」をダウンロードしました。`); }
     catch (e) { setMessage(e instanceof Error ? e.message : "振込確認Excelの出力に失敗しました"); }
     finally { setBusy(false); }
   };
