@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyAdminToken } from "@/lib/firebase-admin";
 import { createPayrollDraft, loadLatestPayrollRun } from "@/lib/payroll-server";
-import { rejectPayrollPreviewWrite } from "@/lib/payroll-preview";
 
 export const runtime = "nodejs";
 
@@ -14,8 +13,6 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const previewRejection = rejectPayrollPreviewWrite();
-  if (previewRejection) return NextResponse.json(previewRejection, { status: 403 });
   const admin = await verifyAdminToken(request.headers.get("authorization"));
   if (!admin) return NextResponse.json({ error: "本部管理者権限が必要です" }, { status: 403 });
   const input = await request.json() as { targetMonth?: string; paymentMonth?: string; paymentDate?: string };
