@@ -1,8 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyAdminToken } from "@/lib/firebase-admin";
 import { adjustPayrollResult, summarizePayroll, type PayrollResult } from "@/lib/payroll";
+import { rejectPayrollPreviewWrite } from "@/lib/payroll-preview";
 
 export async function POST(request: NextRequest) {
+  const previewRejection = rejectPayrollPreviewWrite();
+  if (previewRejection) return NextResponse.json(previewRejection, { status: 403 });
   const admin = await verifyAdminToken(request.headers.get("authorization"));
   if (!admin) return NextResponse.json({ error: "本部管理者権限が必要です" }, { status: 403 });
   const body = await request.json() as { runId?: string; employeeId?: string; otherTaxable?: number; otherDeduction?: number; reason?: string };
