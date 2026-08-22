@@ -28,6 +28,8 @@ export type PayrollEmployee = {
   employeePension?: number;
   employmentInsurance?: number;
   residentTax?: number;
+  incomeTax?: number;
+  previousConfirmedPayrollMissing?: boolean;
   fixedBaseSalary?: number;
   directorCompensation?: number;
   positionAllowance?: number;
@@ -143,13 +145,14 @@ const yen = (value: unknown) => Math.max(0, Math.trunc(Number(value) || 0));
 
 export function calculateWithholdingTax2026(taxableIncome: number, type: TaxTableType, dependentCount: number) {
   const amount = Math.max(0, Math.trunc(taxableIncome));
-  if (amount < 105_000) return type === "kou" ? 0 : Math.floor(amount * 0.03063);
+  if (type === "kou" && amount < 88_000) return 0;
   const row = tax2026.rows.find((item) => amount >= item.min && amount < item.max);
   if (row) {
     if (type === "otsu") return row.otsu;
     if (dependentCount <= 7) return row.kou[Math.max(0, dependentCount)] ?? 0;
     return Math.max(0, row.kou[7] - (dependentCount - 7) * 1_610);
   }
+  if (amount < 105_000) return type === "otsu" ? Math.floor(amount * 0.03063) : 0;
   // 740,000円以上は月額表の算式適用が必要なため、自動確定を止める側で警告する。
   return 0;
 }
@@ -167,9 +170,7 @@ export function validatePayrollInput(employees: PayrollEmployee[], attendance: P
     codes.set(employee.employeeCode, employee.id);
     const type = employee.payrollType ?? (employee.fixedBaseSalary ? "fixed" : "hourly");
     if (type === "hourly" && !yen(employee.hourlyWage ?? employee.baseWage)) issues.push({ severity: "error", code: "missing_hourly_wage", employeeId: employee.id, message: "時給が未設定です" });
-    if (type === "fixed" && !yen(employee.fixedBaseSalary) && !yen(employee.directorCompensation)) issues.push({ severity: "error", code: "missing_fixed_salary", employeeId: employee.id, message: "固定給または役員報酬が未設定です" });
-    if (!employee.taxTableType) issues.push({ severity: "error", code: "missing_tax_setting", employeeId: employee.id, message: "税区分が未設定です" });
-    if ((employee.paymentMethod ?? "bank") === "bank" && employee.bankAccountRegistered !== true && !employee.bankAccountNumber) issues.push({ severity: "error", code: "missing_bank_account", employeeId: employee.id, message: "銀行口座情報が未登録です" });
+    if (type === "fixed" && employee.previousConfirmedPayrollMissing) issues.push({ severity: "error", code: "missing_previous_fixed_payroll", employeeId: employee.id, message: "幹部の前月確定値がありません" });
     if (employee.healthInsurance == null || employee.employeePension == null || employee.employmentInsurance == null) issues.push({ severity: "warning", code: "missing_social_insurance_setting", employeeId: employee.id, message: "社会保険設定に未入力項目があります" });
     if (!employee.transportationType) issues.push({ severity: "warning", code: "missing_transportation_setting", employeeId: employee.id, message: "交通費区分が未設定です" });
   }
@@ -226,8 +227,10 @@ export function calculatePayrollEmployee(employee: PayrollEmployee, allAttendanc
   const taxTableType = employee.taxTableType ?? "kou";
   const dependentCount = Math.max(0, Math.trunc(employee.dependentCount ?? 0));
   const issues: PayrollIssue[] = [];
-  if (taxableIncome >= 740_000) issues.push({ severity: "error", code: "tax_formula_required", employeeId: employee.id, message: "課税対象額740,000円以上は税額表の算式確認が必要です" });
-  const incomeTax = calculateWithholdingTax2026(taxableIncome, taxTableType, dependentCount);
+  if (taxableIncome >= 740_000) issues.push({ severity: "warning", code: "tax_formula_required", employeeId: employee.id, message: "課税対象額740,000円以上は税額表の算式確認が必要です" });
+  const incomeTax = payrollType === "fixed" && employee.incomeTax != null
+    ? yen(employee.incomeTax)
+    : calculateWithholdingTax2026(taxableIncome, taxTableType, dependentCount);
   const deductionTotal = socialInsuranceTotal + incomeTax + yen(employee.residentTax) + yen(employee.yearEndAdjustment) + yen(employee.otherDeduction) + yen(employee.advanceExpense);
   const netPay = grossTotal - deductionTotal + Math.trunc(employee.otherTotal ?? 0);
   const paymentMethod = employee.paymentMethod ?? "bank";
@@ -263,4 +266,3 @@ export function summarizePayroll(results: PayrollResult[]) {
     bankTransferTotal: sum.bankTransferTotal + item.bankTransfer,
   }), { employeeCount: 0, taxableTotal: 0, transportationTotal: 0, grossTotal: 0, socialInsuranceTotal: 0, incomeTaxTotal: 0, residentTaxTotal: 0, deductionTotal: 0, netTotal: 0, bankTransferTotal: 0 });
 }
-

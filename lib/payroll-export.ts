@@ -22,30 +22,44 @@ const periodLabel = (targetMonth: string, paymentDate: string) => {
 
 export function createPayrollWorkbook(results: PayrollResult[], paymentMonth: string, draft = false, targetMonth = paymentMonth, paymentDate = `${paymentMonth}-25`) {
   const workbook = XLSX.read(readFileSync(path.join(process.cwd(), "templates", "payroll", "payroll-summary-template.xlsx")), { type: "buffer", cellStyles: true, cellFormula: true });
-  const sheet = workbook.Sheets[workbook.SheetNames[0]];
-  const groups = [
+  const templateName = workbook.SheetNames[0];
+  const templateSheet = workbook.Sheets[templateName];
+  const allGroups = [
     { name: "本部", items: results.filter((x) => x.payrollType === "hourly" && !x.storeName.includes("野毛")), start: 2, end: 26, subtotal: 27 },
     { name: "野毛", items: results.filter((x) => x.payrollType === "hourly" && x.storeName.includes("野毛")), start: 28, end: 31, subtotal: 32 },
     { name: "幹部", items: results.filter((x) => x.payrollType === "fixed"), start: 33, end: 37, subtotal: 38 },
   ];
+  const pageCount = Math.max(1, ...allGroups.map((group) => Math.ceil(group.items.length / (group.end - group.start + 1))));
   const rowValues: Record<number, (x: PayrollResult) => number> = {
     4:x=>x.earnings.baseSalary,5:x=>x.earnings.directorCompensation,6:x=>x.earnings.positionAllowance,7:x=>x.earnings.fixedOvertimeAllowance,8:x=>x.earnings.holidayAllowance,9:x=>x.earnings.businessAllowance,10:x=>x.earnings.transportation,11:x=>x.earnings.overtimePremium,12:x=>x.earnings.nightPremium,13:x=>x.earnings.absenceDeduction,14:x=>x.earnings.lateEarlyDeduction,15:x=>x.earnings.taxableTotal,16:x=>x.earnings.nonTaxableTotal,17:x=>x.earnings.grossTotal,18:x=>x.deductions.healthInsurance,19:x=>x.deductions.childSupportContribution,20:x=>x.deductions.careInsurance,21:x=>x.deductions.employeePension,22:x=>x.deductions.employmentInsurance,23:x=>x.deductions.socialInsuranceTotal,24:x=>x.deductions.taxableIncome,25:x=>x.deductions.incomeTax,26:x=>x.deductions.residentTax,27:x=>x.deductions.yearEndAdjustment,28:x=>x.deductions.otherDeduction,29:x=>x.deductions.advanceExpense,30:x=>x.deductions.total,31:()=>0,32:x=>x.netPay,33:x=>x.bankTransfer,34:x=>x.cashPayment,36:x=>x.attendance.attendanceDays,37:x=>x.attendance.absenceDays,38:x=>x.attendance.paidLeaveDays,39:()=>0,40:()=>0,41:x=>x.attendance.workMinutes/60,42:()=>0,43:x=>x.attendance.overtimeMinutes/60,44:x=>x.attendance.nightMinutes/60,45:x=>x.attendance.helpMinutes/60,
   };
-  sheet.A1 = { ...(sheet.A1 ?? {}), t: "s", v: `${draft ? "【試算】" : ""}FUBLEV Group㈱　R${Number(paymentMonth.slice(0,4))-2018}.${Number(paymentMonth.slice(5))}月支給　` };
-  for (const group of groups) {
-    if (group.items.length > group.end - group.start + 1) throw new Error(`${group.name}の給与対象者数がテンプレート列数を超えています`);
-    sheet[XLSX.utils.encode_cell({ r:1,c:group.start })] = { ...(sheet[XLSX.utils.encode_cell({r:1,c:group.start})]??{}), t:"s",v:group.name };
-    for (let col=group.start;col<=group.end;col++) {
-      const item=group.items[col-group.start];
-      sheet[XLSX.utils.encode_cell({r:2,c:col})]={...(sheet[XLSX.utils.encode_cell({r:2,c:col})]??{}),t:"s",v:item?.employeeCode??""};
-      sheet[XLSX.utils.encode_cell({r:3,c:col})]={...(sheet[XLSX.utils.encode_cell({r:3,c:col})]??{}),t:"s",v:item?.employeeName??""};
-      for(const [row,getter] of Object.entries(rowValues)){const r=Number(row);sheet[XLSX.utils.encode_cell({r,c:col})]={...(sheet[XLSX.utils.encode_cell({r,c:col})]??{}),t:"n",v:item?getter(item):0};}
+  workbook.SheetNames = [];
+  workbook.Sheets = {};
+  for (let page = 0; page < pageCount; page++) {
+    const sheet = structuredClone(templateSheet);
+    const groups = allGroups.map((group) => {
+      const capacity = group.end - group.start + 1;
+      return { ...group, items: group.items.slice(page * capacity, (page + 1) * capacity) };
+    });
+    sheet.A1 = { ...(sheet.A1 ?? {}), t: "s", v: `${draft ? "【試算】" : ""}FUBLEV Group㈱　R${Number(paymentMonth.slice(0,4))-2018}.${Number(paymentMonth.slice(5))}月支給${pageCount > 1 ? `（${page + 1}/${pageCount}）` : ""}　` };
+    for (const group of groups) {
+      sheet[XLSX.utils.encode_cell({ r:1,c:group.start })] = { ...(sheet[XLSX.utils.encode_cell({r:1,c:group.start})]??{}), t:"s",v:group.name };
+      for (let col=group.start;col<=group.end;col++) {
+        const item=group.items[col-group.start];
+        sheet[XLSX.utils.encode_cell({r:2,c:col})]={...(sheet[XLSX.utils.encode_cell({r:2,c:col})]??{}),t:"s",v:item?.employeeCode??""};
+        sheet[XLSX.utils.encode_cell({r:3,c:col})]={...(sheet[XLSX.utils.encode_cell({r:3,c:col})]??{}),t:"s",v:item?.employeeName??""};
+        for(const [row,getter] of Object.entries(rowValues)){const r=Number(row);sheet[XLSX.utils.encode_cell({r,c:col})]={...(sheet[XLSX.utils.encode_cell({r,c:col})]??{}),t:"n",v:item?getter(item):0};}
+      }
+      sheet[XLSX.utils.encode_cell({r:3,c:group.subtotal})]={...(sheet[XLSX.utils.encode_cell({r:3,c:group.subtotal})]??{}),t:"s",v:`${group.items.length}人`};
+      for(const row of Object.keys(rowValues).map(Number)){const from=XLSX.utils.encode_cell({r:row,c:group.start}),to=XLSX.utils.encode_cell({r:row,c:group.end});sheet[XLSX.utils.encode_cell({r:row,c:group.subtotal})]={...(sheet[XLSX.utils.encode_cell({r:row,c:group.subtotal})]??{}),t:"n",f:`SUM(${from}:${to})`};}
     }
-    sheet[XLSX.utils.encode_cell({r:3,c:group.subtotal})]={...(sheet[XLSX.utils.encode_cell({r:3,c:group.subtotal})]??{}),t:"s",v:`${group.items.length}人`};
-    for(const row of Object.keys(rowValues).map(Number)){const from=XLSX.utils.encode_cell({r:row,c:group.start}),to=XLSX.utils.encode_cell({r:row,c:group.end});sheet[XLSX.utils.encode_cell({r:row,c:group.subtotal})]={...(sheet[XLSX.utils.encode_cell({r:row,c:group.subtotal})]??{}),t:"n",f:`SUM(${from}:${to})`};}
+    const pageEmployeeCount = groups.reduce((sum, group) => sum + group.items.length, 0);
+    sheet.AN4={...(sheet.AN4??{}),t:"s",v:`${pageEmployeeCount}人`};
+    for(const row of Object.keys(rowValues).map(Number)) sheet[XLSX.utils.encode_cell({r:row,c:39})]={...(sheet[XLSX.utils.encode_cell({r:row,c:39})]??{}),t:"n",f:`SUM(${XLSX.utils.encode_cell({r:row,c:27})},${XLSX.utils.encode_cell({r:row,c:32})},${XLSX.utils.encode_cell({r:row,c:38})})`};
+    const sheetName = page === 0 ? templateName : `${templateName}_${page + 1}`;
+    workbook.SheetNames.push(sheetName);
+    workbook.Sheets[sheetName] = sheet;
   }
-  sheet.AN4={...(sheet.AN4??{}),t:"s",v:`${results.length}人`};
-  for(const row of Object.keys(rowValues).map(Number)) sheet[XLSX.utils.encode_cell({r:row,c:39})]={...(sheet[XLSX.utils.encode_cell({r:row,c:39})]??{}),t:"n",f:`SUM(${XLSX.utils.encode_cell({r:row,c:27})},${XLSX.utils.encode_cell({r:row,c:32})},${XLSX.utils.encode_cell({r:row,c:38})})`};
   return XLSX.write(workbook, { type: "buffer", bookType: "xlsx" }) as Buffer;
 }
 
@@ -57,9 +71,12 @@ export function createTransferWorkbook(results: PayrollResult[], paymentMonth: s
   });
   const workbook = XLSX.read(readFileSync(path.join(process.cwd(), "templates", "payroll", "bank-transfer-template.xlsx")), { type: "buffer", cellStyles: true, cellFormula: true });
   const sheet = workbook.Sheets[workbook.SheetNames[0]]; sheet.A1={...(sheet.A1??{}),t:"s",v:`${paymentLabel(paymentMonth)}支給　給与振込一覧`};
-  const templateStyle=[sheet.A3,sheet.B3,sheet.C3];
-  sorted.forEach((item,index)=>{const row=index+2;sheet[XLSX.utils.encode_cell({r:row,c:0})]={...templateStyle[0],t:"n",v:index+1};sheet[XLSX.utils.encode_cell({r:row,c:1})]={...templateStyle[1],t:"s",v:item.employeeName};sheet[XLSX.utils.encode_cell({r:row,c:2})]={...templateStyle[2],t:"n",v:item.bankTransfer,z:"#,##0\"円\""};});
-  const totalRow=sorted.length+2;sheet[XLSX.utils.encode_cell({r:totalRow,c:0})]={...templateStyle[0],t:"s",v:`振込合計（${sorted.length}名）`};sheet[XLSX.utils.encode_cell({r:totalRow,c:1})]={...templateStyle[1],t:"s",v:""};sheet[XLSX.utils.encode_cell({r:totalRow,c:2})]={...templateStyle[2],t:"n",f:`SUM(C3:C${totalRow})`,z:"#,##0\"円\""};sheet["!ref"]=`A1:C${totalRow+1}`;
+  const templateStyle=[sheet.A3,sheet.B3,sheet.B3,sheet.C3];
+  const oldRange = XLSX.utils.decode_range(sheet["!ref"] ?? "A1:C3");
+  for (let r=2;r<=oldRange.e.r;r++) for (let c=0;c<=3;c++) delete sheet[XLSX.utils.encode_cell({r,c})];
+  ["No.", "社員コード", "氏名", "振込金額"].forEach((value, c) => { sheet[XLSX.utils.encode_cell({r:1,c})] = { ...(sheet[XLSX.utils.encode_cell({r:1,c:Math.min(c,2)})] ?? {}), t:"s", v:value }; });
+  sorted.forEach((item,index)=>{const row=index+2;sheet[XLSX.utils.encode_cell({r:row,c:0})]={...templateStyle[0],t:"n",v:index+1};sheet[XLSX.utils.encode_cell({r:row,c:1})]={...templateStyle[1],t:"s",v:item.employeeCode};sheet[XLSX.utils.encode_cell({r:row,c:2})]={...templateStyle[2],t:"s",v:item.employeeName};sheet[XLSX.utils.encode_cell({r:row,c:3})]={...templateStyle[3],t:"n",v:item.bankTransfer,z:"#,##0\"円\""};});
+  const totalRow=sorted.length+2;sheet[XLSX.utils.encode_cell({r:totalRow,c:0})]={...templateStyle[0],t:"s",v:`振込合計（${sorted.length}名）`};sheet[XLSX.utils.encode_cell({r:totalRow,c:1})]={...templateStyle[1],t:"s",v:""};sheet[XLSX.utils.encode_cell({r:totalRow,c:2})]={...templateStyle[2],t:"s",v:""};sheet[XLSX.utils.encode_cell({r:totalRow,c:3})]={...templateStyle[3],t:"n",f:`SUM(D3:D${totalRow})`,z:"#,##0\"円\""};sheet["!ref"]=`A1:D${totalRow+1}`;
   workbook.SheetNames[0]=`${Number(paymentMonth.slice(5))}月給与振込一覧`;workbook.Sheets[workbook.SheetNames[0]]=sheet;
   return XLSX.write(workbook, { type: "buffer", bookType: "xlsx" }) as Buffer;
 }
@@ -102,4 +119,3 @@ export async function createPayslipPdf(result: PayrollResult, targetMonth: strin
   page.drawText(net, { x: 558 - font.widthOfTextAtSize(net, 18), y: 37, size: 18, font, color: rgb(1, 1, 1) });
   return Buffer.from(await pdf.save());
 }
-

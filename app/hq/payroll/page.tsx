@@ -156,7 +156,7 @@ export default function PayrollPage() {
     finally { setBusy(false); }
   };
 
-  const errors = run?.issues.filter((x) => x.severity === "error") ?? [];
+  const errors = [...new Map((run?.issues.filter((x) => x.severity === "error") ?? []).map((item) => [`${item.code}:${item.message}`, item])).values()];
   const isDraft = run?.status === "draft";
   const isConfirmed = run?.status === "confirmed";
   const statusLabel = !run ? "未計算" : run.status === "draft" ? "試算" : run.status === "confirmed" ? "確定済み" : "確定取消済み";

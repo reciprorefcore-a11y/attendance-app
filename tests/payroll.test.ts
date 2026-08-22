@@ -57,14 +57,25 @@ test("月途中は試算可能でも確定不可、翌月から確定可能", ()
   assert.equal(isPayrollMonthClosed("2026-08", new Date("2026-08-31T15:00:00Z")), true);
 });
 
-test("振込対象者の銀行口座情報不足は確定を妨げるエラー", () => {
+test("銀行口座と税区分が未設定でも給与計算を妨げず甲欄扶養0人を適用する", () => {
   const issues = validatePayrollInput([employee("1", { bankAccountRegistered: false, bankAccountNumber: null })], [], "2026-08");
-  assert.ok(issues.some((item) => item.code === "missing_bank_account" && item.severity === "error"));
+  assert.equal(issues.some((item) => item.code === "missing_bank_account" || item.code === "missing_tax_setting"), false);
+  const below = calculatePayrollEmployee(employee("below", { taxTableType: undefined, dependentCount: undefined, hourlyWage: 87999 }), [day("below", "2026-07-01", 60)]);
+  const table = calculatePayrollEmployee(employee("table", { taxTableType: undefined, dependentCount: undefined, hourlyWage: 105558 }), [day("table", "2026-07-01", 60)]);
+  assert.deepEqual([below.deductions.incomeTax, below.taxTableTypeSnapshot, below.dependentCountSnapshot], [0, "kou", 0]);
+  assert.equal(table.deductions.incomeTax, 170);
 });
 
 test("固定給・固定手当・休日手当と社保全額を引き継ぐ", () => {
   const result = calculatePayrollEmployee(employee("f", { payrollType: "fixed", fixedBaseSalary: 200000, positionAllowance: 10000, holidayAllowance: 10694, fixedOvertimeAllowance: 20000, healthInsurance: 10000, childSupportContribution: 500, careInsurance: 1000, employeePension: 20000, employmentInsurance: 1000 }), []);
   assert.equal(result.earnings.holidayAllowance, 10694); assert.equal(result.earnings.overtimePremium, 0); assert.equal(result.deductions.socialInsuranceTotal, 32500); assert.equal(result.deductions.taxableIncome, result.earnings.taxableTotal - 32500);
+});
+
+test("幹部は前月確定値の税額を使用し、前月値がなければ阻止する", () => {
+  const fixed = employee("f", { payrollType: "fixed", fixedBaseSalary: 200000, incomeTax: 12345 });
+  assert.equal(calculatePayrollEmployee(fixed, []).deductions.incomeTax, 12345);
+  const issues = validatePayrollInput([{ ...fixed, previousConfirmedPayrollMissing: true }], [], "2026-07");
+  assert.ok(issues.some((item) => item.code === "missing_previous_fixed_payroll" && item.severity === "error"));
 });
 
 test("令和8年税額表の甲欄・乙欄・扶養人数を参照する", () => {
@@ -75,7 +86,20 @@ test("給与Excelと振込Excelの人数・合計が一致する", () => {
   const results = calculatePayroll([employee("2", { hourlyWage: 2000, payrollTransferOrder: 2 }), employee("1", { hourlyWage: 1000, payrollTransferOrder: 1 })], [day("1", "2026-07-01", 60), day("2", "2026-07-01", 60)]);
   const payroll = XLSX.read(createPayrollWorkbook(results, "2026-08")); const transfer = XLSX.read(createTransferWorkbook(results, "2026-08"));
   assert.equal(payroll.SheetNames[0], "FUBLEVG㈱"); const sheet = transfer.Sheets[transfer.SheetNames[0]], rows = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as unknown[][];
-  assert.equal(rows.length, 5); assert.equal(rows.at(-1)?.[0], "振込合計（2名）"); assert.equal(sheet.C5.f, "SUM(C3:C4)");
+  assert.equal(rows.length, 5); assert.deepEqual(rows[1], ["No.", "社員コード", "氏名", "振込金額"]); assert.deepEqual(rows[2]?.slice(0, 4), [1, "1", "従業員1", 1000]); assert.equal(rows.at(-1)?.[0], "振込合計（2名）"); assert.equal(sheet.D5.f, "SUM(D3:D4)");
+});
+
+test("給与テンプレート定員超過時は全従業員を複数シートへ出力する", () => {
+  const results = calculatePayroll(Array.from({ length: 38 }, (_, i) => employee(String(i + 1))), []);
+  const workbook = XLSX.read(createPayrollWorkbook(results, "2026-08"));
+  assert.equal(workbook.SheetNames.length, 2);
+  const codes = workbook.SheetNames.flatMap((name) => {
+    const sheet = workbook.Sheets[name];
+    return [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]
+      .map((column) => sheet[XLSX.utils.encode_cell({ r: 2, c: column })]?.v)
+      .filter(Boolean);
+  });
+  assert.equal(new Set(codes).size, 38);
 });
 
 test("確定前帳票には試算プレフィックスを付与し対象期間・支給日を含まない", () => {

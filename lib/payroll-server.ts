@@ -31,7 +31,7 @@ export async function loadPayrollSource(db: FirestoreRest, targetMonth: string) 
     for (const emp of employees) {
       if (emp.payrollType !== "fixed") continue;
       const prev = prevResults.get(emp.id);
-      if (!prev) continue;
+      if (!prev) { emp.previousConfirmedPayrollMissing = true; continue; }
       emp.fixedBaseSalary = prev.earnings.baseSalary;
       emp.directorCompensation = prev.earnings.directorCompensation;
       emp.positionAllowance = prev.earnings.positionAllowance;
@@ -44,10 +44,13 @@ export async function loadPayrollSource(db: FirestoreRest, targetMonth: string) 
       emp.careInsurance = prev.deductions.careInsurance;
       emp.employeePension = prev.deductions.employeePension;
       emp.employmentInsurance = prev.deductions.employmentInsurance;
+      emp.incomeTax = prev.deductions.incomeTax;
       emp.residentTax = prev.deductions.residentTax;
       emp.otherDeduction = prev.deductions.otherDeduction;
       emp.advanceExpense = prev.deductions.advanceExpense;
     }
+  } else {
+    for (const emp of employees) if (emp.payrollType === "fixed") emp.previousConfirmedPayrollMissing = true;
   }
   const employeeIds = new Set(employees.map((item) => item.id));
   const employeeById = new Map(employees.map((item) => [item.id, item]));
