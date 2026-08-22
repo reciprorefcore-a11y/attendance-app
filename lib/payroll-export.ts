@@ -1,5 +1,4 @@
 import * as XLSX from "xlsx";
-import JSZip from "jszip";
 import { PDFDocument, rgb } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
 import { readFile } from "node:fs/promises";
@@ -32,7 +31,7 @@ export function createPayrollWorkbook(results: PayrollResult[], paymentMonth: st
   const rowValues: Record<number, (x: PayrollResult) => number> = {
     4:x=>x.earnings.baseSalary,5:x=>x.earnings.directorCompensation,6:x=>x.earnings.positionAllowance,7:x=>x.earnings.fixedOvertimeAllowance,8:x=>x.earnings.holidayAllowance,9:x=>x.earnings.businessAllowance,10:x=>x.earnings.transportation,11:x=>x.earnings.overtimePremium,12:x=>x.earnings.nightPremium,13:x=>x.earnings.absenceDeduction,14:x=>x.earnings.lateEarlyDeduction,15:x=>x.earnings.taxableTotal,16:x=>x.earnings.nonTaxableTotal,17:x=>x.earnings.grossTotal,18:x=>x.deductions.healthInsurance,19:x=>x.deductions.childSupportContribution,20:x=>x.deductions.careInsurance,21:x=>x.deductions.employeePension,22:x=>x.deductions.employmentInsurance,23:x=>x.deductions.socialInsuranceTotal,24:x=>x.deductions.taxableIncome,25:x=>x.deductions.incomeTax,26:x=>x.deductions.residentTax,27:x=>x.deductions.yearEndAdjustment,28:x=>x.deductions.otherDeduction,29:x=>x.deductions.advanceExpense,30:x=>x.deductions.total,31:()=>0,32:x=>x.netPay,33:x=>x.bankTransfer,34:x=>x.cashPayment,36:x=>x.attendance.attendanceDays,37:x=>x.attendance.absenceDays,38:x=>x.attendance.paidLeaveDays,39:()=>0,40:()=>0,41:x=>x.attendance.workMinutes/60,42:()=>0,43:x=>x.attendance.overtimeMinutes/60,44:x=>x.attendance.nightMinutes/60,45:x=>x.attendance.helpMinutes/60,
   };
-  sheet.A1 = { ...(sheet.A1 ?? {}), t: "s", v: `${draft ? "【試算】" : ""}FUBLEV Group㈱　R${Number(paymentMonth.slice(0,4))-2018}.${Number(paymentMonth.slice(5))}月支給　${periodLabel(targetMonth, paymentDate)}` };
+  sheet.A1 = { ...(sheet.A1 ?? {}), t: "s", v: `${draft ? "【試算】" : ""}FUBLEV Group㈱　R${Number(paymentMonth.slice(0,4))-2018}.${Number(paymentMonth.slice(5))}月支給　` };
   for (const group of groups) {
     if (group.items.length > group.end - group.start + 1) throw new Error(`${group.name}の給与対象者数がテンプレート列数を超えています`);
     sheet[XLSX.utils.encode_cell({ r:1,c:group.start })] = { ...(sheet[XLSX.utils.encode_cell({r:1,c:group.start})]??{}), t:"s",v:group.name };
@@ -57,7 +56,7 @@ export function createTransferWorkbook(results: PayrollResult[], paymentMonth: s
     return ao - bo || a.employeeCode.localeCompare(b.employeeCode, "ja", { numeric: true });
   });
   const workbook = XLSX.read(readFileSync(path.join(process.cwd(), "templates", "payroll", "bank-transfer-template.xlsx")), { type: "buffer", cellStyles: true, cellFormula: true });
-  const sheet = workbook.Sheets[workbook.SheetNames[0]]; sheet.A1={...(sheet.A1??{}),t:"s",v:`${draft ? "【試算】" : ""}${paymentLabel(paymentMonth)}支給　給与振込一覧　${periodLabel(targetMonth, paymentDate)}`};
+  const sheet = workbook.Sheets[workbook.SheetNames[0]]; sheet.A1={...(sheet.A1??{}),t:"s",v:`${paymentLabel(paymentMonth)}支給　給与振込一覧`};
   const templateStyle=[sheet.A3,sheet.B3,sheet.C3];
   sorted.forEach((item,index)=>{const row=index+2;sheet[XLSX.utils.encode_cell({r:row,c:0})]={...templateStyle[0],t:"n",v:index+1};sheet[XLSX.utils.encode_cell({r:row,c:1})]={...templateStyle[1],t:"s",v:item.employeeName};sheet[XLSX.utils.encode_cell({r:row,c:2})]={...templateStyle[2],t:"n",v:item.bankTransfer,z:"#,##0\"円\""};});
   const totalRow=sorted.length+2;sheet[XLSX.utils.encode_cell({r:totalRow,c:0})]={...templateStyle[0],t:"s",v:`振込合計（${sorted.length}名）`};sheet[XLSX.utils.encode_cell({r:totalRow,c:1})]={...templateStyle[1],t:"s",v:""};sheet[XLSX.utils.encode_cell({r:totalRow,c:2})]={...templateStyle[2],t:"n",f:`SUM(C3:C${totalRow})`,z:"#,##0\"円\""};sheet["!ref"]=`A1:C${totalRow+1}`;
@@ -104,9 +103,3 @@ export async function createPayslipPdf(result: PayrollResult, targetMonth: strin
   return Buffer.from(await pdf.save());
 }
 
-export async function createPayslipZip(results: PayrollResult[], targetMonth: string, paymentMonth: string, paymentDate: string, draft = false) {
-  const zip = new JSZip();
-  const label = paymentLabel(paymentMonth);
-  for (const result of results) zip.file(`${label}給与明細_${result.employeeCode}_${result.employeeName}${draft ? "_試算" : ""}.pdf`, await createPayslipPdf(result, targetMonth, paymentDate, draft));
-  return zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
-}

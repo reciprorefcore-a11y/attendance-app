@@ -59,8 +59,8 @@ test("payrollEnabled is saved to employees collection, not payrollSettings", () 
 
 test("payroll page has simplified 3-function interface", () => {
   // Must have the 3 core actions
-  assert.match(payrollPage, /今月の給与を計算/);
-  assert.match(payrollPage, /振込額を確認/);
+  assert.match(payrollPage, /今月の給与Excelを作成/);
+  assert.match(payrollPage, /振込一覧Excelを作成/);
   assert.match(payrollPage, /給与明細ダウンロード/);
   assert.match(payrollPage, /給与を確定/);
   // Must not have complex KPI cards or employee detail table

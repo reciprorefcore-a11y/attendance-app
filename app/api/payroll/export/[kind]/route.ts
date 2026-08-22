@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyAdminToken } from "@/lib/firebase-admin";
 import { loadPayrollRun } from "@/lib/payroll-server";
-import { createPayrollWorkbook, createTransferWorkbook, createPayslipPdf, createPayslipZip } from "@/lib/payroll-export";
+import { createPayrollWorkbook, createTransferWorkbook, createPayslipPdf } from "@/lib/payroll-export";
 
 export const runtime = "nodejs";
 
@@ -18,7 +18,6 @@ export async function GET(request: NextRequest, context: { params: Promise<{ kin
   const draft = run.status !== "confirmed";
   if (kind === "payroll") { buffer = createPayrollWorkbook(run.results, run.paymentMonth, draft, run.targetMonth, run.paymentDate); filename = `${label}支給給与${draft ? "_試算" : ""}.xlsx`; contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"; }
   else if (kind === "transfer") { buffer = createTransferWorkbook(run.results, run.paymentMonth, request.nextUrl.searchParams.get("excludeZero") !== "false", draft, run.targetMonth, run.paymentDate); filename = `${label}給与振込一覧${draft ? "_試算" : ""}.xlsx`; contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"; }
-  else if (kind === "zip") { buffer = await createPayslipZip(run.results, run.targetMonth, run.paymentMonth, run.paymentDate, draft); filename = `${label}給与明細一括${draft ? "_試算" : ""}.zip`; contentType = "application/zip"; }
   else if (kind === "pdf") {
     const employeeId = request.nextUrl.searchParams.get("employeeId"); const result = run.results.find((item) => item.employeeId === employeeId);
     if (!result) return NextResponse.json({ error: "従業員が見つかりません" }, { status: 404 });

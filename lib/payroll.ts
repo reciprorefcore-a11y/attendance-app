@@ -264,18 +264,3 @@ export function summarizePayroll(results: PayrollResult[]) {
   }), { employeeCount: 0, taxableTotal: 0, transportationTotal: 0, grossTotal: 0, socialInsuranceTotal: 0, incomeTaxTotal: 0, residentTaxTotal: 0, deductionTotal: 0, netTotal: 0, bankTransferTotal: 0 });
 }
 
-export function adjustPayrollResult(result: PayrollResult, values: { otherTaxable: number; otherDeduction: number }, reason: string, adjustedBy: string) {
-  if (!reason.trim()) throw new Error("adjustment_reason_required");
-  const next = structuredClone(result);
-  next.earnings.otherTaxable = yen(values.otherTaxable);
-  next.earnings.taxableTotal = next.earnings.baseSalary + next.earnings.directorCompensation + next.earnings.positionAllowance + next.earnings.fixedOvertimeAllowance + next.earnings.holidayAllowance + next.earnings.businessAllowance + next.earnings.overtimePremium + next.earnings.nightPremium + next.earnings.otherTaxable - next.earnings.absenceDeduction - next.earnings.lateEarlyDeduction;
-  next.earnings.grossTotal = next.earnings.taxableTotal + next.earnings.nonTaxableTotal;
-  next.deductions.taxableIncome = Math.max(0, next.earnings.taxableTotal - next.deductions.socialInsuranceTotal);
-  next.deductions.incomeTax = calculateWithholdingTax2026(next.deductions.taxableIncome, next.taxTableTypeSnapshot, next.dependentCountSnapshot);
-  next.deductions.otherDeduction = yen(values.otherDeduction);
-  next.deductions.total = next.deductions.socialInsuranceTotal + next.deductions.incomeTax + next.deductions.residentTax + next.deductions.yearEndAdjustment + next.deductions.otherDeduction + next.deductions.advanceExpense;
-  next.netPay = next.earnings.grossTotal - next.deductions.total;
-  next.bankTransfer = next.paymentMethod === "bank" ? next.netPay : 0;
-  next.cashPayment = next.paymentMethod === "cash" ? next.netPay : 0;
-  return { result: next, adjustment: { before: { otherTaxable: result.earnings.otherTaxable, otherDeduction: result.deductions.otherDeduction }, after: values, reason: reason.trim(), adjustedBy, adjustedAt: new Date().toISOString() } };
-}

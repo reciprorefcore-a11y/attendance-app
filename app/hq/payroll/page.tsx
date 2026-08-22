@@ -13,8 +13,12 @@ type PayrollRun = {
 type ConfirmedRunSummary = { id: string; targetMonth: string; paymentMonth: string; paymentDate: string; employeeCount: number };
 type SlipRun = { id: string; targetMonth: string; paymentDate: string; status: string; results: PayrollResult[] };
 
-const lastMonth = () => { const n = new Date(); n.setDate(1); n.setMonth(n.getMonth() - 1); return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}`; };
-const thisMonth = () => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}`; };
+function tokyoYM() {
+  const parts = new Intl.DateTimeFormat("ja-JP", { timeZone: "Asia/Tokyo", year: "numeric", month: "2-digit" }).formatToParts(new Date());
+  return { y: Number(parts.find((p) => p.type === "year")!.value), m: Number(parts.find((p) => p.type === "month")!.value) };
+}
+const thisMonth = () => { const { y, m } = tokyoYM(); return `${y}-${String(m).padStart(2, "0")}`; };
+const lastMonth = () => { const { y, m } = tokyoYM(); return m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, "0")}`; };
 const payDate = () => `${thisMonth()}-25`;
 const yen = (v: number) => `${Math.trunc(v || 0).toLocaleString()}円`;
 const fmtMonth = (ym: string) => { const [y, m] = ym.split("-"); return `${y}年${Number(m)}月`; };
@@ -165,10 +169,10 @@ export default function PayrollPage() {
 
           <div style={s.actions}>
             <button disabled={busy || isConfirmed} onClick={calculate} style={s.primary}>
-              {busy ? "処理中…" : run ? "今月の給与を再計算" : "今月の給与を計算"}
+              {busy ? "処理中…" : run ? "今月の給与Excelを再作成" : "今月の給与Excelを作成"}
             </button>
             <button disabled={busy || !run} onClick={downloadTransfer} style={s.secondary}>
-              振込額を確認
+              振込一覧Excelを作成
             </button>
             <button
               disabled={busy || !isDraft || !run?.canConfirm || errors.length > 0}

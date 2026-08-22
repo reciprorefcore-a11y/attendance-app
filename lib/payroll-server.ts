@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { firestore } from "firebase-admin";
+import type { FirestoreRest } from "./firebase-rest.ts";
 import { buildAttendanceRows, type CalculationClockLog } from "./attendance-calculation.ts";
 import { calculatePayroll, isPayrollMonthClosed, summarizePayroll, validatePayrollInput, type PayrollAttendanceDay, type PayrollEmployee, type PayrollResult } from "./payroll.ts";
 
@@ -9,21 +9,46 @@ function asDate(value: unknown) {
   return new Date(String(value));
 }
 
-export async function loadPayrollSource(db: firestore.Firestore, targetMonth: string) {
-  const [employeeSnapshot, payrollSettingsSnapshot, storeSnapshot, logSnapshot, confirmedSnapshot] = await Promise.all([
+export async function loadPayrollSource(db: FirestoreRest, targetMonth: string) {
+  const [y, m] = targetMonth.split("-").map(Number);
+  const prevMonth = m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, "0")}`;
+  const [employeeSnapshot, payrollSettingsSnapshot, storeSnapshot, logSnapshot, confirmedSnapshot, prevConfirmedSnapshot] = await Promise.all([
     db.collection("employees").get(), db.collection("payrollSettings").get(), db.collection("stores").get(), db.collection("clockLogs").get(),
     db.collection("payrollRuns").where("targetMonth", "==", targetMonth).where("status", "==", "confirmed").limit(1).get(),
+    db.collection("payrollRuns").where("targetMonth", "==", prevMonth).where("status", "==", "confirmed").limit(1).get(),
   ]);
   const stores = new Map(storeSnapshot.docs.map((item) => [item.id, item.data()]));
   const payrollSettings = new Map(payrollSettingsSnapshot.docs.map((item) => [item.id, item.data()]));
   const employees: PayrollEmployee[] = employeeSnapshot.docs.map((item) => {
     const data = item.data();
     const settings = payrollSettings.get(item.id) ?? {};
-    const applicable = Array.isArray(settings.history)
-      ? settings.history.filter((entry: { effectiveFrom?: string }) => (entry.effectiveFrom ?? "") <= targetMonth).sort((a: { effectiveFrom?: string }, b: { effectiveFrom?: string }) => (b.effectiveFrom ?? "").localeCompare(a.effectiveFrom ?? ""))[0]?.settings ?? settings
-      : settings;
-    return { id: item.id, ...data, ...applicable, storeName: data.storeName || stores.get(data.storeId)?.storeName || stores.get(data.storeId)?.name || data.storeId } as PayrollEmployee;
+    return { id: item.id, ...data, ...settings, storeName: data.storeName || stores.get(data.storeId)?.storeName || stores.get(data.storeId)?.name || data.storeId } as PayrollEmployee;
   }).filter((item) => item.payrollEnabled !== false && !(item as PayrollEmployee & { isDeleted?: boolean }).isDeleted);
+  if (!prevConfirmedSnapshot.empty) {
+    const prevRunId = prevConfirmedSnapshot.docs[0].id;
+    const prevEmployeesSnapshot = await db.collection("payrollRuns").doc(prevRunId).collection("employees").get();
+    const prevResults = new Map(prevEmployeesSnapshot.docs.map((item) => [item.id, item.data() as PayrollResult]));
+    for (const emp of employees) {
+      if (emp.payrollType !== "fixed") continue;
+      const prev = prevResults.get(emp.id);
+      if (!prev) continue;
+      emp.fixedBaseSalary = prev.earnings.baseSalary;
+      emp.directorCompensation = prev.earnings.directorCompensation;
+      emp.positionAllowance = prev.earnings.positionAllowance;
+      emp.fixedOvertimeAllowance = prev.earnings.fixedOvertimeAllowance;
+      emp.holidayAllowance = prev.earnings.holidayAllowance;
+      emp.businessAllowance = prev.earnings.businessAllowance;
+      emp.monthlyTransportation = prev.earnings.transportation;
+      emp.healthInsurance = prev.deductions.healthInsurance;
+      emp.childSupportContribution = prev.deductions.childSupportContribution;
+      emp.careInsurance = prev.deductions.careInsurance;
+      emp.employeePension = prev.deductions.employeePension;
+      emp.employmentInsurance = prev.deductions.employmentInsurance;
+      emp.residentTax = prev.deductions.residentTax;
+      emp.otherDeduction = prev.deductions.otherDeduction;
+      emp.advanceExpense = prev.deductions.advanceExpense;
+    }
+  }
   const employeeIds = new Set(employees.map((item) => item.id));
   const employeeById = new Map(employees.map((item) => [item.id, item]));
   const logs: CalculationClockLog[] = logSnapshot.docs.flatMap((item) => {
@@ -51,7 +76,7 @@ export async function loadPayrollSource(db: firestore.Firestore, targetMonth: st
   return { employees, attendance, alreadyConfirmed: !confirmedSnapshot.empty, sourceAttendanceVersion };
 }
 
-export async function createPayrollDraft(db: firestore.Firestore, uid: string, input: { targetMonth: string; paymentMonth: string; paymentDate: string }) {
+export async function createPayrollDraft(db: FirestoreRest, uid: string, input: { targetMonth: string; paymentMonth: string; paymentDate: string }) {
   const source = await loadPayrollSource(db, input.targetMonth);
   if (source.alreadyConfirmed) throw new Error("already_confirmed");
   const issues = validatePayrollInput(source.employees, source.attendance, input.targetMonth, source.alreadyConfirmed);
@@ -69,30 +94,24 @@ export async function createPayrollDraft(db: firestore.Firestore, uid: string, i
   return { id: ref.id, ...run, calculatedAt: now.toISOString(), results };
 }
 
-export async function loadPayrollRun(db: firestore.Firestore, runId: string) {
+export async function loadPayrollRun(db: FirestoreRest, runId: string) {
   const [run, employees] = await Promise.all([db.collection("payrollRuns").doc(runId).get(), db.collection("payrollRuns").doc(runId).collection("employees").get()]);
   if (!run.exists) return null;
   return { id: run.id, ...run.data(), results: employees.docs.map((item) => item.data() as PayrollResult) } as { id: string; targetMonth: string; paymentMonth: string; paymentDate: string; status: string; results: PayrollResult[]; [key: string]: unknown };
 }
 
-export async function loadLatestPayrollRun(db: firestore.Firestore, targetMonth: string) {
+export async function loadLatestPayrollRun(db: FirestoreRest, targetMonth: string) {
   const snapshot = await db.collection("payrollRuns").where("targetMonth", "==", targetMonth).get();
   const latest = snapshot.docs.sort((a, b) => asDate(b.data().calculatedAt).getTime() - asDate(a.data().calculatedAt).getTime())[0];
   return latest ? loadPayrollRun(db, latest.id) : null;
 }
 
-export async function loadPayrollWorkspace(db: firestore.Firestore, targetMonth: string) {
-  // Payroll settings belong exclusively to the payroll workspace. Keep this
-  // server-side read out of the shared admin stores/employees/attendance load.
-  const payrollSettingsSnapshot = await db.collection("payrollSettings").get();
+export async function loadPayrollWorkspace(db: FirestoreRest, targetMonth: string) {
   const run = await loadLatestPayrollRun(db, targetMonth);
-  return {
-    run,
-    payrollSettings: payrollSettingsSnapshot.docs.map((item) => ({ id: item.id, ...item.data() })),
-  };
+  return { run };
 }
 
-export async function listConfirmedRuns(db: firestore.Firestore) {
+export async function listConfirmedRuns(db: FirestoreRest) {
   const snapshot = await db.collection("payrollRuns").where("status", "==", "confirmed").get();
   return snapshot.docs
     .map((item) => {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import XLSX from "xlsx";
-import { adjustPayrollResult, calculatePayroll, calculatePayrollEmployee, calculateWithholdingTax2026, isPayrollMonthClosed, summarizePayroll, validatePayrollInput, type PayrollAttendanceDay, type PayrollEmployee } from "../lib/payroll.ts";
+import { calculatePayroll, calculatePayrollEmployee, calculateWithholdingTax2026, isPayrollMonthClosed, summarizePayroll, validatePayrollInput, type PayrollAttendanceDay, type PayrollEmployee } from "../lib/payroll.ts";
 import { createPayrollWorkbook, createPayslipPdf, createTransferWorkbook } from "../lib/payroll-export.ts";
 
 const employee = (id: string, patch: Partial<PayrollEmployee> = {}): PayrollEmployee => ({ id, employeeCode: id, name: `従業員${id}`, storeId: "hq", storeName: "本部", payrollEnabled: true, payrollType: "hourly", hourlyWage: 1225, transportationType: "none", paymentMethod: "bank", bankAccountRegistered: true, taxTableType: "kou", dependentCount: 0, healthInsurance: 0, childSupportContribution: 0, careInsurance: 0, employeePension: 0, employmentInsurance: 0, residentTax: 0, ...patch });
@@ -78,12 +78,14 @@ test("給与Excelと振込Excelの人数・合計が一致する", () => {
   assert.equal(rows.length, 5); assert.equal(rows.at(-1)?.[0], "振込合計（2名）"); assert.equal(sheet.C5.f, "SUM(C3:C4)");
 });
 
-test("確定前帳票には試算と対象期間・支給日を明記する", () => {
+test("確定前帳票には試算プレフィックスを付与し対象期間・支給日を含まない", () => {
   const results = calculatePayroll([employee("1")], [day("1", "2026-07-01", 60)]);
   const payroll = XLSX.read(createPayrollWorkbook(results, "2026-08", true, "2026-07", "2026-08-25"));
   const transfer = XLSX.read(createTransferWorkbook(results, "2026-08", true, true, "2026-07", "2026-08-25"));
-  assert.match(String(payroll.Sheets[payroll.SheetNames[0]].A1.v), /【試算】.*対象期間：令和8年7月1日～7月31日.*支給日：令和8年8月25日/);
-  assert.match(String(transfer.Sheets[transfer.SheetNames[0]].A1.v), /【試算】.*対象期間：令和8年7月1日～7月31日.*支給日：令和8年8月25日/);
+  assert.match(String(payroll.Sheets[payroll.SheetNames[0]].A1.v), /^【試算】FUBLEV Group㈱/);
+  assert.doesNotMatch(String(payroll.Sheets[payroll.SheetNames[0]].A1.v), /対象期間/);
+  assert.match(String(transfer.Sheets[transfer.SheetNames[0]].A1.v), /^2026年8月支給　給与振込一覧/);
+  assert.doesNotMatch(String(transfer.Sheets[transfer.SheetNames[0]].A1.v), /対象期間/);
 });
 
 test("PDFへ社員コード・氏名・金額を含む明細を生成する", async () => {
@@ -99,11 +101,6 @@ test("確定用スナップショットは従業員マスタ変更後も変化�
   assert.equal(snapshot.hourlyWageSnapshot, 1200);
 });
 
-test("確定前の手修正は理由付き履歴を作り合計を再計算する", () => {
-  const original = calculatePayrollEmployee(employee("1", { hourlyWage: 1000 }), [day("1", "2026-07-01", 60)]);
-  const adjusted = adjustPayrollResult(original, { otherTaxable: 500, otherDeduction: 100 }, "臨時手当", "admin");
-  assert.equal(adjusted.result.netPay, 1400); assert.equal(adjusted.adjustment.reason, "臨時手当"); assert.throws(() => adjustPayrollResult(original, { otherTaxable: 0, otherDeduction: 0 }, "", "admin"));
-});
 
 test("2026年8月支給分の34名検算値と松本るぴな明細が一致する", () => {
   const employees: PayrollEmployee[] = [];
