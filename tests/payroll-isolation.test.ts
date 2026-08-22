@@ -7,6 +7,8 @@ const payrollPage = readFileSync("app/hq/payroll/page.tsx", "utf8");
 const payrollRoute = readFileSync("app/api/payroll/calculate/route.ts", "utf8");
 const payrollServer = readFileSync("lib/payroll-server.ts", "utf8");
 const payrollRunsRoute = readFileSync("app/api/payroll/runs/route.ts", "utf8");
+const payrollConfirmRoute = readFileSync("app/api/payroll/confirm/route.ts", "utf8");
+const firestoreRest = readFileSync("lib/firebase-rest.ts", "utf8");
 const clockPage = readFileSync("app/clock/page.tsx", "utf8");
 const clockPunch = readFileSync("lib/clock-punch.ts", "utf8");
 
@@ -78,6 +80,27 @@ test("confirmed runs list API requires admin token", () => {
 test("payroll server has listConfirmedRuns returning only confirmed runs", () => {
   assert.match(payrollServer, /listConfirmedRuns/);
   assert.match(payrollServer, /where\("status", "==", "confirmed"\)/);
+});
+
+test("payroll previews stay in memory and only confirmation persists them", () => {
+  const draftStart = payrollServer.indexOf("export async function createPayrollDraft");
+  const confirmStart = payrollServer.indexOf("export async function confirmPayrollRun");
+  const draft = payrollServer.slice(draftStart, confirmStart);
+  const confirm = payrollServer.slice(confirmStart);
+  assert.doesNotMatch(draft, /db\.batch\(|batch\.set|\.commit\(/);
+  assert.match(confirm, /db\.batch\(\)/);
+  assert.match(confirm, /batch\.set\(ref, run\)/);
+  assert.match(confirm, /await batch\.commit\(\)/);
+  assert.match(payrollConfirmRoute, /confirmPayrollRun/);
+  assert.match(payrollPage, /export\/payroll["], \{ method: "POST"/);
+  assert.match(payrollPage, /export\/transfer["], \{ method: "POST"/);
+});
+
+test("Firestore writes use resource names and atomic commit", () => {
+  assert.match(firestoreRest, /projects\/\$\{PROJ\(\)\}\/databases\/\(default\)\/documents/);
+  assert.doesNotMatch(firestoreRest, /name: `\$\{FSBASE\(\)\}/);
+  assert.match(firestoreRest, /`\$\{FSBASE\(\)\}:commit`/);
+  assert.doesNotMatch(firestoreRest, /:batchWrite/);
 });
 
 test("area manager employee form has only basic fields plus payrollEnabled", () => {

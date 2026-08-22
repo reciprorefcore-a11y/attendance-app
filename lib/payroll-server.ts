@@ -76,7 +76,7 @@ export async function loadPayrollSource(db: FirestoreRest, targetMonth: string) 
   return { employees, attendance, alreadyConfirmed: !confirmedSnapshot.empty, sourceAttendanceVersion };
 }
 
-export async function createPayrollDraft(db: FirestoreRest, uid: string, input: { targetMonth: string; paymentMonth: string; paymentDate: string }) {
+export async function createPayrollDraft(db: FirestoreRest, input: { targetMonth: string; paymentMonth: string; paymentDate: string }) {
   const source = await loadPayrollSource(db, input.targetMonth);
   if (source.alreadyConfirmed) throw new Error("already_confirmed");
   const issues = validatePayrollInput(source.employees, source.attendance, input.targetMonth, source.alreadyConfirmed);
@@ -84,14 +84,30 @@ export async function createPayrollDraft(db: FirestoreRest, uid: string, input: 
   const results = calculatePayroll(source.employees, source.attendance);
   const allIssues = [...issues, ...results.flatMap((item) => item.issues)];
   const totals = summarizePayroll(results);
-  const ref = db.collection("payrollRuns").doc();
   const now = new Date();
-  const run = { ...input, status: "draft", calculatedAt: now, calculatedBy: uid, confirmedAt: null, confirmedBy: null, ...totals, sourceAttendanceVersion: source.sourceAttendanceVersion, revision: 1, canConfirm: isPayrollMonthClosed(input.targetMonth) && !allIssues.some((item) => item.severity === "error"), issues: allIssues };
+  const run = { ...input, status: "draft" as const, calculatedAt: now.toISOString(), ...totals, sourceAttendanceVersion: source.sourceAttendanceVersion, revision: 1, canConfirm: isPayrollMonthClosed(input.targetMonth) && !allIssues.some((item) => item.severity === "error"), issues: allIssues };
+  return { ...run, results };
+}
+
+export async function confirmPayrollRun(db: FirestoreRest, uid: string, draft: Awaited<ReturnType<typeof createPayrollDraft>>) {
+  if (draft.status !== "draft") throw new Error("invalid_status");
+  if (!isPayrollMonthClosed(draft.targetMonth)) throw new Error("month_not_closed");
+  if (draft.issues.some((item) => item.severity === "error")) throw new Error("blocking_errors");
+  const totals = summarizePayroll(draft.results);
+  if (draft.results.some((item) => item.netPay < 0 || item.earnings.grossTotal < 0 || item.deductions.total < 0)) throw new Error("invalid_result");
+  if (totals.grossTotal - totals.deductionTotal !== totals.netTotal || totals.bankTransferTotal + draft.results.reduce((sum, item) => sum + item.cashPayment, 0) !== totals.netTotal) throw new Error("report_mismatch");
+  const duplicate = await db.collection("payrollRuns").where("targetMonth", "==", draft.targetMonth).where("status", "==", "confirmed").limit(1).get();
+  if (!duplicate.empty) throw new Error("already_confirmed");
+
+  const ref = db.collection("payrollRuns").doc();
+  const confirmedAt = new Date();
+  const { results, canConfirm: _canConfirm, ...draftFields } = draft;
+  const run = { ...draftFields, ...totals, status: "confirmed", calculatedAt: asDate(draft.calculatedAt), calculatedBy: uid, confirmedAt, confirmedBy: uid };
   const batch = db.batch();
   batch.set(ref, run);
   results.forEach((result) => batch.set(ref.collection("employees").doc(result.employeeId), result));
   await batch.commit();
-  return { id: ref.id, ...run, calculatedAt: now.toISOString(), results };
+  return { id: ref.id, ...run, calculatedAt: asDate(run.calculatedAt).toISOString(), confirmedAt: confirmedAt.toISOString(), results };
 }
 
 export async function loadPayrollRun(db: FirestoreRest, runId: string) {

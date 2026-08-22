@@ -6,7 +6,7 @@ import type { PayrollResult } from "@/lib/payroll";
 
 type PayrollIssue = { severity: "error" | "warning"; code: string; message: string; employeeId?: string };
 type PayrollRun = {
-  id: string; status: "draft" | "confirmed" | "cancelled"; targetMonth: string; paymentMonth: string; paymentDate: string;
+  id?: string; status: "draft" | "confirmed" | "cancelled"; targetMonth: string; paymentMonth: string; paymentDate: string;
   calculatedAt?: string | { _seconds?: number }; employeeCount: number; grossTotal: number; deductionTotal: number;
   netTotal: number; bankTransferTotal: number; canConfirm?: boolean; issues: PayrollIssue[]; results: PayrollResult[];
 };
@@ -44,8 +44,8 @@ async function apiCall(url: string, init?: RequestInit) {
   return data as any;
 }
 
-async function downloadFile(url: string) {
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${await getToken()}` } });
+async function downloadFile(url: string, init?: RequestInit) {
+  const res = await fetch(url, { ...init, headers: { ...(init?.headers ?? {}), Authorization: `Bearer ${await getToken()}` } });
   if (!res.ok) { const d = await res.json(); throw new Error(d.error ?? "ダウンロードに失敗しました"); }
   const blob = await res.blob();
   if (blob.size === 0) throw new Error("サーバーが空のファイルを返しました");
@@ -124,7 +124,7 @@ export default function PayrollPage() {
         body: JSON.stringify({ targetMonth, paymentMonth, paymentDate }),
       });
       setRun(data);
-      const name = await downloadFile(`/api/payroll/export/payroll?runId=${data.id}`);
+      const name = await downloadFile("/api/payroll/export/payroll", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
       setMessage(`「${name}」をダウンロードしました。内容を確認してから「給与を確定」してください。`);
     } catch (e) { setMessage(e instanceof Error ? e.message : "給与計算に失敗しました"); }
     finally { setBusy(false); }
@@ -132,7 +132,7 @@ export default function PayrollPage() {
 
   const downloadTransfer = async () => {
     if (!run) return; setBusy(true); setMessage("");
-    try { const name = await downloadFile(`/api/payroll/export/transfer?runId=${run.id}`); setMessage(`「${name}」をダウンロードしました。`); }
+    try { const name = await downloadFile("/api/payroll/export/transfer", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(run) }); setMessage(`「${name}」をダウンロードしました。`); }
     catch (e) { setMessage(e instanceof Error ? e.message : "振込確認Excelの出力に失敗しました"); }
     finally { setBusy(false); }
   };
@@ -140,8 +140,8 @@ export default function PayrollPage() {
   const confirm = async () => {
     if (!run) return; setBusy(true); setMessage("");
     try {
-      await apiCall("/api/payroll/confirm", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ runId: run.id }) });
-      setRun({ ...run, status: "confirmed", canConfirm: false });
+      const confirmed = await apiCall("/api/payroll/confirm", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ run }) });
+      setRun(confirmed);
       const runsData = await apiCall("/api/payroll/runs");
       setConfirmedRuns(runsData.runs ?? []);
       setMessage("給与を確定しました。「給与明細ダウンロード」から個人別PDFを出力できます。");

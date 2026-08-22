@@ -8,6 +8,8 @@ const PROJ = () => process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID ?? "";
 const APIKEY = () => process.env.NEXT_PUBLIC_FIREBASE_API_KEY ?? "";
 const FSBASE = () =>
   `https://firestore.googleapis.com/v1/projects/${PROJ()}/databases/(default)/documents`;
+const FSDOCNAME = () =>
+  `projects/${PROJ()}/databases/(default)/documents`;
 
 // ─── Firestore field type conversion ─────────────────────────────────────────
 
@@ -141,13 +143,13 @@ export class RestDocRef {
 
   _setWrite(data: object) {
     const d = data as Record<string, unknown>;
-    return { update: { name: `${FSBASE()}/${this._docPath}`, fields: toFields(d) } };
+    return { update: { name: `${FSDOCNAME()}/${this._docPath}`, fields: toFields(d) } };
   }
 
   _updateWrite(data: object) {
     const d = data as Record<string, unknown>;
     return {
-      update: { name: `${FSBASE()}/${this._docPath}`, fields: toFields(d) },
+      update: { name: `${FSDOCNAME()}/${this._docPath}`, fields: toFields(d) },
       updateMask: { fieldPaths: Object.keys(d) },
     };
   }
@@ -251,7 +253,7 @@ export class RestBatch {
 
   async commit(): Promise<void> {
     if (this._writes.length === 0) return;
-    await fsRequest(this._token, `${FSBASE()}:batchWrite`, "POST", { writes: this._writes }).catch((e: Error) => { throw new Error(`${e.message} [batchWrite ${this._writes.length}件]`); });
+    await fsRequest(this._token, `${FSBASE()}:commit`, "POST", { writes: this._writes }).catch((e: Error) => { throw new Error(`${e.message} [commit ${this._writes.length}件]`); });
   }
 }
 
@@ -293,7 +295,7 @@ export class FirestoreRest {
     const tx = new RestTransaction(this._token);
     const result = await fn(tx);
     if (tx._writes.length > 0) {
-      await fsRequest(this._token, `${FSBASE()}:batchWrite`, "POST", { writes: tx._writes });
+      await fsRequest(this._token, `${FSBASE()}:commit`, "POST", { writes: tx._writes });
     }
     return result;
   }
