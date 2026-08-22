@@ -14,12 +14,15 @@ type ConfirmedRunSummary = { id: string; targetMonth: string; paymentMonth: stri
 type SlipRun = { id: string; targetMonth: string; paymentDate: string; status: string; results: PayrollResult[] };
 
 function tokyoYM() {
-  const parts = new Intl.DateTimeFormat("ja-JP", { timeZone: "Asia/Tokyo", year: "numeric", month: "2-digit" }).formatToParts(new Date());
-  return { y: Number(parts.find((p) => p.type === "year")!.value), m: Number(parts.find((p) => p.type === "month")!.value) };
+  // Intl は Safari で SyntaxError になるため使わない。
+  // lib/payroll.ts の isPayrollMonthClosed と同じ UTC+9 方式に揃える。
+  const jst = new Date(Date.now() + 9 * 60 * 60 * 1000);
+  return { y: jst.getUTCFullYear(), m: jst.getUTCMonth() + 1 };
 }
 const thisMonth = () => { const { y, m } = tokyoYM(); return `${y}-${String(m).padStart(2, "0")}`; };
 const lastMonth = () => { const { y, m } = tokyoYM(); return m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, "0")}`; };
-const payDate = () => `${thisMonth()}-25`;
+const nextMonthOf = (ym: string) => { const [y, m] = ym.split("-").map(Number); return m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, "0")}`; };
+const payDateOf = (ym: string) => `${nextMonthOf(ym)}-25`;
 const yen = (v: number) => `${Math.trunc(v || 0).toLocaleString()}円`;
 const fmtMonth = (ym: string) => { const [y, m] = ym.split("-"); return `${y}年${Number(m)}月`; };
 const fmtDate = (d: string) => { const [y, m, day] = d.split("-"); return `${y}年${Number(m)}月${Number(day)}日`; };
@@ -50,8 +53,11 @@ async function downloadFile(url: string) {
 }
 
 export default function PayrollPage() {
-  const targetMonth = useMemo(() => lastMonth(), []);
-  const paymentDate = useMemo(() => payDate(), []);
+  // 通常運用は「前月」。当月はまだ締まっていないため試算Excelのみ（確定は不可）。
+  const [monthMode, setMonthMode] = useState<"prev" | "current">("prev");
+  const targetMonth = useMemo(() => (monthMode === "prev" ? lastMonth() : thisMonth()), [monthMode]);
+  const paymentMonth = useMemo(() => nextMonthOf(targetMonth), [targetMonth]);
+  const paymentDate = useMemo(() => payDateOf(targetMonth), [targetMonth]);
 
   const [run, setRun] = useState<PayrollRun | null>(null);
   const [confirmedRuns, setConfirmedRuns] = useState<ConfirmedRunSummary[]>([]);
@@ -65,6 +71,8 @@ export default function PayrollPage() {
   useEffect(() => {
     let active = true;
     (async () => {
+      setRun(null);
+      setMessage("");
       try {
         const [workspace, runsData] = await Promise.all([
           apiCall(`/api/payroll/calculate?targetMonth=${targetMonth}`),
@@ -99,7 +107,7 @@ export default function PayrollPage() {
     try {
       const data = await apiCall("/api/payroll/calculate", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ targetMonth, paymentMonth: thisMonth(), paymentDate }),
+        body: JSON.stringify({ targetMonth, paymentMonth, paymentDate }),
       });
       setRun(data);
       await downloadFile(`/api/payroll/export/payroll?runId=${data.id}`);
@@ -154,7 +162,13 @@ export default function PayrollPage() {
         <section style={s.card}>
           <h2 style={s.h2}>① 今月の給与計算</h2>
           <div style={s.infoRow}>
-            <span>対象勤怠：<b>{fmtMonth(targetMonth)}</b></span>
+            <label style={s.inlineLbl}>
+              対象勤怠：
+              <select value={monthMode} disabled={busy} onChange={(e) => setMonthMode(e.target.value as "prev" | "current")} style={s.selSm}>
+                <option value="prev">{fmtMonth(lastMonth())}（前月・通常運用）</option>
+                <option value="current">{fmtMonth(thisMonth())}（当月・試算のみ）</option>
+              </select>
+            </label>
             <span>支給日：<b>{fmtDate(paymentDate)}</b></span>
             <span style={{ ...s.badge, ...(isConfirmed ? s.badgeGreen : s.badgeYellow) }}>{statusLabel}</span>
           </div>
@@ -182,7 +196,10 @@ export default function PayrollPage() {
               給与を確定
             </button>
           </div>
-          {isDraft && !run?.canConfirm && errors.length === 0 && (
+          {monthMode === "current" && (
+            <p style={s.hint}>※ 当月はまだ締まっていないため、試算Excelの確認のみ可能です。確定はできません。</p>
+          )}
+          {monthMode === "prev" && isDraft && !run?.canConfirm && errors.length === 0 && (
             <p style={s.hint}>※ 月が終了していないため確定できません。翌月以降に「給与を確定」してください。</p>
           )}
         </section>
@@ -279,6 +296,8 @@ const s: Record<string, React.CSSProperties> = {
   selRow: { display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 16 },
   lbl: { display: "grid", gap: 6, fontWeight: 700, fontSize: 14 },
   sel: { height: 40, border: "1px solid #CBD5E1", borderRadius: 8, padding: "0 10px", minWidth: 260, fontSize: 14 },
+  inlineLbl: { display: "inline-flex", alignItems: "center", gap: 6, fontSize: 15 },
+  selSm: { height: 34, border: "1px solid #CBD5E1", borderRadius: 8, padding: "0 8px", fontSize: 14, fontWeight: 700 },
   table: { width: "100%", borderCollapse: "collapse", marginTop: 4 },
   th: { border: "1px solid #E2E8F0", padding: "9px 12px", background: "#F8FAFC", fontWeight: 700, textAlign: "left", fontSize: 13 },
   td: { border: "1px solid #E2E8F0", padding: "9px 12px", fontSize: 13 },
