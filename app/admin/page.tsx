@@ -94,6 +94,7 @@ type StoreRow = Store & { id: string };
 const emptyEmployeeForm = () => ({
   name: "", nameKana: "", employeeCode: "", pin: "", storeId: "", baseWage: "", status: "active",
   transportationCost: "", transportationType: "daily" as "daily" | "monthly" | "none",
+  payrollEnabled: true,
 });
 type AccountManagerRow = { uid: string; name?: string; email?: string; role: "area_manager" | "fc_manager"; storeId?: string; storeIds?: string[] };
 
@@ -987,6 +988,7 @@ export default function AdminPage() {
       status: employeeForm.status as "active" | "inactive",
       transportationCost: Number(employeeForm.transportationCost) || 0,
       transportationType: employeeForm.transportationType,
+      payrollEnabled: employeeForm.payrollEnabled,
     };
     try {
       if (employeeEditingId) {
@@ -1017,6 +1019,7 @@ export default function AdminPage() {
       status: employee.status === "inactive" ? "inactive" : "active",
       transportationCost: String(employee.transportationCost || ""),
       transportationType: employee.transportationType ?? "daily",
+      payrollEnabled: employee.payrollEnabled !== false,
     });
     setActiveTab("employees");
   };
@@ -1808,6 +1811,12 @@ export default function AdminPage() {
                   <option value="daily">日割り</option>
                   <option value="monthly">定期代</option>
                   <option value="none">なし</option>
+                </select>
+              </label>
+              <label style={styles.label}>給与対象
+                <select value={employeeForm.payrollEnabled ? "yes" : "no"} onChange={(e) => setEmployeeForm({ ...employeeForm, payrollEnabled: e.target.value === "yes" })} style={styles.input}>
+                  <option value="yes">対象</option>
+                  <option value="no">対象外</option>
                 </select>
               </label>
               <div style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 8 }}>

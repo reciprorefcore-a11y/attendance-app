@@ -91,3 +91,13 @@ export async function loadPayrollWorkspace(db: firestore.Firestore, targetMonth:
     payrollSettings: payrollSettingsSnapshot.docs.map((item) => ({ id: item.id, ...item.data() })),
   };
 }
+
+export async function listConfirmedRuns(db: firestore.Firestore) {
+  const snapshot = await db.collection("payrollRuns").where("status", "==", "confirmed").get();
+  return snapshot.docs
+    .map((item) => {
+      const data = item.data();
+      return { id: item.id, targetMonth: data.targetMonth as string, paymentMonth: data.paymentMonth as string, paymentDate: data.paymentDate as string, employeeCount: (data.employeeCount as number) ?? 0 };
+    })
+    .sort((a, b) => b.targetMonth.localeCompare(a.targetMonth));
+}

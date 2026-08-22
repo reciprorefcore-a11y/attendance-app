@@ -1,99 +1,282 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { auth } from "@/lib/firebase";
-import type { PayrollIssue, PayrollResult } from "@/lib/payroll";
+import type { PayrollResult } from "@/lib/payroll";
 
+type PayrollIssue = { severity: "error" | "warning"; code: string; message: string; employeeId?: string };
 type PayrollRun = {
   id: string; status: "draft" | "confirmed" | "cancelled"; targetMonth: string; paymentMonth: string; paymentDate: string;
-  calculatedAt?: string | { _seconds?: number }; calculatedBy?: string; confirmedAt?: string; confirmedBy?: string;
-  employeeCount: number; taxableTotal: number; transportationTotal: number; grossTotal: number; socialInsuranceTotal: number;
-  incomeTaxTotal: number; residentTaxTotal: number; deductionTotal: number; netTotal: number; bankTransferTotal: number;
-  canConfirm?: boolean; issues: PayrollIssue[]; results: PayrollResult[];
+  calculatedAt?: string | { _seconds?: number }; employeeCount: number; grossTotal: number; deductionTotal: number;
+  netTotal: number; bankTransferTotal: number; canConfirm?: boolean; issues: PayrollIssue[]; results: PayrollResult[];
 };
-type PayrollWorkspace = { run: PayrollRun | null; payrollSettings: Array<{ id: string; [key: string]: unknown }> };
+type ConfirmedRunSummary = { id: string; targetMonth: string; paymentMonth: string; paymentDate: string; employeeCount: number };
+type SlipRun = { id: string; targetMonth: string; paymentDate: string; status: string; results: PayrollResult[] };
 
-const monthValue = (offset: number) => { const now = new Date(); now.setMonth(now.getMonth() + offset, 1); return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`; };
-const nextMonth = (month: string) => { const [y, m] = month.split("-").map(Number); const date = new Date(y, m, 1); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`; };
-const defaultPaymentDate = (month: string) => `${nextMonth(month)}-25`;
-const yen = (value: number) => `${Math.trunc(value || 0).toLocaleString()}円`;
-const hm = (minutes: number) => `${Math.floor((minutes || 0) / 60)}:${String((minutes || 0) % 60).padStart(2, "0")}`;
-const jst = (value?: string | null) => value ? new Intl.DateTimeFormat("ja-JP", { timeZone: "Asia/Tokyo", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(value)) : "—";
-const dateTime = (value?: PayrollRun["calculatedAt"]) => { if (!value) return "未計算"; const date = typeof value === "string" ? new Date(value) : new Date((value._seconds ?? 0) * 1000); return new Intl.DateTimeFormat("ja-JP", { timeZone: "Asia/Tokyo", dateStyle: "medium", timeStyle: "short" }).format(date); };
-async function token() { const value = await auth.currentUser?.getIdToken(); if (!value) throw new Error("認証情報を取得できません"); return value; }
-async function fetchLatestRun(month: string) {
-  const response = await fetch(`/api/payroll/calculate?targetMonth=${month}`, { headers: { Authorization: `Bearer ${await token()}` } });
-  const data = await response.json(); if (!response.ok) throw new Error(data.error ?? "給与計算状況を取得できません"); return (data as PayrollWorkspace).run;
+const lastMonth = () => { const n = new Date(); n.setDate(1); n.setMonth(n.getMonth() - 1); return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}`; };
+const thisMonth = () => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}`; };
+const payDate = () => `${thisMonth()}-25`;
+const yen = (v: number) => `${Math.trunc(v || 0).toLocaleString()}円`;
+const fmtMonth = (ym: string) => { const [y, m] = ym.split("-"); return `${y}年${Number(m)}月`; };
+const fmtDate = (d: string) => { const [y, m, day] = d.split("-"); return `${y}年${Number(m)}月${Number(day)}日`; };
+
+async function getToken() {
+  const t = await auth.currentUser?.getIdToken();
+  if (!t) throw new Error("認証情報を取得できません");
+  return t;
+}
+
+async function apiCall(url: string, init?: RequestInit) {
+  const res = await fetch(url, { ...init, headers: { ...(init?.headers ?? {}), Authorization: `Bearer ${await getToken()}` } });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error ?? "処理に失敗しました");
+  return data;
+}
+
+async function downloadFile(url: string) {
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${await getToken()}` } });
+  if (!res.ok) { const d = await res.json(); throw new Error(d.error ?? "ダウンロードに失敗しました"); }
+  const blob = await res.blob();
+  const obj = URL.createObjectURL(blob);
+  const disposition = res.headers.get("content-disposition") ?? "";
+  const match = disposition.match(/filename\*=UTF-8''([^;]+)/);
+  const a = document.createElement("a");
+  a.href = obj; a.download = match ? decodeURIComponent(match[1]) : "payroll-download";
+  a.click(); setTimeout(() => URL.revokeObjectURL(obj), 1000);
 }
 
 export default function PayrollPage() {
-  const [targetMonth, setTargetMonth] = useState(monthValue(-1));
-  const [paymentMonth, setPaymentMonth] = useState(monthValue(0));
-  const [paymentDate, setPaymentDate] = useState(defaultPaymentDate(monthValue(-1)));
-  const [run, setRun] = useState<PayrollRun | null>(null);
-  const [busy, setBusy] = useState(false); const [message, setMessage] = useState("");
-  const [selected, setSelected] = useState<PayrollResult | null>(null);
-  const [search, setSearch] = useState(""); const [store, setStore] = useState(""); const [employment, setEmployment] = useState(""); const [issueOnly, setIssueOnly] = useState(false);
-  const tableRef = useRef<HTMLDivElement>(null);
-  const errors = run?.issues.filter((x) => x.severity === "error") ?? [];
-  const warnings = run?.issues.filter((x) => x.severity === "warning") ?? [];
-  const cashTotal = run?.results.reduce((sum, x) => sum + x.cashPayment, 0) ?? 0;
-  const mismatch = !!run && (run.grossTotal - run.deductionTotal !== run.netTotal || run.bankTransferTotal + cashTotal !== run.netTotal);
-  const stores = useMemo(() => [...new Set(run?.results.map((x) => x.storeName) ?? [])].sort(), [run]);
-  const filtered = useMemo(() => (run?.results ?? []).filter((r) => {
-    const ownIssues = [...r.issues, ...run!.issues.filter((x) => x.employeeId === r.employeeId)];
-    const query = search.trim().toLocaleLowerCase("ja");
-    return (!query || `${r.employeeCode} ${r.employeeName} ${r.storeName}`.toLocaleLowerCase("ja").includes(query)) && (!store || r.storeName === store) && (!employment || r.payrollType === employment) && (!issueOnly || ownIssues.length > 0);
-  }), [run, search, store, employment, issueOnly]);
+  const targetMonth = useMemo(() => lastMonth(), []);
+  const paymentDate = useMemo(() => payDate(), []);
 
-  const request = async (url: string, init?: RequestInit) => {
-    const response = await fetch(url, { ...init, headers: { ...(init?.headers ?? {}), Authorization: `Bearer ${await token()}` } });
-    const data = await response.json(); if (!response.ok) throw new Error(data.error ?? "処理に失敗しました"); return data;
-  };
-  const loadLatest = async (month: string) => {
-    setBusy(true); setMessage("");
-    try { const data = await request(`/api/payroll/calculate?targetMonth=${month}`) as PayrollWorkspace; setRun(data.run); if (data.run) { setPaymentMonth(data.run.paymentMonth); setPaymentDate(data.run.paymentDate); } }
-    catch (error) { setMessage(error instanceof Error ? error.message : "給与計算状況を取得できません"); } finally { setBusy(false); }
-  };
+  const [run, setRun] = useState<PayrollRun | null>(null);
+  const [confirmedRuns, setConfirmedRuns] = useState<ConfirmedRunSummary[]>([]);
+  const [slipMonthKey, setSlipMonthKey] = useState("");
+  const [slipRun, setSlipRun] = useState<SlipRun | null>(null);
+  const [slipStore, setSlipStore] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+
+  // Initial load: current month run + confirmed runs list
   useEffect(() => {
     let active = true;
-    fetchLatestRun(monthValue(-1)).then((data) => { if (!active) return; setRun(data); if (data) { setPaymentMonth(data.paymentMonth); setPaymentDate(data.paymentDate); } }).catch((error) => { if (active) setMessage(error instanceof Error ? error.message : "給与計算状況を取得できません"); });
+    (async () => {
+      try {
+        const [workspace, runsData] = await Promise.all([
+          apiCall(`/api/payroll/calculate?targetMonth=${targetMonth}`),
+          apiCall("/api/payroll/runs"),
+        ]);
+        if (!active) return;
+        setRun(workspace.run);
+        const confirmed: ConfirmedRunSummary[] = runsData.runs ?? [];
+        setConfirmedRuns(confirmed);
+        const others = confirmed.filter((r) => r.targetMonth !== targetMonth);
+        if (others.length > 0) setSlipMonthKey(`${others[0].id}__${others[0].targetMonth}`);
+      } catch (e) {
+        if (active) setMessage(e instanceof Error ? e.message : "読み込みに失敗しました");
+      }
+    })();
     return () => { active = false; };
-  }, []);
-  const changeMonth = (month: string) => { setTargetMonth(month); setPaymentMonth(nextMonth(month)); setPaymentDate(defaultPaymentDate(month)); setRun(null); void loadLatest(month); };
+  }, [targetMonth]);
+
+  // Load slip run when confirmed month is selected
+  useEffect(() => {
+    if (!slipMonthKey) return;
+    const runId = slipMonthKey.split("__")[0];
+    let active = true;
+    apiCall(`/api/payroll/runs?runId=${runId}`)
+      .then((data) => { if (active) { setSlipRun(data as SlipRun); setSlipStore(""); } })
+      .catch((e) => { if (active) setMessage(e instanceof Error ? e.message : "明細データの読み込みに失敗しました"); });
+    return () => { active = false; };
+  }, [slipMonthKey]);
+
   const calculate = async () => {
     setBusy(true); setMessage("");
-    try { const data = await request("/api/payroll/calculate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ targetMonth, paymentMonth, paymentDate }) }); setRun(data); setMessage("給与の試算を作成しました。確定前にエラーと計算根拠を確認してください。"); }
-    catch (error) { setMessage(error instanceof Error ? error.message : "給与計算に失敗しました"); } finally { setBusy(false); }
+    try {
+      const data = await apiCall("/api/payroll/calculate", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ targetMonth, paymentMonth: thisMonth(), paymentDate }),
+      });
+      setRun(data);
+      await downloadFile(`/api/payroll/export/payroll?runId=${data.id}`);
+      setMessage("給与計算Excelを出力しました。内容を確認してから「給与を確定」してください。");
+    } catch (e) { setMessage(e instanceof Error ? e.message : "給与計算に失敗しました"); }
+    finally { setBusy(false); }
   };
-  const confirm = async () => { if (!run) return; setBusy(true); try { await request("/api/payroll/confirm", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ runId: run.id }) }); setRun({ ...run, status: "confirmed", canConfirm: false }); setMessage("給与を確定しました。"); } catch (e) { setMessage(e instanceof Error ? e.message : "確定に失敗しました"); } finally { setBusy(false); } };
-  const cancel = async () => { if (!run) return; const reason = window.prompt("確定取消理由（必須）", ""); if (!reason?.trim()) return; setBusy(true); try { await request("/api/payroll/cancel", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ runId: run.id, reason }) }); setRun({ ...run, status: "cancelled", canConfirm: false }); setMessage("給与確定を取り消し、監査履歴へ保存しました。"); } catch (e) { setMessage(e instanceof Error ? e.message : "確定取消に失敗しました"); } finally { setBusy(false); } };
-  const download = async (kind: string, employeeId?: string, preview = false) => { if (!run) return; setBusy(true); try { const query = new URLSearchParams({ runId: run.id, ...(employeeId ? { employeeId } : {}) }); const response = await fetch(`/api/payroll/export/${kind}?${query}`, { headers: { Authorization: `Bearer ${await token()}` } }); if (!response.ok) throw new Error((await response.json()).error); const blob = await response.blob(); const url = URL.createObjectURL(blob); if (preview) window.open(url, "_blank", "noopener,noreferrer"); else { const disposition = response.headers.get("content-disposition") ?? ""; const match = disposition.match(/filename\*=UTF-8''([^;]+)/); const link = document.createElement("a"); link.href = url; link.download = match ? decodeURIComponent(match[1]) : `payroll.${kind}`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); } } catch (e) { setMessage(e instanceof Error ? e.message : "帳票出力に失敗しました"); } finally { setBusy(false); } };
-  const adjust = async (result: PayrollResult) => { if (!run || run.status !== "draft") return; const otherTaxable = window.prompt("その他手当（課税）", String(result.earnings.otherTaxable)); if (otherTaxable == null) return; const otherDeduction = window.prompt("その他控除", String(result.deductions.otherDeduction)); if (otherDeduction == null) return; const reason = window.prompt("修正理由（必須）", ""); if (!reason?.trim()) { setMessage("手修正には理由が必要です"); return; } setBusy(true); try { const data = await request("/api/payroll/adjust", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ runId: run.id, employeeId: result.employeeId, otherTaxable: Number(otherTaxable), otherDeduction: Number(otherDeduction), reason }) }); setRun({ ...run, ...data.totals, results: run.results.map((x) => x.employeeId === result.employeeId ? data.result : x) }); setSelected(data.result); setMessage("手当・控除を修正し、変更履歴へ保存しました。"); } catch (e) { setMessage(e instanceof Error ? e.message : "手修正に失敗しました"); } finally { setBusy(false); } };
 
+  const downloadTransfer = async () => {
+    if (!run) return; setBusy(true); setMessage("");
+    try { await downloadFile(`/api/payroll/export/transfer?runId=${run.id}`); setMessage("振込確認Excelを出力しました。"); }
+    catch (e) { setMessage(e instanceof Error ? e.message : "振込確認Excelの出力に失敗しました"); }
+    finally { setBusy(false); }
+  };
+
+  const confirm = async () => {
+    if (!run) return; setBusy(true); setMessage("");
+    try {
+      await apiCall("/api/payroll/confirm", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ runId: run.id }) });
+      setRun({ ...run, status: "confirmed", canConfirm: false });
+      const runsData = await apiCall("/api/payroll/runs");
+      setConfirmedRuns(runsData.runs ?? []);
+      setMessage("給与を確定しました。「給与明細ダウンロード」から個人別PDFを出力できます。");
+    } catch (e) { setMessage(e instanceof Error ? e.message : "確定に失敗しました"); }
+    finally { setBusy(false); }
+  };
+
+  const downloadSlipPdf = async (runId: string, employeeId: string) => {
+    setBusy(true); setMessage("");
+    try { await downloadFile(`/api/payroll/export/pdf?runId=${runId}&employeeId=${employeeId}`); }
+    catch (e) { setMessage(e instanceof Error ? e.message : "PDFのダウンロードに失敗しました"); }
+    finally { setBusy(false); }
+  };
+
+  const errors = run?.issues.filter((x) => x.severity === "error") ?? [];
+  const isDraft = run?.status === "draft";
+  const isConfirmed = run?.status === "confirmed";
   const statusLabel = !run ? "未計算" : run.status === "draft" ? "試算" : run.status === "confirmed" ? "確定済み" : "確定取消済み";
-  const cards = run ? [["給与対象人数", `${run.employeeCount}名`], ["課税支給合計", yen(run.taxableTotal)], ["非課税通勤費合計", yen(run.transportationTotal)], ["支給合計", yen(run.grossTotal)], ["社会保険合計", yen(run.socialInsuranceTotal)], ["所得税合計", yen(run.incomeTaxTotal)], ["住民税合計", yen(run.residentTaxTotal)], ["控除合計", yen(run.deductionTotal)], ["差引支給額", yen(run.netTotal)], ["振込合計", yen(run.bankTransferTotal)]] : [];
-  return <main style={s.page}><div style={s.shell}>
-    <header style={s.heading}><div><p style={s.eyebrow}>本部管理者専用</p><h1 style={s.title}>給与管理</h1><p style={s.subtitle}>勤務対象月と支給月を分け、試算から確定・帳票まで一元管理します。</p></div><span style={{ ...s.status, background: run?.status === "confirmed" ? "#DCFCE7" : "#FEF3C7", color: run?.status === "confirmed" ? "#166534" : "#92400E" }}>{statusLabel}</span></header>
-    <section style={s.panel}><div style={s.controls}><label style={s.label}>対象勤務月<input type="month" value={targetMonth} onChange={(e) => changeMonth(e.target.value)} style={s.input}/></label><label style={s.label}>支給年月<input type="month" value={paymentMonth} onChange={(e) => setPaymentMonth(e.target.value)} style={s.input}/></label><label style={s.label}>支給日<input type="date" value={paymentDate} onChange={(e) => setPaymentDate(e.target.value)} style={s.input}/></label><button disabled={busy || run?.status === "confirmed"} onClick={calculate} style={s.primary}>{busy ? "処理中…" : run ? "再計算" : "今月の給与を試算"}</button></div>
-      <div style={s.meta}>{[["ステータス", statusLabel], ["最終計算日時", dateTime(run?.calculatedAt)], ["最終計算者", run?.calculatedBy ?? "—"], ["給与対象人数", run ? `${run.employeeCount}名` : "—"], ["エラー", `${errors.length}件`], ["警告", `${warnings.length}件`]].map(([a,b])=><div key={a}><small>{a}</small><strong>{b}</strong></div>)}</div>{message && <p role="status" style={s.message}>{message}</p>}
-    </section>
-    {run && <>
-      {(errors.length > 0 || warnings.length > 0 || mismatch) && <section style={s.issuePanel}><h2 style={s.h2}>エラー・警告</h2>{mismatch && <p style={s.error}>エラー：支給合計・差引支給額・振込／現金合計が一致しません。</p>}{run.issues.map((x,i)=><p key={`${x.code}-${i}`} style={x.severity === "error" ? s.error : s.warning}>{x.severity === "error" ? "エラー" : "警告"}：{x.message}</p>)}</section>}
-      <section style={s.cardGrid}>{cards.map(([label,value])=><article key={label} style={s.card}><span>{label}</span><strong>{value}</strong></article>)}</section>
-      <section style={{...s.panel,...s.actionBar}}><button disabled={busy || run.status !== "draft" || !run.canConfirm || errors.length > 0 || mismatch} onClick={confirm} style={s.primary}>給与を確定</button>{run.status === "confirmed" && <button disabled={busy} onClick={cancel} style={s.danger}>確定取消</button>}<button disabled={busy} onClick={()=>download("payroll")} style={s.secondary}>給与計算Excelをダウンロード</button><button disabled={busy} onClick={()=>download("transfer")} style={s.secondary}>給与振込一覧Excelをダウンロード</button><button disabled={busy} onClick={()=>download("zip")} style={s.secondary}>給与明細PDF一括ダウンロード</button><button onClick={()=>tableRef.current?.scrollIntoView({behavior:"smooth"})} style={s.secondary}>従業員別明細を確認</button></section>
-      <section style={s.panel} ref={tableRef}><div style={s.tableHeading}><div><h2 style={s.h2}>従業員別給与</h2><p style={s.muted}>{filtered.length} / {run.results.length}名を表示</p></div><div style={s.filters}><input aria-label="氏名、社員コード、店舗で検索" placeholder="氏名・社員コード・店舗で検索" value={search} onChange={(e)=>setSearch(e.target.value)} style={s.search}/><select aria-label="店舗" value={store} onChange={(e)=>setStore(e.target.value)} style={s.search}><option value="">全店舗</option>{stores.map(x=><option key={x}>{x}</option>)}</select><select aria-label="雇用区分" value={employment} onChange={(e)=>setEmployment(e.target.value)} style={s.search}><option value="">全雇用区分</option><option value="hourly">時給</option><option value="fixed">固定給</option></select><label style={s.check}><input type="checkbox" checked={issueOnly} onChange={(e)=>setIssueOnly(e.target.checked)}/> エラー・警告あり</label></div></div>
-        <div style={s.tableWrap}><table style={s.table}><thead><tr>{["社員コード","氏名","所属店舗","雇用区分","出勤日数","労働時間","普通残業","深夜","基本給","残業手当","深夜手当","非課税通勤費","その他手当","課税支給額","社会保険","所得税","住民税","その他控除","差引支給額","エラー／警告","明細"].map(x=><th key={x} style={s.cell}>{x}</th>)}</tr></thead><tbody>{filtered.map(r=>{const own=[...r.issues,...run.issues.filter(x=>x.employeeId===r.employeeId)];return <tr key={r.employeeId}><td style={s.cell}>{r.employeeCode}</td><td style={s.cell}><button style={s.link} onClick={()=>setSelected(r)}>{r.employeeName}</button></td><td style={s.cell}>{r.storeName}</td><td style={s.cell}>{r.payrollType === "hourly" ? "時給" : "固定給"}</td><td style={s.cell}>{r.attendance.attendanceDays}</td><td style={s.cell}>{hm(r.attendance.workMinutes)}</td><td style={s.cell}>{hm(r.attendance.overtimeMinutes)}</td><td style={s.cell}>{hm(r.attendance.nightMinutes)}</td><td style={s.cell}>{yen(r.earnings.baseSalary)}</td><td style={s.cell}>{yen(r.earnings.overtimePremium)}</td><td style={s.cell}>{yen(r.earnings.nightPremium)}</td><td style={s.cell}>{yen(r.earnings.transportation)}</td><td style={s.cell}>{yen(r.earnings.otherTaxable)}</td><td style={s.cell}>{yen(r.earnings.taxableTotal)}</td><td style={s.cell}>{yen(r.deductions.socialInsuranceTotal)}</td><td style={s.cell}>{yen(r.deductions.incomeTax)}</td><td style={s.cell}>{yen(r.deductions.residentTax)}</td><td style={s.cell}>{yen(r.deductions.otherDeduction)}</td><td style={s.cell}><b>{yen(r.netPay)}</b></td><td style={{...s.cell,color:own.length?"#B91C1C":"#64748B",maxWidth:220,whiteSpace:"normal"}}>{own.length?own.map(x=>x.message).join("、"):"なし"}</td><td style={s.cell}><button style={s.small} onClick={()=>setSelected(r)}>明細確認</button></td></tr>})}</tbody></table></div>
-      </section>
-    </>}
-    {selected && run && <div style={s.overlay} onMouseDown={(e)=>{if(e.target===e.currentTarget)setSelected(null)}}><section role="dialog" aria-modal="true" aria-label="従業員別給与明細" style={s.modal}><header style={s.modalHead}><div><p style={s.eyebrow}>{selected.employeeCode} / {selected.storeName}</p><h2 style={s.modalTitle}>{selected.employeeName}さんの給与計算根拠</h2></div><button aria-label="閉じる" onClick={()=>setSelected(null)} style={s.close}>×</button></header><div style={s.modalBody}>
-      <h3>日別勤怠・交通費</h3><div style={s.tableWrap}><table style={{...s.table,minWidth:1050}}><thead><tr>{["日付","出勤","退勤","休憩","労働","残業","深夜","勤務店舗","ヘルプ","日交通費単価","計上額"].map(x=><th key={x} style={s.cell}>{x}</th>)}</tr></thead><tbody>{selected.attendanceDaysDetail.map((d,i)=><tr key={`${d.date}-${i}`}><td style={s.cell}>{d.date}</td><td style={s.cell}>{jst(d.clockIn)}</td><td style={s.cell}>{jst(d.clockOut)}</td><td style={s.cell}>{d.breakPeriods?.length ? d.breakPeriods.map((b,n)=><div key={n}>{jst(b.start)}〜{jst(b.end)}</div>) : hm(d.breakMinutes)}</td><td style={s.cell}>{hm(d.workMinutes)}</td><td style={s.cell}>{hm(d.overtimeMinutes)}</td><td style={s.cell}>{hm(d.nightMinutes)}</td><td style={s.cell}>{d.storeNames?.join(" / ") || selected.storeName}</td><td style={s.cell}>{hm(d.helpMinutes)}</td><td style={s.cell}>{yen(d.dailyTransportationUnit ?? 0)}</td><td style={s.cell}>{yen(d.dailyTransportationAmount ?? 0)}</td></tr>)}</tbody></table></div>
-      <div style={s.detailGrid}><article style={s.detailCard}><h3>給与計算式</h3><p>基本給：{selected.attendance.workMinutes}分 × {yen(selected.hourlyWageSnapshot ?? 0)} ÷ 60 = <b>{yen(selected.earnings.baseSalary)}</b></p><p>普通残業：{selected.attendance.overtimeMinutes}分 × 25% = <b>{yen(selected.earnings.overtimePremium)}</b></p><p>深夜：{selected.attendance.nightMinutes}分 × 25% = <b>{yen(selected.earnings.nightPremium)}</b></p><p>日交通費計上：{yen(selected.attendanceDaysDetail.reduce((a,d)=>a+(d.dailyTransportationAmount??0),0))}</p><p>月額定期代：{yen(selected.earnings.transportation-selected.attendanceDaysDetail.reduce((a,d)=>a+(d.dailyTransportationAmount??0),0))}</p></article><article style={s.detailCard}><h3>支給・控除</h3><p>課税支給：{yen(selected.earnings.taxableTotal)}</p><p>非課税支給：{yen(selected.earnings.nonTaxableTotal)}</p><p>社会保険：{yen(selected.deductions.socialInsuranceTotal)}</p><p>所得税：{yen(selected.deductions.incomeTax)}　住民税：{yen(selected.deductions.residentTax)}</p><p>その他控除：{yen(selected.deductions.otherDeduction)}</p><p style={s.net}>差引支給額　{yen(selected.netPay)}</p></article></div>
-      <div style={s.actionBar}><button onClick={()=>download("pdf",selected.employeeId,true)} style={s.secondary}>給与明細PDFプレビュー</button><button onClick={()=>download("pdf",selected.employeeId)} style={s.secondary}>個別PDFダウンロード</button><button disabled={run.status!=="draft"||busy} onClick={()=>adjust(selected)} style={s.primary}>手当・控除を修正</button></div>
-    </div></section></div>}
-  </div></main>;
+
+  const slipStores = useMemo(() => [...new Set(slipRun?.results.map((r) => r.storeName) ?? [])].sort(), [slipRun]);
+  const slipEmployees = useMemo(() => (slipRun?.results ?? []).filter((r) => !slipStore || r.storeName === slipStore), [slipRun, slipStore]);
+
+  return (
+    <main style={s.page}>
+      <div style={s.shell}>
+        <header style={s.header}>
+          <h1 style={s.title}>給与管理</h1>
+          <p style={s.eyebrow}>本部管理者専用</p>
+        </header>
+
+        {/* Section 1: 今月の給与計算 */}
+        <section style={s.card}>
+          <h2 style={s.h2}>① 今月の給与計算</h2>
+          <div style={s.infoRow}>
+            <span>対象勤怠：<b>{fmtMonth(targetMonth)}</b></span>
+            <span>支給日：<b>{fmtDate(paymentDate)}</b></span>
+            <span style={{ ...s.badge, ...(isConfirmed ? s.badgeGreen : s.badgeYellow) }}>{statusLabel}</span>
+          </div>
+
+          {message && <p style={s.msg}>{message}</p>}
+
+          {errors.length > 0 && (
+            <div style={s.issueBox}>
+              {errors.map((e, i) => <p key={i} style={s.errText}>エラー：{e.message}</p>)}
+            </div>
+          )}
+
+          <div style={s.actions}>
+            <button disabled={busy || isConfirmed} onClick={calculate} style={s.primary}>
+              {busy ? "処理中…" : run ? "今月の給与を再計算" : "今月の給与を計算"}
+            </button>
+            <button disabled={busy || !run} onClick={downloadTransfer} style={s.secondary}>
+              振込額を確認
+            </button>
+            <button
+              disabled={busy || !isDraft || !run?.canConfirm || errors.length > 0}
+              onClick={confirm}
+              style={s.confirm}
+            >
+              給与を確定
+            </button>
+          </div>
+          {isDraft && !run?.canConfirm && errors.length === 0 && (
+            <p style={s.hint}>※ 月が終了していないため確定できません。翌月以降に「給与を確定」してください。</p>
+          )}
+        </section>
+
+        {/* Section 2: 給与明細ダウンロード */}
+        <section style={s.card}>
+          <h2 style={s.h2}>② 給与明細ダウンロード</h2>
+          <p style={s.sub}>確定済みの月を選択し、従業員ごとにPDFをダウンロードできます。</p>
+
+          {confirmedRuns.length === 0 ? (
+            <p style={s.muted}>確定済みの給与データがありません。</p>
+          ) : (
+            <>
+              <div style={s.selRow}>
+                <label style={s.lbl}>
+                  確定月を選ぶ
+                  <select value={slipMonthKey} onChange={(e) => { const k = e.target.value; setSlipMonthKey(k); if (!k) setSlipRun(null); }} style={s.sel}>
+                    <option value="">選択してください</option>
+                    {confirmedRuns.map((r) => (
+                      <option key={r.id} value={`${r.id}__${r.targetMonth}`}>{fmtMonth(r.targetMonth)} 勤怠 → {fmtDate(r.paymentDate)} 支給</option>
+                    ))}
+                  </select>
+                </label>
+                {slipRun && (
+                  <label style={s.lbl}>
+                    店舗を選ぶ
+                    <select value={slipStore} onChange={(e) => setSlipStore(e.target.value)} style={s.sel}>
+                      <option value="">全店舗</option>
+                      {slipStores.map((st) => <option key={st}>{st}</option>)}
+                    </select>
+                  </label>
+                )}
+              </div>
+
+              {slipRun && slipEmployees.length > 0 && (
+                <table style={s.table}>
+                  <thead>
+                    <tr>
+                      <th style={s.th}>氏名</th>
+                      <th style={s.th}>所属店舗</th>
+                      <th style={s.th}>差引支給額</th>
+                      <th style={s.th}></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {slipEmployees.map((r) => (
+                      <tr key={r.employeeId}>
+                        <td style={s.td}>{r.employeeName}</td>
+                        <td style={s.td}>{r.storeName}</td>
+                        <td style={s.td}>{yen(r.netPay)}</td>
+                        <td style={s.td}>
+                          <button disabled={busy} onClick={() => downloadSlipPdf(slipRun.id, r.employeeId)} style={s.small}>
+                            給与明細ダウンロード
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+              {slipRun && slipEmployees.length === 0 && slipStore && (
+                <p style={s.muted}>この店舗に該当する従業員がいません。</p>
+              )}
+            </>
+          )}
+        </section>
+      </div>
+    </main>
+  );
 }
 
 const s: Record<string, React.CSSProperties> = {
-  page:{minHeight:"100vh",background:"#F4F7FA",padding:24,color:"#172033"},shell:{maxWidth:1600,margin:"0 auto"},heading:{display:"flex",alignItems:"center",justifyContent:"space-between",gap:20,marginBottom:20},eyebrow:{margin:0,color:"#0284C7",fontSize:12,fontWeight:800,letterSpacing:1},title:{fontSize:32,margin:"4px 0"},subtitle:{margin:0,color:"#64748B"},status:{padding:"8px 15px",borderRadius:999,fontWeight:800},panel:{background:"white",borderRadius:14,padding:20,marginBottom:18,boxShadow:"0 8px 24px rgba(15,23,42,.06)"},controls:{display:"flex",gap:14,alignItems:"end",flexWrap:"wrap"},label:{display:"grid",gap:6,fontWeight:700,fontSize:14},input:{height:44,border:"1px solid #CBD5E1",borderRadius:9,padding:"0 11px",fontSize:15},meta:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(145px,1fr))",gap:12,marginTop:18,paddingTop:16,borderTop:"1px solid #E2E8F0"},message:{padding:11,background:"#F0F9FF",borderRadius:9,color:"#075985"},h2:{margin:"0 0 10px",fontSize:20},issuePanel:{background:"#FFFBEB",border:"1px solid #FDE68A",borderRadius:14,padding:18,marginBottom:18},error:{color:"#B91C1C",fontWeight:700},warning:{color:"#92400E"},cardGrid:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:12,marginBottom:18},card:{background:"white",border:"1px solid #E2E8F0",borderRadius:12,padding:16,display:"grid",gap:7},primary:{height:44,border:0,borderRadius:9,padding:"0 16px",background:"#0284C7",color:"white",fontWeight:800},secondary:{height:42,border:"1px solid #38BDF8",borderRadius:9,padding:"0 13px",background:"white",color:"#0369A1",fontWeight:700},danger:{height:42,border:"1px solid #EF4444",borderRadius:9,padding:"0 13px",background:"white",color:"#B91C1C",fontWeight:700},actionBar:{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"},tableHeading:{display:"flex",justifyContent:"space-between",gap:16,alignItems:"end",flexWrap:"wrap"},muted:{color:"#64748B",margin:0},filters:{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"},search:{height:39,border:"1px solid #CBD5E1",borderRadius:8,padding:"0 10px",minWidth:150},check:{fontSize:13,whiteSpace:"nowrap"},tableWrap:{overflowX:"auto",maxWidth:"100%"},table:{borderCollapse:"collapse",minWidth:1900,width:"100%",marginTop:14},cell:{border:"1px solid #E2E8F0",padding:"8px 9px",fontSize:12,whiteSpace:"nowrap",textAlign:"left",verticalAlign:"top"},link:{border:0,background:"none",color:"#0369A1",fontWeight:800,textDecoration:"underline",cursor:"pointer"},small:{border:"1px solid #38BDF8",borderRadius:7,padding:"5px 9px",background:"white",color:"#0369A1",fontWeight:700},overlay:{position:"fixed",inset:0,zIndex:1000,background:"rgba(15,23,42,.55)",display:"grid",placeItems:"center",padding:24},modal:{width:"min(1300px,100%)",maxHeight:"90vh",background:"white",borderRadius:16,overflow:"hidden",boxShadow:"0 24px 70px rgba(0,0,0,.3)"},modalHead:{display:"flex",justifyContent:"space-between",padding:"18px 22px",borderBottom:"1px solid #E2E8F0"},modalTitle:{margin:"3px 0 0",fontSize:24},close:{width:38,height:38,border:0,borderRadius:9,fontSize:24},modalBody:{padding:22,overflowY:"auto",maxHeight:"calc(90vh - 78px)"},detailGrid:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(320px,1fr))",gap:14,margin:"16px 0"},detailCard:{border:"1px solid #E2E8F0",borderRadius:10,padding:"4px 16px"},net:{fontSize:18,fontWeight:800,color:"#0369A1"}
+  page: { minHeight: "100vh", background: "#F4F7FA", padding: 24, color: "#172033" },
+  shell: { maxWidth: 860, margin: "0 auto" },
+  header: { marginBottom: 20 },
+  title: { fontSize: 28, margin: "0 0 2px" },
+  eyebrow: { margin: 0, color: "#0284C7", fontSize: 12, fontWeight: 800, letterSpacing: 1 },
+  card: { background: "white", borderRadius: 14, padding: 24, marginBottom: 18, boxShadow: "0 4px 16px rgba(15,23,42,.06)" },
+  h2: { margin: "0 0 14px", fontSize: 18, fontWeight: 800 },
+  sub: { margin: "0 0 14px", color: "#64748B", fontSize: 14 },
+  infoRow: { display: "flex", gap: 20, alignItems: "center", flexWrap: "wrap", marginBottom: 14, fontSize: 15 },
+  badge: { padding: "4px 12px", borderRadius: 999, fontWeight: 800, fontSize: 13 },
+  badgeGreen: { background: "#DCFCE7", color: "#166534" },
+  badgeYellow: { background: "#FEF3C7", color: "#92400E" },
+  msg: { padding: 11, background: "#F0F9FF", borderRadius: 9, color: "#075985", margin: "0 0 12px", fontSize: 14 },
+  issueBox: { background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 9, padding: "10px 14px", marginBottom: 12 },
+  errText: { margin: 0, color: "#B91C1C", fontWeight: 700, fontSize: 14 },
+  actions: { display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" },
+  hint: { margin: "10px 0 0", color: "#64748B", fontSize: 13 },
+  primary: { height: 44, border: 0, borderRadius: 9, padding: "0 20px", background: "#0284C7", color: "white", fontWeight: 800, cursor: "pointer", fontSize: 15 },
+  secondary: { height: 42, border: "1px solid #38BDF8", borderRadius: 9, padding: "0 16px", background: "white", color: "#0369A1", fontWeight: 700, cursor: "pointer" },
+  confirm: { height: 42, border: "1px solid #16A34A", borderRadius: 9, padding: "0 16px", background: "#F0FDF4", color: "#166534", fontWeight: 800, cursor: "pointer" },
+  muted: { color: "#64748B", margin: 0, fontSize: 14 },
+  selRow: { display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 16 },
+  lbl: { display: "grid", gap: 6, fontWeight: 700, fontSize: 14 },
+  sel: { height: 40, border: "1px solid #CBD5E1", borderRadius: 8, padding: "0 10px", minWidth: 260, fontSize: 14 },
+  table: { width: "100%", borderCollapse: "collapse", marginTop: 4 },
+  th: { border: "1px solid #E2E8F0", padding: "9px 12px", background: "#F8FAFC", fontWeight: 700, textAlign: "left", fontSize: 13 },
+  td: { border: "1px solid #E2E8F0", padding: "9px 12px", fontSize: 13 },
+  small: { border: "1px solid #38BDF8", borderRadius: 7, padding: "5px 12px", background: "white", color: "#0369A1", fontWeight: 700, cursor: "pointer", fontSize: 13 },
 };
