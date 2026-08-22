@@ -77,9 +77,14 @@ async function fsRequest(
   });
   const text = await res.text();
   if (!res.ok) {
-    let msg = `Firestore HTTP ${res.status}`;
-    try { const j = JSON.parse(text) as { error?: { message?: string } }; msg = j.error?.message ?? msg; } catch {}
-    throw new Error(msg);
+    // runQuery は失敗時に配列 [{ error: {...} }] を返すため、両方の形を見る。
+    let detail = "";
+    try {
+      const parsed: unknown = JSON.parse(text);
+      const err = (Array.isArray(parsed) ? (parsed[0] as { error?: { message?: string } } | undefined)?.error : (parsed as { error?: { message?: string } })?.error);
+      detail = err?.message ?? "";
+    } catch { /* non-JSON */ }
+    throw new Error(`Firestore HTTP ${res.status}${detail ? `: ${detail}` : ""}`);
   }
   return JSON.parse(text);
 }
@@ -182,7 +187,7 @@ export class RestCollectionRef {
     if (this._filters.length === 0 && !this._limitVal) {
       // Simple list — GET endpoint
       const url = `${FSBASE()}/${this._colPath}?pageSize=5000`;
-      const raw = await fsRequest(this._token, url) as Record<string, unknown>;
+      const raw = await fsRequest(this._token, url).catch((e: Error) => { throw new Error(`${e.message} [list ${this._colPath}]`); }) as Record<string, unknown>;
       const documents = (raw.documents as unknown[] | undefined) ?? [];
       const docs = documents.map((d) => {
         const doc = d as Record<string, unknown>;
@@ -218,7 +223,7 @@ export class RestCollectionRef {
       },
     };
 
-    const raw = await fsRequest(this._token, `${parentUrl}:runQuery`, "POST", query) as unknown[];
+    const raw = await fsRequest(this._token, `${parentUrl}:runQuery`, "POST", query).catch((e: Error) => { throw new Error(`${e.message} [query ${this._colPath}]`); }) as unknown[];
     const docs = raw
       .filter((r) => (r as Record<string, unknown>).document)
       .map((r) => {
@@ -246,7 +251,7 @@ export class RestBatch {
 
   async commit(): Promise<void> {
     if (this._writes.length === 0) return;
-    await fsRequest(this._token, `${FSBASE()}:batchWrite`, "POST", { writes: this._writes });
+    await fsRequest(this._token, `${FSBASE()}:batchWrite`, "POST", { writes: this._writes }).catch((e: Error) => { throw new Error(`${e.message} [batchWrite ${this._writes.length}件]`); });
   }
 }
 
