@@ -21,3 +21,22 @@ export function getAdminAuth(): adminSdk.auth.Auth | null {
 
   return adminSdk.auth();
 }
+
+export function getAdminDb(): adminSdk.firestore.Firestore | null {
+  if (!getAdminAuth()) return null;
+  return adminSdk.firestore();
+}
+
+export async function verifyAdminToken(authorization: string | null) {
+  const auth = getAdminAuth();
+  const db = getAdminDb();
+  if (!auth || !db || !authorization?.startsWith("Bearer ")) return null;
+  try {
+    const decoded = await auth.verifyIdToken(authorization.slice(7));
+    const profile = await db.collection("users").doc(decoded.uid).get();
+    if (profile.data()?.role !== "admin") return null;
+    return { uid: decoded.uid, db };
+  } catch {
+    return null;
+  }
+}

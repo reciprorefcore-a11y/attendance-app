@@ -121,5 +121,20 @@ service cloud.firestore {
       allow read:   if isAdmin();
       allow update, delete: if isAdmin();
     }
+
+    // 給与計算スナップショットは本部管理者だけが参照・変更できる。
+    match /payrollRuns/{runId} {
+      allow read, write: if isAdmin();
+      match /employees/{employeeId} {
+        allow read, write: if isAdmin();
+      }
+      match /auditLogs/{auditId} {
+        allow read, write: if isAdmin();
+      }
+    }
+
+    match /payrollSettings/{employeeId} {
+      allow read, write: if isAdmin();
+    }
   }
 }

@@ -11,9 +11,13 @@
     "test:rules": "firebase emulators:exec --only firestore \"node --test tests/firestore-rules.test.mjs\""
   },
   "dependencies": {
+    "@fontsource/noto-sans-jp": "^5.3.0",
+    "@pdf-lib/fontkit": "^1.1.1",
     "firebase": "^12.12.1",
     "firebase-admin": "^13.8.0",
+    "jszip": "^3.10.1",
     "next": "16.2.4",
+    "pdf-lib": "^1.17.1",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "xlsx": "^0.18.5"

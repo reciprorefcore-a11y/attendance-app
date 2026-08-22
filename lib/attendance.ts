@@ -45,7 +45,31 @@ export type Employee = {
   memo?: string;
   isDeleted?: boolean;
   transportationCost?: number;
-  transportationType?: "daily" | "monthly";
+  transportationType?: "daily" | "monthly" | "none";
+  payrollType?: "hourly" | "fixed";
+  hourlyWage?: number | null;
+  dailyTransportation?: number | null;
+  monthlyTransportation?: number | null;
+  payrollTransferOrder?: number | null;
+  paymentMethod?: "bank" | "cash";
+  taxTableType?: "kou" | "otsu";
+  dependentCount?: number;
+  healthInsurance?: number;
+  childSupportContribution?: number;
+  careInsurance?: number;
+  employeePension?: number;
+  employmentInsurance?: number;
+  residentTax?: number;
+  fixedBaseSalary?: number;
+  directorCompensation?: number;
+  positionAllowance?: number;
+  businessAllowance?: number;
+  holidayAllowance?: number;
+  fixedOvertimeAllowance?: number;
+  otherAllowance?: number;
+  otherDeduction?: number;
+  advanceExpense?: number;
+  payrollEnabled?: boolean;
 };
 
 export type WageHistory = {

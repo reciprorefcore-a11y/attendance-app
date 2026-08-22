@@ -25,6 +25,7 @@ before(async () => {
     await setDoc(doc(context.firestore(), "users", "staff-user"), {
       role: "staff",
     });
+    await setDoc(doc(context.firestore(), "users", "manager-user"), { role: "manager", storeId: "store-a" });
     await setDoc(
       doc(
         context.firestore(),
@@ -172,4 +173,20 @@ test("admin can atomically correct a punch and create its audit history", async 
     actions: [{ targetLogId: "correct-target", action: "update" }],
   });
   await assertSucceeds(batch.commit());
+});
+
+test("payroll snapshots are admin-only", async () => {
+  const adminDb = environment.authenticatedContext("admin-user").firestore();
+  const managerDb = environment.authenticatedContext("manager-user").firestore();
+  const staffDb = environment.authenticatedContext("staff-user").firestore();
+  await assertSucceeds(setDoc(doc(adminDb, "payrollRuns", "run-1"), { targetMonth: "2026-07", status: "draft" }));
+  await assertSucceeds(setDoc(doc(adminDb, "payrollRuns", "run-1", "employees", "employee-1"), { netPay: 100000 }));
+  await assertSucceeds(setDoc(doc(adminDb, "payrollRuns", "run-1", "auditLogs", "audit-1"), { action: "cancel_confirmation" }));
+  await assertFails(getDoc(doc(managerDb, "payrollRuns", "run-1")));
+  await assertFails(getDoc(doc(staffDb, "payrollRuns", "run-1", "employees", "employee-1")));
+  await assertFails(getDoc(doc(managerDb, "payrollRuns", "run-1", "auditLogs", "audit-1")));
+  await assertFails(setDoc(doc(managerDb, "payrollRuns", "run-2"), { status: "draft" }));
+  await assertSucceeds(setDoc(doc(adminDb, "payrollSettings", "employee-1"), { healthInsurance: 10000 }));
+  await assertFails(getDoc(doc(managerDb, "payrollSettings", "employee-1")));
+  await assertFails(setDoc(doc(staffDb, "payrollSettings", "employee-1"), { healthInsurance: 0 }));
 });
