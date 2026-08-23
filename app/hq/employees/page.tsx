@@ -36,6 +36,9 @@ const emptyForm = {
   nameKana: "",
   storeId: "",
   employmentType: "part_time" as EmploymentType,
+  pin: "", hourlyWage: "", transportationCost: "", transportationType: "none" as "daily" | "monthly" | "none", payrollEnabled: true,
+  fixedBaseSalary: "", directorCompensation: "", positionAllowance: "", businessAllowance: "", holidayAllowance: "", fixedOvertimeAllowance: "",
+  healthInsurance: "", childSupportContribution: "", careInsurance: "", employeePension: "", employmentInsurance: "", incomeTax: "", residentTax: "",
 };
 
 function todayString() {
@@ -49,6 +52,7 @@ export default function HqEmployeesPage() {
   const [message, setMessage] = useState("");
   const [form, setForm] = useState(emptyForm);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [employeeTab, setEmployeeTab] = useState<"hourly" | "fixed">("hourly");
 
   const load = async () => {
     const [employeeSnapshot, storeSnapshot] = await Promise.all([
@@ -95,8 +99,8 @@ export default function HqEmployeesPage() {
   const createEmployee = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const employeeCode = form.employeeCode.trim();
-    if (!employeeCode || !form.name.trim() || !form.nameKana.trim() || !selectedStore) {
-      setMessage("社員コード、氏名、ひらがな、所属店舗を入力してください。");
+    if (!employeeCode || !form.name.trim() || !form.nameKana.trim() || (employeeTab === "hourly" && !selectedStore)) {
+      setMessage(employeeTab === "hourly" ? "社員コード、氏名、ひらがな、所属店舗を入力してください。" : "社員コード、氏名、ひらがなを入力してください。");
       return;
     }
 
@@ -119,9 +123,18 @@ export default function HqEmployeesPage() {
         employeeCode,
         name: form.name.trim(),
         nameKana: form.nameKana.trim(),
-        storeId: selectedStore.id,
-        storeName: selectedStore.storeName,
-        employmentType: form.employmentType,
+        ...(employeeTab === "hourly" && selectedStore ? { storeId: selectedStore.id, storeName: selectedStore.storeName } : {}),
+        employeeType: employeeTab === "fixed" ? "fullTime" : "partTime",
+        employmentType: employeeTab === "fixed" ? "full_time" : "part_time",
+        payrollType: employeeTab,
+        clockEnabled: employeeTab === "hourly",
+        pin: employeeTab === "hourly" ? form.pin : "",
+        baseWage: employeeTab === "hourly" ? Number(form.hourlyWage) || 0 : 0,
+        hourlyWage: employeeTab === "hourly" ? Number(form.hourlyWage) || 0 : 0,
+        transportationCost: Number(form.transportationCost) || 0,
+        transportationType: form.transportationType,
+        payrollEnabled: form.payrollEnabled,
+        ...(employeeTab === "fixed" ? Object.fromEntries(["fixedBaseSalary","directorCompensation","positionAllowance","businessAllowance","holidayAllowance","fixedOvertimeAllowance","healthInsurance","childSupportContribution","careInsurance","employeePension","employmentInsurance","incomeTax","residentTax"].map((key) => [key, Number(form[key as keyof typeof form]) || 0])) : {}),
         status: "active",
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -179,13 +192,30 @@ export default function HqEmployeesPage() {
     <main style={styles.page}>
       <div style={styles.shell}>
         <header>
-          <h1 style={styles.title}>従業員承認</h1>
+          <h1 style={styles.title}>従業員管理</h1>
         </header>
+
+        <div style={{ display: "flex", gap: 8, margin: "16px 0" }}>
+          <button type="button" onClick={() => setEmployeeTab("hourly")} style={employeeTab === "hourly" ? styles.button : styles.secondaryButton}>① アルバイト</button>
+          <button type="button" onClick={() => setEmployeeTab("fixed")} style={employeeTab === "fixed" ? styles.button : styles.secondaryButton}>② 正社員</button>
+        </div>
 
         {message && <p style={styles.success}>{message}</p>}
 
+        {employeeTab === "fixed" && (
+          <section style={styles.panel}>
+            <b>正社員マスター（5名）</b>
+            <p style={{ margin: "8px 0" }}>0002 青山佳史／0003 中村鏡太郎／0017 木月徳子／0064 小林彗太／0083 佐藤雅信</p>
+            {[{ employeeCode: "0002", name: "青山佳史" }, { employeeCode: "0017", name: "木月徳子" }].filter((candidate) => !employees.some((employee) => String(employee.employeeCode).padStart(4, "0") === candidate.employeeCode)).map((candidate) => (
+              <button key={candidate.employeeCode} type="button" onClick={() => setForm({ ...emptyForm, employeeCode: candidate.employeeCode, name: candidate.name, employmentType: "full_time" })} style={{ ...styles.secondaryButton, marginRight: 8 }}>
+                {candidate.employeeCode} {candidate.name}を重複確認して登録
+              </button>
+            ))}
+          </section>
+        )}
+
         <form style={styles.panel} onSubmit={createEmployee}>
-          <h2 style={{ ...styles.title, fontSize: 18 }}>従業員を新規登録</h2>
+          <h2 style={{ ...styles.title, fontSize: 18 }}>{employeeTab === "hourly" ? "アルバイト" : "正社員"}を新規登録</h2>
           <div style={{ ...styles.grid, marginTop: 14 }}>
             <label style={styles.label}>
               社員コード
@@ -218,7 +248,7 @@ export default function HqEmployeesPage() {
                 style={styles.input}
               />
             </label>
-            <label style={styles.label}>
+            {employeeTab === "hourly" && <label style={styles.label}>
               所属店舗
               <select
                 required
@@ -235,26 +265,18 @@ export default function HqEmployeesPage() {
                   </option>
                 ))}
               </select>
-            </label>
-            <label style={styles.label}>
-              雇用区分
-              <select
-                value={form.employmentType}
-                onChange={(event) =>
-                  setForm({
-                    ...form,
-                    employmentType: event.target.value as EmploymentType,
-                  })
-                }
-                style={styles.input}
-              >
-                {Object.entries(employmentTypeLabels).map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </label>
+            </label>}
+            {employeeTab === "hourly" ? <>
+              <label style={styles.label}>PIN<input value={form.pin} onChange={(e) => setForm({ ...form, pin: e.target.value.replace(/\D/g, "").slice(0, 4) })} style={styles.input} /></label>
+              <label style={styles.label}>時給<input type="number" value={form.hourlyWage} onChange={(e) => setForm({ ...form, hourlyWage: e.target.value })} style={styles.input} /></label>
+              <label style={styles.label}>交通費<input type="number" value={form.transportationCost} onChange={(e) => setForm({ ...form, transportationCost: e.target.value })} style={styles.input} /></label>
+              <label style={styles.label}>交通費種別<select value={form.transportationType} onChange={(e) => setForm({ ...form, transportationType: e.target.value as typeof form.transportationType })} style={styles.input}><option value="none">なし</option><option value="daily">日額</option><option value="monthly">月額</option></select></label>
+            </> : <>
+              <label style={styles.label}>固定給区分<select value="fixed" disabled style={styles.input}><option value="fixed">固定給</option></select></label>
+              {[["fixedBaseSalary","基本給"],["directorCompensation","役員報酬"],["positionAllowance","職能手当"],["businessAllowance","業務手当"],["holidayAllowance","休日手当"],["fixedOvertimeAllowance","固定手当"],["healthInsurance","健康保険"],["childSupportContribution","子育て支援金"],["careInsurance","介護保険"],["employeePension","厚生年金"],["employmentInsurance","雇用保険"],["incomeTax","所得税"],["residentTax","住民税"]].map(([key,label]) => <label key={key} style={styles.label}>{label}<input type="number" value={String(form[key as keyof typeof form])} onChange={(e) => setForm({ ...form, [key]: e.target.value })} style={styles.input} /></label>)}
+            </>}
+            <label style={styles.label}>給与対象<select value={form.payrollEnabled ? "yes" : "no"} onChange={(e) => setForm({ ...form, payrollEnabled: e.target.value === "yes" })} style={styles.input}><option value="yes">対象</option><option value="no">対象外</option></select></label>
+            {employeeTab === "hourly" && <label style={styles.label}>打刻対象<select value="yes" disabled style={styles.input}><option value="yes">対象</option></select></label>}
           </div>
           <button
             type="submit"
@@ -290,7 +312,7 @@ export default function HqEmployeesPage() {
                     <td style={styles.td}>{employee.name}</td>
                     <td style={styles.td}>{employee.nameKana}</td>
                     <td style={styles.td}>{employee.employeeCode}</td>
-                    <td style={styles.td}>{employee.storeName}</td>
+                    <td style={styles.td}>{employee.employeeType === "fullTime" || employee.payrollType === "fixed" ? "所属なし" : employee.storeName}</td>
                     <td style={styles.td}>
                       {employmentTypeLabels[employee.employmentType]}
                     </td>
@@ -384,12 +406,12 @@ export default function HqEmployeesPage() {
                 </tr>
               </thead>
               <tbody>
-                {employees.map((employee) => (
+                {employees.filter((employee) => employeeTab === "fixed" ? employee.payrollType === "fixed" || ["0002","0003","0017","0064","0083"].includes(String(employee.employeeCode).padStart(4,"0")) : !(employee.payrollType === "fixed" || ["0002","0003","0017","0064","0083"].includes(String(employee.employeeCode).padStart(4,"0")))).map((employee) => (
                   <tr key={employee.id}>
                     <td style={styles.td}>{employee.employeeCode}</td>
                     <td style={styles.td}>{employee.name}</td>
                     <td style={styles.td}>{employee.nameKana}</td>
-                    <td style={styles.td}>{employee.storeName}</td>
+                    <td style={styles.td}>{employee.employeeType === "fullTime" || employee.payrollType === "fixed" ? "所属なし" : employee.storeName}</td>
                     <td style={styles.td}>
                       {employmentTypeLabels[employee.employmentType]}
                     </td>

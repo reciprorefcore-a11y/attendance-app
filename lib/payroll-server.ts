@@ -1,12 +1,15 @@
 import { createHash } from "node:crypto";
 import type { FirestoreRest } from "./firebase-rest.ts";
 import { buildAttendanceRows, type CalculationClockLog } from "./attendance-calculation.ts";
-import { calculatePayroll, isPayrollMonthClosed, resolvePayrollType, summarizePayroll, validatePayrollInput, type PayrollAttendanceDay, type PayrollEmployee, type PayrollResult } from "./payroll.ts";
+import { applyFixedPayrollAdjustment, calculatePayroll, isPayrollMonthClosed, resolvePayrollType, summarizePayroll, validatePayrollInput, type FixedPayrollAdjustment, type PayrollAttendanceDay, type PayrollEmployee, type PayrollResult } from "./payroll.ts";
+import { sortPayrollResults } from "./payroll-order.ts";
 
 const FIXED_PAYROLL_TEMPLATE: Record<string, Partial<PayrollEmployee>> = {
+  "0002": { directorCompensation: 150000, healthInsurance: 7440, childSupportContribution: 172, careInsurance: 1215, employeePension: 13725, employmentInsurance: 0, incomeTax: 1300, residentTax: 12600 },
   "0003": { fixedBaseSalary: 185000, positionAllowance: 9000, holidayAllowance: 10694, businessAllowance: 110000, monthlyTransportation: 15670, healthInsurance: 15872, childSupportContribution: 368, careInsurance: 2592, employeePension: 29280, employmentInsurance: 1651, incomeTax: 6650, residentTax: 10000 },
   "0064": { fixedBaseSalary: 183000, positionAllowance: 8000, fixedOvertimeAllowance: 27678, holidayAllowance: 30891, businessAllowance: 56417, monthlyTransportation: 10110, healthInsurance: 13888, childSupportContribution: 322, careInsurance: 0, employeePension: 25620, employmentInsurance: 1580, incomeTax: 6650, residentTax: 10000 },
   "0083": { fixedBaseSalary: 175000, positionAllowance: 34000, holidayAllowance: 0, businessAllowance: 100000, monthlyTransportation: 5960, healthInsurance: 14880, childSupportContribution: 345, careInsurance: 2430, employeePension: 27450, employmentInsurance: 1574, incomeTax: 6530, residentTax: 12300 },
+  "0017": { fixedBaseSalary: 200000, positionAllowance: 6000, healthInsurance: 9920, childSupportContribution: 230, careInsurance: 1620, employeePension: 18300, employmentInsurance: 1030, incomeTax: 3410, residentTax: 0 },
 };
 
 function asDate(value: unknown) {
@@ -30,8 +33,9 @@ export async function loadPayrollSource(db: FirestoreRest, targetMonth: string) 
     const settings = payrollSettings.get(item.id) ?? {};
     const employee = { id: item.id, ...data, ...settings, storeName: data.storeName || stores.get(data.storeId)?.storeName || stores.get(data.storeId)?.name || data.storeId } as PayrollEmployee;
     employee.payrollType = resolvePayrollType(employee);
+    employee.employeeType = employee.payrollType === "fixed" ? "fullTime" : "partTime";
     const template = FIXED_PAYROLL_TEMPLATE[String(employee.employeeCode).padStart(4, "0")];
-    return template ? { ...employee, ...template, payrollType: "fixed" as const } : employee;
+    return template ? { ...template, ...employee, payrollType: "fixed" as const } : employee;
   }).filter((item) => item.payrollEnabled !== false && !(item as PayrollEmployee & { isDeleted?: boolean }).isDeleted);
   if (!prevConfirmedSnapshot.empty) {
     const prevRunId = prevConfirmedSnapshot.docs[0].id;
@@ -61,6 +65,11 @@ export async function loadPayrollSource(db: FirestoreRest, targetMonth: string) 
   } else {
     for (const emp of employees) if (resolvePayrollType(emp) === "fixed") emp.previousConfirmedPayrollMissing = !FIXED_PAYROLL_TEMPLATE[String(emp.employeeCode).padStart(4, "0")];
   }
+  // 明示保存された固定給与マスターは、前月引継ぎ値より優先する。
+  for (const emp of employees) {
+    const savedSettings = payrollSettings.get(emp.id);
+    if (savedSettings && resolvePayrollType(emp) === "fixed") Object.assign(emp, savedSettings);
+  }
   const employeeIds = new Set(employees.map((item) => item.id));
   const employeeById = new Map(employees.map((item) => [item.id, item]));
   const logs: CalculationClockLog[] = logSnapshot.docs.flatMap((item) => {
@@ -69,7 +78,7 @@ export async function loadPayrollSource(db: FirestoreRest, targetMonth: string) 
     if (!employeeId || !employeeIds.has(employeeId) || data.isDeleted === true || !data.timestamp) return [];
     return [{ id: item.id, ...data, timestamp: asDate(data.timestamp) } as CalculationClockLog];
   });
-  const homeStores = Object.fromEntries(employees.map((employee) => [employee.id, { storeId: employee.storeId, storeName: employee.storeName ?? employee.storeId }]));
+  const homeStores = Object.fromEntries(employees.filter((employee) => employee.employeeType === "partTime").map((employee) => [employee.id, { storeId: employee.storeId ?? "", storeName: employee.storeName ?? employee.storeId ?? "" }]));
   const baseWages = Object.fromEntries(employees.map((employee) => [employee.id, Number(employee.hourlyWage ?? employee.baseWage) || 0]));
   const rows = buildAttendanceRows(logs, {}, {}, baseWages, homeStores).filter((row) => row.date.startsWith(targetMonth));
   const attendance: PayrollAttendanceDay[] = rows.map((row) => ({
@@ -88,16 +97,17 @@ export async function loadPayrollSource(db: FirestoreRest, targetMonth: string) 
   return { employees, attendance, alreadyConfirmed: !confirmedSnapshot.empty, sourceAttendanceVersion };
 }
 
-export async function createPayrollDraft(db: FirestoreRest, input: { targetMonth: string; paymentMonth: string; paymentDate: string }) {
+export async function createPayrollDraft(db: FirestoreRest, input: { targetMonth: string; paymentMonth: string; paymentDate: string; adjustments?: Record<string, FixedPayrollAdjustment> }) {
   const source = await loadPayrollSource(db, input.targetMonth);
   if (source.alreadyConfirmed) throw new Error("already_confirmed");
   const issues = validatePayrollInput(source.employees, source.attendance, input.targetMonth, source.alreadyConfirmed);
   if (!isPayrollMonthClosed(input.targetMonth)) issues.unshift({ severity: "warning", code: "month_not_closed", message: `${input.targetMonth}は月途中のため試算・帳票プレビューのみ可能です。翌月以降に確定してください` });
-  const results = calculatePayroll(source.employees, source.attendance);
+  const results = sortPayrollResults(calculatePayroll(source.employees, source.attendance).map((result) => applyFixedPayrollAdjustment(result, input.adjustments?.[result.employeeId] ?? {})));
   const allIssues = [...issues, ...results.flatMap((item) => item.issues)];
   const totals = summarizePayroll(results);
   const now = new Date();
-  const run = { ...input, status: "draft" as const, calculatedAt: now.toISOString(), ...totals, sourceAttendanceVersion: source.sourceAttendanceVersion, revision: 1, canConfirm: isPayrollMonthClosed(input.targetMonth) && !allIssues.some((item) => item.severity === "error"), issues: allIssues };
+  const { adjustments: _adjustments, ...period } = input;
+  const run = { ...period, status: "draft" as const, calculatedAt: now.toISOString(), ...totals, sourceAttendanceVersion: source.sourceAttendanceVersion, revision: 1, canConfirm: isPayrollMonthClosed(input.targetMonth) && !allIssues.some((item) => item.severity === "error"), issues: allIssues };
   return { ...run, results };
 }
 
@@ -125,7 +135,12 @@ export async function confirmPayrollRun(db: FirestoreRest, uid: string, draft: A
 export async function loadPayrollRun(db: FirestoreRest, runId: string) {
   const [run, employees] = await Promise.all([db.collection("payrollRuns").doc(runId).get(), db.collection("payrollRuns").doc(runId).collection("employees").get()]);
   if (!run.exists) return null;
-  return { id: run.id, ...run.data(), results: employees.docs.map((item) => item.data() as PayrollResult) } as { id: string; targetMonth: string; paymentMonth: string; paymentDate: string; status: string; results: PayrollResult[]; [key: string]: unknown };
+  const results = employees.docs.map((item) => {
+    const result = item.data() as PayrollResult;
+    const employeeType = result.employeeType ?? (result.payrollType === "fixed" ? "fullTime" : "partTime");
+    return employeeType === "fullTime" ? { ...result, employeeType, storeId: "", storeName: "所属なし" } : { ...result, employeeType };
+  });
+  return { id: run.id, ...run.data(), results } as { id: string; targetMonth: string; paymentMonth: string; paymentDate: string; status: string; results: PayrollResult[]; [key: string]: unknown };
 }
 
 export async function loadLatestPayrollRun(db: FirestoreRest, targetMonth: string) {
@@ -135,8 +150,32 @@ export async function loadLatestPayrollRun(db: FirestoreRest, targetMonth: strin
 }
 
 export async function loadPayrollWorkspace(db: FirestoreRest, targetMonth: string) {
-  const run = await loadLatestPayrollRun(db, targetMonth);
-  return { run };
+  const [run, source] = await Promise.all([loadLatestPayrollRun(db, targetMonth), loadPayrollSource(db, targetMonth)]);
+  const fixedEmployees = source.employees.filter((employee) => resolvePayrollType(employee) === "fixed").map((employee) => ({
+    employeeId: employee.id, employeeCode: employee.employeeCode, employeeName: employee.name, storeName: "所属なし",
+    fixedBaseSalary: employee.fixedBaseSalary ?? 0, directorCompensation: employee.directorCompensation ?? 0,
+    positionAllowance: employee.positionAllowance ?? 0, businessAllowance: employee.businessAllowance ?? 0,
+    holidayAllowance: employee.holidayAllowance ?? 0, fixedOvertimeAllowance: employee.fixedOvertimeAllowance ?? 0,
+    healthInsurance: employee.healthInsurance ?? null, childSupportContribution: employee.childSupportContribution ?? null,
+    careInsurance: employee.careInsurance ?? null, employeePension: employee.employeePension ?? null,
+    employmentInsurance: employee.employmentInsurance ?? null, incomeTax: employee.incomeTax ?? null,
+    residentTax: employee.residentTax ?? null, transportationType: employee.transportationType ?? "none",
+  }));
+  return { run, fixedEmployees };
+}
+
+export async function saveFixedPayrollMaster(db: FirestoreRest, employeeId: string, values: Record<string, unknown>) {
+  const employee = await db.collection("employees").doc(employeeId).get();
+  if (!employee.exists) throw new Error("employee_not_found");
+  const data = employee.data();
+  if (resolvePayrollType({ id: employee.id, ...data } as PayrollEmployee) !== "fixed") throw new Error("not_fixed_employee");
+  const numericFields = ["fixedBaseSalary", "directorCompensation", "positionAllowance", "businessAllowance", "holidayAllowance", "fixedOvertimeAllowance", "healthInsurance", "childSupportContribution", "careInsurance", "employeePension", "employmentInsurance", "incomeTax", "residentTax"];
+  const saved = Object.fromEntries(numericFields.map((field) => [field, Math.max(0, Math.trunc(Number(values[field]) || 0))]));
+  const transportationType = ["daily", "monthly", "none"].includes(String(values.transportationType)) ? values.transportationType : "none";
+  const batch = db.batch();
+  batch.set(db.collection("payrollSettings").doc(employeeId), { ...saved, transportationType, updatedAt: new Date() });
+  await batch.commit();
+  return { employeeId, ...saved, transportationType };
 }
 
 export async function listConfirmedRuns(db: FirestoreRest) {

@@ -21,7 +21,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   const admin = await verifyAdminToken(request.headers.get("authorization"));
   if (!admin) return NextResponse.json({ error: "本部管理者権限が必要です" }, { status: 403 });
-  const input = await request.json() as { targetMonth?: string; paymentMonth?: string; paymentDate?: string };
+  const input = await request.json() as { targetMonth?: string; paymentMonth?: string; paymentDate?: string; adjustments?: Record<string, import("@/lib/payroll").FixedPayrollAdjustment> };
   if (!/^\d{4}-\d{2}$/.test(input.targetMonth ?? "") || !/^\d{4}-\d{2}$/.test(input.paymentMonth ?? "") || !/^\d{4}-\d{2}-\d{2}$/.test(input.paymentDate ?? "")) return NextResponse.json({ error: "対象月・支給月・支給日を確認してください" }, { status: 400 });
   try {
     return NextResponse.json(await createPayrollDraft(admin.db, input as Required<typeof input>));

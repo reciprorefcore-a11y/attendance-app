@@ -95,6 +95,12 @@ const emptyEmployeeForm = () => ({
   name: "", nameKana: "", employeeCode: "", pin: "", storeId: "", baseWage: "", status: "active",
   transportationCost: "", transportationType: "daily" as "daily" | "monthly" | "none",
   payrollEnabled: true,
+  clockEnabled: true,
+});
+const emptyFullTimeForm = () => ({
+  name: "", nameKana: "", employeeCode: "", status: "active", payrollEnabled: true,
+  fixedBaseSalary: "", directorCompensation: "", positionAllowance: "", businessAllowance: "", holidayAllowance: "", fixedOvertimeAllowance: "",
+  healthInsurance: "", childSupportContribution: "", careInsurance: "", employeePension: "", employmentInsurance: "", incomeTax: "", residentTax: "",
 });
 type AccountManagerRow = { uid: string; name?: string; email?: string; role: "area_manager" | "fc_manager"; storeId?: string; storeIds?: string[] };
 
@@ -414,7 +420,17 @@ export default function AdminPage() {
   );
   const [message, setMessage] = useState("");
   const [employeeEditingId, setEmployeeEditingId] = useState("");
+  const [employeeKindTab, setEmployeeKindTab] = useState<"hourly" | "fixed">("hourly");
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("tab") === "employees") setActiveTab("employees");
+      if (params.get("employeeKind") === "fixed") setEmployeeKindTab("fixed");
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
   const [employeeForm, setEmployeeForm] = useState(emptyEmployeeForm);
+  const [fullTimeForm, setFullTimeForm] = useState(emptyFullTimeForm);
   const [storeEditingId, setStoreEditingId] = useState("");
   const [storeForm, setStoreForm] = useState({
     id: "",
@@ -475,6 +491,8 @@ export default function AdminPage() {
     : isAreaManager
       ? tabs.filter((tab) => areaManagerAllowedTabs.includes(tab.id))
       : tabs.filter((tab) => managerAllowedTabs.includes(tab.id));
+  const fixedEmployeeCodes = ["0002", "0003", "0017", "0064", "0083"];
+  const registeredFixedEmployees = employees.filter((employee) => employee.isDeleted !== true && (employee.employeeType === "fullTime" || fixedEmployeeCodes.includes(String(employee.employeeCode).padStart(4, "0"))));
   const [appBaseUrl, setAppBaseUrl] = useState(
     process.env.NEXT_PUBLIC_APP_URL ??
       (typeof window !== "undefined" ? window.location.origin : ""),
@@ -989,6 +1007,10 @@ export default function AdminPage() {
       transportationCost: Number(employeeForm.transportationCost) || 0,
       transportationType: employeeForm.transportationType,
       payrollEnabled: employeeForm.payrollEnabled,
+      employeeType: "partTime" as const,
+      employmentType: "part_time" as const,
+      payrollType: "hourly" as const,
+      clockEnabled: employeeForm.clockEnabled,
     };
     try {
       if (employeeEditingId) {
@@ -1020,8 +1042,25 @@ export default function AdminPage() {
       transportationCost: String(employee.transportationCost || ""),
       transportationType: employee.transportationType ?? "daily",
       payrollEnabled: employee.payrollEnabled !== false,
+      clockEnabled: employee.clockEnabled !== false,
     });
     setActiveTab("employees");
+  };
+
+  const saveFullTimeEmployee = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!fullTimeForm.name.trim() || !fullTimeForm.employeeCode.trim()) { setEmployeeFormError("氏名と社員コードを入力してください。"); return; }
+    if (employees.some((employee) => String(employee.employeeCode).padStart(4, "0") === fullTimeForm.employeeCode.trim().padStart(4, "0"))) { setEmployeeFormError("同じ社員コードの従業員が既に登録されています。"); return; }
+    const fixedFields = ["fixedBaseSalary","directorCompensation","positionAllowance","businessAllowance","holidayAllowance","fixedOvertimeAllowance","healthInsurance","childSupportContribution","careInsurance","employeePension","employmentInsurance","incomeTax","residentTax"] as const;
+    try {
+      await addDoc(collection(db, "employees"), {
+        name: fullTimeForm.name.trim(), nameKana: fullTimeForm.nameKana.trim(), employeeCode: fullTimeForm.employeeCode.trim(),
+        employeeType: "fullTime", employmentType: "full_time", payrollType: "fixed", clockEnabled: false,
+        payrollEnabled: fullTimeForm.payrollEnabled, status: fullTimeForm.status, createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
+        ...Object.fromEntries(fixedFields.map((field) => [field, Number(fullTimeForm[field]) || 0])),
+      });
+      setFullTimeForm(emptyFullTimeForm()); setEmployeeFormError(""); setMessage("正社員を保存しました。"); await load();
+    } catch (error) { console.error("full-time employee save failed", error); setEmployeeFormError("正社員の保存に失敗しました。"); }
   };
 
   const deleteEmployee = async (employee: EmployeeRow) => {
@@ -1404,6 +1443,11 @@ export default function AdminPage() {
           baseWage: Number(row.values.baseHourlyWage) || 0,
           pin: row.values.pin.trim(),
           status: row.values.status.trim(),
+          employeeType: "partTime",
+          employmentType: "part_time",
+          payrollType: "hourly",
+          clockEnabled: true,
+          payrollEnabled: true,
         });
       }
 
@@ -1731,6 +1775,30 @@ export default function AdminPage() {
 
         {activeTab === "employees" && (
           <section style={styles.tabPanel}>
+            <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
+              <button type="button" onClick={() => setEmployeeKindTab("hourly")} style={employeeKindTab === "hourly" ? styles.button : styles.secondaryButton}>① アルバイト</button>
+              {isAdmin && <button type="button" onClick={() => setEmployeeKindTab("fixed")} style={employeeKindTab === "fixed" ? styles.button : styles.secondaryButton}>② 正社員</button>}
+            </div>
+            {isAdmin && employeeKindTab === "fixed" && (
+              <div>
+                <section style={styles.panel}>
+                  <h2 style={styles.sectionTitle}>正社員の新規登録・固定給与マスター</h2>
+                  <p style={styles.helpText}>正社員は所属店舗・PIN・時給・打刻対象を持ちません。当月調整は給与管理画面で行います。</p>
+                  <form onSubmit={saveFullTimeEmployee} style={styles.editForm}>
+                    <label style={styles.label}>氏名<input value={fullTimeForm.name} onChange={(e) => setFullTimeForm({ ...fullTimeForm, name: e.target.value })} style={styles.input}/></label>
+                    <label style={styles.label}>ふりがな<input value={fullTimeForm.nameKana} onChange={(e) => setFullTimeForm({ ...fullTimeForm, nameKana: e.target.value })} style={styles.input}/></label>
+                    <label style={styles.label}>社員コード<input value={fullTimeForm.employeeCode} onChange={(e) => setFullTimeForm({ ...fullTimeForm, employeeCode: e.target.value })} style={styles.input}/></label>
+                    <label style={styles.label}>給与対象<select value={fullTimeForm.payrollEnabled ? "yes" : "no"} onChange={(e) => setFullTimeForm({ ...fullTimeForm, payrollEnabled: e.target.value === "yes" })} style={styles.input}><option value="yes">対象</option><option value="no">対象外</option></select></label>
+                    {([['fixedBaseSalary','基本給'],['directorCompensation','役員報酬'],['positionAllowance','職能手当'],['businessAllowance','業務手当'],['holidayAllowance','休日手当'],['fixedOvertimeAllowance','固定手当'],['healthInsurance','健康保険'],['childSupportContribution','子育て支援金'],['careInsurance','介護保険'],['employeePension','厚生年金'],['employmentInsurance','雇用保険'],['incomeTax','所得税'],['residentTax','住民税']] as const).map(([field, label]) => <label key={field} style={styles.label}>{label}<input type="number" min="0" value={fullTimeForm[field]} onChange={(e) => setFullTimeForm({ ...fullTimeForm, [field]: e.target.value })} style={styles.input}/></label>)}
+                    <button type="submit" style={styles.button}>正社員として登録</button>
+                  </form>
+                </section>
+                <DataTable headers={["氏名", "ふりがな", "社員コード", "所属", "雇用区分", "給与対象", "在籍状態"]}>
+                  {registeredFixedEmployees.map((employee) => <tr key={employee.id}><td style={styles.td}>{employee.name}</td><td style={styles.td}>{employee.nameKana}</td><td style={styles.td}>{employee.employeeCode}</td><td style={styles.td}>所属なし</td><td style={styles.td}>正社員</td><td style={styles.td}>{employee.payrollEnabled === false ? "対象外" : "対象"}</td><td style={styles.td}>{employee.status === "active" ? "在籍" : "退職・休職"}</td></tr>)}
+                </DataTable>
+              </div>
+            )}
+            <div style={{ display: employeeKindTab === "hourly" ? "block" : "none" }}>
             <div style={styles.panelHeader}>
               <h2 style={styles.sectionTitle}>従業員管理</h2>
               <div style={styles.inlineActions}>
@@ -1817,6 +1885,11 @@ export default function AdminPage() {
                 <select value={employeeForm.payrollEnabled ? "yes" : "no"} onChange={(e) => setEmployeeForm({ ...employeeForm, payrollEnabled: e.target.value === "yes" })} style={styles.input}>
                   <option value="yes">対象</option>
                   <option value="no">対象外</option>
+                </select>
+              </label>
+              <label style={styles.label}>打刻対象
+                <select value={employeeForm.clockEnabled ? "yes" : "no"} onChange={(e) => setEmployeeForm({ ...employeeForm, clockEnabled: e.target.value === "yes" })} style={styles.input}>
+                  <option value="yes">対象</option><option value="no">対象外</option>
                 </select>
               </label>
               <div style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 8 }}>
@@ -1983,6 +2056,7 @@ export default function AdminPage() {
                 </tr>
               ))}
             </DataTable>
+            </div>
           </section>
         )}
 

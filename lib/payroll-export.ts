@@ -5,6 +5,8 @@ import { readFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import type { PayrollResult } from "./payroll";
+import { sortPayrollResults } from "./payroll-order.ts";
+import { createZip } from "./zip.ts";
 
 const money = (value: number) => Math.trunc(value);
 const hm = (minutes: number) => `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, "0")}`;
@@ -21,15 +23,17 @@ const periodLabel = (targetMonth: string, paymentDate: string) => {
 };
 
 export function createPayrollWorkbook(results: PayrollResult[], paymentMonth: string, draft = false, targetMonth = paymentMonth, paymentDate = `${paymentMonth}-25`) {
+  results = sortPayrollResults(results);
   const workbook = XLSX.read(readFileSync(path.join(process.cwd(), "templates", "payroll", "payroll-summary-template.xlsx")), { type: "buffer", cellStyles: true, cellFormula: true });
   const templateName = workbook.SheetNames[0];
   const templateSheet = workbook.Sheets[templateName];
   const allGroups = [
-    { name: "本部", items: results.filter((x) => x.payrollType === "hourly" && !x.storeName.includes("野毛")), start: 2, end: 26, subtotal: 27 },
-    { name: "野毛", items: results.filter((x) => x.payrollType === "hourly" && x.storeName.includes("野毛")), start: 28, end: 31, subtotal: 32 },
-    { name: "幹部", items: results.filter((x) => x.payrollType === "fixed"), start: 33, end: 37, subtotal: 38 },
+    { name: "1～25", start: 2, end: 26, subtotal: 27 },
+    { name: "26～29", start: 28, end: 31, subtotal: 32 },
+    { name: "30～34", start: 33, end: 37, subtotal: 38 },
   ];
-  const pageCount = Math.max(1, ...allGroups.map((group) => Math.ceil(group.items.length / (group.end - group.start + 1))));
+  const pageSize = allGroups.reduce((sum, group) => sum + group.end - group.start + 1, 0);
+  const pageCount = Math.max(1, Math.ceil(results.length / pageSize));
   const rowValues: Record<number, (x: PayrollResult) => number> = {
     4:x=>x.earnings.baseSalary,5:x=>x.earnings.directorCompensation,6:x=>x.earnings.positionAllowance,7:x=>x.earnings.fixedOvertimeAllowance,8:x=>x.earnings.holidayAllowance,9:x=>x.earnings.businessAllowance,10:x=>x.earnings.transportation,11:x=>x.earnings.overtimePremium,12:x=>x.earnings.nightPremium,13:x=>x.earnings.absenceDeduction,14:x=>x.earnings.lateEarlyDeduction,15:x=>x.earnings.taxableTotal,16:x=>x.earnings.nonTaxableTotal,17:x=>x.earnings.grossTotal,18:x=>x.deductions.healthInsurance,19:x=>x.deductions.childSupportContribution,20:x=>x.deductions.careInsurance,21:x=>x.deductions.employeePension,22:x=>x.deductions.employmentInsurance,23:x=>x.deductions.socialInsuranceTotal,24:x=>x.deductions.taxableIncome,25:x=>x.deductions.incomeTax,26:x=>x.deductions.residentTax,27:x=>x.deductions.yearEndAdjustment,28:x=>x.deductions.otherDeduction,29:x=>x.deductions.advanceExpense,30:x=>x.deductions.total,31:()=>0,32:x=>x.netPay,33:x=>x.bankTransfer,34:x=>x.cashPayment,36:x=>x.attendance.attendanceDays,37:x=>x.attendance.absenceDays,38:x=>x.attendance.paidLeaveDays,39:()=>0,40:()=>0,41:x=>x.attendance.workMinutes/60,42:()=>0,43:x=>x.attendance.overtimeMinutes/60,44:x=>x.attendance.nightMinutes/60,45:x=>x.attendance.helpMinutes/60,
   };
@@ -37,9 +41,12 @@ export function createPayrollWorkbook(results: PayrollResult[], paymentMonth: st
   workbook.Sheets = {};
   for (let page = 0; page < pageCount; page++) {
     const sheet = structuredClone(templateSheet);
+    let pageOffset = page * pageSize;
     const groups = allGroups.map((group) => {
       const capacity = group.end - group.start + 1;
-      return { ...group, items: group.items.slice(page * capacity, (page + 1) * capacity) };
+      const items = results.slice(pageOffset, pageOffset + capacity);
+      pageOffset += capacity;
+      return { ...group, items };
     });
     sheet.A1 = { ...(sheet.A1 ?? {}), t: "s", v: `${draft ? "【試算】" : ""}FUBLEV Group㈱　R${Number(paymentMonth.slice(0,4))-2018}.${Number(paymentMonth.slice(5))}月支給${pageCount > 1 ? `（${page + 1}/${pageCount}）` : ""}　` };
     for (const group of groups) {
@@ -64,11 +71,7 @@ export function createPayrollWorkbook(results: PayrollResult[], paymentMonth: st
 }
 
 export function createTransferWorkbook(results: PayrollResult[], paymentMonth: string, excludeZero = true, draft = false, targetMonth = paymentMonth, paymentDate = `${paymentMonth}-25`) {
-  const sorted = results.filter((item) => item.paymentMethod === "bank" && (!excludeZero || item.bankTransfer !== 0)).sort((a, b) => {
-    const ao = a.payrollTransferOrder ?? Number.MAX_SAFE_INTEGER;
-    const bo = b.payrollTransferOrder ?? Number.MAX_SAFE_INTEGER;
-    return ao - bo || a.employeeCode.localeCompare(b.employeeCode, "ja", { numeric: true });
-  });
+  const sorted = sortPayrollResults(results).filter((item) => item.paymentMethod === "bank" && (!excludeZero || item.bankTransfer !== 0));
   const workbook = XLSX.read(readFileSync(path.join(process.cwd(), "templates", "payroll", "bank-transfer-template.xlsx")), { type: "buffer", cellStyles: true, cellFormula: true });
   const sheet = workbook.Sheets[workbook.SheetNames[0]]; sheet.A1={...(sheet.A1??{}),t:"s",v:`${paymentLabel(paymentMonth)}支給　給与振込一覧`};
   const templateStyle=[sheet.A3,sheet.B3,sheet.B3,sheet.C3];
@@ -82,40 +85,66 @@ export function createTransferWorkbook(results: PayrollResult[], paymentMonth: s
 }
 
 async function loadJapaneseFont() {
-  return readFile(path.join(process.cwd(), "node_modules", "@fontsource", "noto-sans-jp", "files", "noto-sans-jp-japanese-400-normal.woff"));
+  return readFile(path.join(process.cwd(), "public", "fonts", "ipaexg.ttf"));
 }
 
 export async function createPayslipPdf(result: PayrollResult, targetMonth: string, paymentDate: string, draft = false) {
   const pdf = await PDFDocument.create();
   pdf.registerFontkit(fontkit);
   const font = await pdf.embedFont(await loadJapaneseFont(), { subset: true });
-  const page = pdf.addPage([595.28, 419.53]);
-  const blue = rgb(0.10, 0.48, 0.72), dark = rgb(0.12, 0.18, 0.25), light = rgb(0.93, 0.97, 1);
-  page.drawRectangle({ x: 14, y: 14, width: 567, height: 391, borderColor: blue, borderWidth: 1.2 });
-  page.drawText("給与支給明細書", { x: 24, y: 382, size: 17, font, color: blue });
-  if (draft) page.drawText("試算", { x: 525, y: 382, size: 13, font, color: rgb(0.75, 0.12, 0.12) });
-  page.drawText(`${result.employeeCode}  ${result.employeeName} 様`, { x: 24, y: 358, size: 10, font, color: dark });
-  page.drawText(`所属：${result.storeName}`, { x: 230, y: 358, size: 9, font, color: dark });
-  page.drawText(periodLabel(targetMonth, paymentDate), { x: 350, y: 358, size: 6.5, font, color: dark });
-  const sections: { title: string; x: number; y: number; width: number; rows: [string, string][] }[] = [
-    { title: "勤怠", x: 24, y: 330, width: 130, rows: [["就業日数", String(result.attendance.workingDays)], ["出勤日数", String(result.attendance.attendanceDays)], ["欠勤日数", String(result.attendance.absenceDays)], ["有休日数", String(result.attendance.paidLeaveDays)], ["労働時間", hm(result.attendance.workMinutes)], ["普通残業時間", hm(result.attendance.overtimeMinutes)], ["深夜時間", hm(result.attendance.nightMinutes)], ["休出時間", hm(result.attendance.holidayMinutes)], ["休憩時間", hm(result.attendance.breakMinutes)]] },
-    { title: "支給", x: 160, y: 330, width: 140, rows: [["基本給", money(result.earnings.baseSalary).toLocaleString()], ["普通残業手当", money(result.earnings.overtimePremium).toLocaleString()], ["深夜手当", money(result.earnings.nightPremium).toLocaleString()], ["休日手当", money(result.earnings.holidayAllowance).toLocaleString()], ["非課税通勤費", money(result.earnings.transportation).toLocaleString()], ["その他支給", money(result.earnings.otherTaxable + result.earnings.otherNonTaxable).toLocaleString()], ["支給合計", money(result.earnings.grossTotal).toLocaleString()]] },
-    { title: "控除", x: 306, y: 330, width: 125, rows: [["健康保険", money(result.deductions.healthInsurance).toLocaleString()], ["介護保険", money(result.deductions.careInsurance).toLocaleString()], ["厚生年金", money(result.deductions.employeePension).toLocaleString()], ["雇用保険", money(result.deductions.employmentInsurance).toLocaleString()], ["所得税", money(result.deductions.incomeTax).toLocaleString()], ["住民税", money(result.deductions.residentTax).toLocaleString()], ["控除合計", money(result.deductions.total).toLocaleString()]] },
-    { title: "その他", x: 437, y: 330, width: 134, rows: [["課税支給額", money(result.earnings.taxableTotal).toLocaleString()], ["非課税支給額", money(result.earnings.nonTaxableTotal).toLocaleString()], ["振込支給額", money(result.bankTransfer).toLocaleString()], ["現金支給額", money(result.cashPayment).toLocaleString()]] },
+  const page = pdf.addPage([841.89, 595.28]);
+  const blue = rgb(0.12, 0.47, 0.72), dark = rgb(0.08, 0.12, 0.18), pale = rgb(0.94, 0.97, 0.99), white = rgb(1, 1, 1);
+  const [payYear, payMonth, payDay] = paymentDate.split("-").map(Number);
+  const draw = (text: string, x: number, y: number, size = 9, color = dark) => page.drawText(text, { x, y, size, font, color });
+  const drawRight = (text: string, right: number, y: number, size = 9, color = dark) => draw(text, right - font.widthOfTextAtSize(text, size), y, size, color);
+  page.drawRectangle({ x: 28, y: 28, width: 785.89, height: 539.28, borderColor: blue, borderWidth: 1.4 });
+  draw(`${draft ? "【試算】" : ""}令和${payYear - 2018}年${payMonth}月給与　明細書`, 44, 535, 18, blue);
+  draw("FUBLEV Group株式会社", 44, 509, 9);
+  draw(`所属　${result.storeName}`, 44, 487, 9);
+  draw(`個人番号　${result.employeeCode}　　${result.employeeName} 様`, 44, 465, 9);
+  drawRight(`支給日　令和${payYear - 2018}年${payMonth}月${payDay}日`, 797, 535, 9);
+  const yenText = (value: number) => `${money(value).toLocaleString()}円`;
+  const sections: { title: string; rows: [string, string][] }[] = [
+    { title: "勤怠", rows: [["就業日数", `${result.attendance.workingDays}日`], ["出勤日数", `${result.attendance.attendanceDays}日`], ["欠勤日数", `${result.attendance.absenceDays}日`], ["有休日数", `${result.attendance.paidLeaveDays}日`], ["労働時間", hm(result.attendance.workMinutes)], ["普通残業時間", hm(result.attendance.overtimeMinutes)], ["深夜時間", hm(result.attendance.nightMinutes)], ["休出時間", hm(result.attendance.holidayMinutes)], ["休憩時間", hm(result.attendance.breakMinutes)]] },
+    { title: "支給", rows: [["基本給", yenText(result.earnings.baseSalary)], ["役員報酬", yenText(result.earnings.directorCompensation)], ["職能手当", yenText(result.earnings.positionAllowance)], ["業務手当", yenText(result.earnings.businessAllowance)], ["休日手当", yenText(result.earnings.holidayAllowance)], ["普通残業手当", yenText(result.earnings.overtimePremium)], ["深夜手当", yenText(result.earnings.nightPremium)], ["非課税通勤費", yenText(result.earnings.transportation)], ["支給合計", yenText(result.earnings.grossTotal)]] },
+    { title: "控除", rows: [["健康保険", yenText(result.deductions.healthInsurance)], ["介護保険", yenText(result.deductions.careInsurance)], ["厚生年金", yenText(result.deductions.employeePension)], ["雇用保険", yenText(result.deductions.employmentInsurance)], ["所得税", yenText(result.deductions.incomeTax)], ["住民税", yenText(result.deductions.residentTax)], ["その他控除", yenText(result.deductions.otherDeduction)], ["立替経費", yenText(result.deductions.advanceExpense)], ["控除合計", yenText(result.deductions.total)]] },
+    { title: "その他", rows: [["課税支給額", yenText(result.earnings.taxableTotal)], ["非課税支給額", yenText(result.earnings.nonTaxableTotal)], ["振込支給額", yenText(result.bankTransfer)], ["現金支給額", yenText(result.cashPayment)]] },
   ];
-  for (const section of sections) {
-    page.drawRectangle({ x: section.x, y: section.y, width: section.width, height: 20, color: blue });
-    page.drawText(section.title, { x: section.x + 6, y: section.y + 6, size: 9, font, color: rgb(1, 1, 1) });
-    section.rows.forEach(([label, value], index) => {
-      const y = section.y - 17 - index * 19;
-      if (index % 2 === 0) page.drawRectangle({ x: section.x, y: y - 3, width: section.width, height: 18, color: light });
-      page.drawText(label, { x: section.x + 5, y, size: 7.5, font, color: dark });
-      page.drawText(value, { x: section.x + section.width - 7 - font.widthOfTextAtSize(value, 8), y, size: 8, font, color: dark });
+  const tableX = 44, tableY = 420, tableWidth = 184, gap = 9, rowHeight = 28, labelWidth = 92;
+  sections.forEach((section, sectionIndex) => {
+    const x = tableX + sectionIndex * (tableWidth + gap);
+    page.drawRectangle({ x, y: tableY, width: tableWidth, height: 27, color: blue });
+    draw(section.title, x + 8, tableY + 8, 10, white);
+    section.rows.forEach(([label, value], rowIndex) => {
+      const y = tableY - (rowIndex + 1) * rowHeight;
+      page.drawRectangle({ x, y, width: tableWidth, height: rowHeight, color: rowIndex % 2 === 0 ? pale : white, borderColor: blue, borderWidth: 0.55 });
+      page.drawLine({ start: { x: x + labelWidth, y }, end: { x: x + labelWidth, y: y + rowHeight }, color: blue, thickness: 0.55 });
+      draw(label, x + 7, y + 9, 8);
+      drawRight(value, x + tableWidth - 7, y + 9, 8.5);
     });
-  }
-  page.drawRectangle({ x: 405, y: 28, width: 166, height: 54, color: blue });
-  page.drawText("差引支給額", { x: 416, y: 62, size: 9, font, color: rgb(1, 1, 1) });
-  const net = `${money(result.netPay).toLocaleString()} 円`;
-  page.drawText(net, { x: 558 - font.widthOfTextAtSize(net, 18), y: 37, size: 18, font, color: rgb(1, 1, 1) });
+  });
+  draw(periodLabel(targetMonth, paymentDate), 44, 83, 8);
+  page.drawRectangle({ x: 608, y: 58, width: 189, height: 58, borderColor: blue, borderWidth: 1.2, color: pale });
+  draw("差引支給額", 620, 92, 9, blue);
+  drawRight(yenText(result.netPay), 785, 70, 18, dark);
   return Buffer.from(await pdf.save());
+}
+
+export function selectStorePayslipResults(results: PayrollResult[], storeId: string) {
+  return results.filter((result) => result.employeeType === "partTime" && result.storeId === storeId);
+}
+
+export function selectFullTimePayslipResults(results: PayrollResult[]) {
+  return results.filter((result) => result.employeeType === "fullTime");
+}
+
+const safeFilename = (value: string) => value.replace(/[\\/:*?"<>|]/g, "_");
+
+export async function createPayslipZip(results: PayrollResult[], targetMonth: string, paymentMonth: string, paymentDate: string) {
+  const label = `${Number(paymentMonth.slice(0, 4))}年${String(Number(paymentMonth.slice(5))).padStart(2, "0")}月`;
+  const entries = await Promise.all(results.map(async (result) => ({
+    name: `${safeFilename(result.employeeCode)}_${safeFilename(result.employeeName)}_${label}給与明細.pdf`,
+    data: await createPayslipPdf(result, targetMonth, paymentDate, false),
+  })));
+  return createZip(entries);
 }

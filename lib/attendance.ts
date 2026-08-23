@@ -1,6 +1,7 @@
 import type { Timestamp } from "firebase/firestore";
 
 export type EmploymentType = "part_time" | "full_time";
+export type EmployeeType = "partTime" | "fullTime";
 export type EmployeeStatus = "pending" | "active" | "rejected" | "inactive";
 export type ClockType = "clock_in" | "break_start" | "break_end" | "clock_out";
 export type LegacyClockType = "clockIn" | "breakStart" | "breakEnd" | "clockOut";
@@ -32,6 +33,8 @@ export type Employee = {
   storeId: string;
   storeName: string;
   employmentType: EmploymentType;
+  employeeType?: EmployeeType;
+  clockEnabled?: boolean;
   status: EmployeeStatus;
   createdByStoreId: string;
   approvedBy: string | null;

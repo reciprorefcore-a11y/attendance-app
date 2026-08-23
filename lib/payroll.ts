@@ -8,8 +8,9 @@ export type PayrollEmployee = {
   id: string;
   employeeCode: string;
   name: string;
-  storeId: string;
+  storeId?: string;
   storeName?: string;
+  employeeType?: "partTime" | "fullTime";
   payrollEnabled?: boolean;
   payrollType?: PayrollType;
   employmentType?: string;
@@ -78,12 +79,25 @@ export type PayrollIssue = {
   message: string;
 };
 
+export type FixedPayrollAdjustment = {
+  temporaryAttendanceCount?: number;
+  overtimeMinutes?: number;
+  overtimeAllowanceOverride?: number | null;
+  overtimeReason?: string;
+  transportation?: number;
+  advanceExpense?: number;
+  otherTemporaryPayment?: number;
+  otherDeduction?: number;
+  note?: string;
+};
+
 export type PayrollResult = {
   employeeId: string;
   employeeCode: string;
   employeeName: string;
   storeId: string;
   storeName: string;
+  employeeType: "partTime" | "fullTime";
   payrollType: PayrollType;
   paymentMethod: PaymentMethod;
   payrollTransferOrder: number | null;
@@ -140,12 +154,15 @@ export type PayrollResult = {
   dependentCountSnapshot: number;
   issues: PayrollIssue[];
   attendanceDaysDetail: PayrollAttendanceDay[];
+  fixedAdjustment?: FixedPayrollAdjustment & { automaticOvertimeAllowance: number };
 };
 
 const yen = (value: unknown) => Math.max(0, Math.trunc(Number(value) || 0));
-const FIXED_EMPLOYEE_CODES = new Set(["0003", "0064", "0083"]);
+const FIXED_EMPLOYEE_CODES = new Set(["0002", "0003", "0017", "0064", "0083"]);
 
 export function resolvePayrollType(employee: PayrollEmployee): PayrollType {
+  if (employee.employeeType === "fullTime") return "fixed";
+  if (employee.employeeType === "partTime") return "hourly";
   if (FIXED_EMPLOYEE_CODES.has(String(employee.employeeCode).padStart(4, "0")) || employee.payrollType === "fixed") return "fixed";
   return "hourly";
 }
@@ -183,8 +200,11 @@ export function validatePayrollInput(employees: PayrollEmployee[], attendance: P
     const hourlyWageRequired = employee.payrollType === "hourly" || employee.employmentType === "hourly" || employee.employmentType === "part_time";
     if (type === "hourly" && hourlyWageRequired && !yen(employee.hourlyWage ?? employee.baseWage)) issues.push({ severity: "error", code: "missing_hourly_wage", employeeId: employee.id, message: `${employeeLabel(employee)}：時給が未設定です` });
     if (type === "fixed" && employee.previousConfirmedPayrollMissing) issues.push({ severity: "error", code: "missing_previous_fixed_payroll", employeeId: employee.id, message: `${employeeLabel(employee)}：幹部の前月確定値または給与テンプレート固定値がありません` });
-    if (employee.healthInsurance == null || employee.employeePension == null || employee.employmentInsurance == null) issues.push({ severity: "warning", code: "missing_social_insurance_setting", employeeId: employee.id, message: "社会保険設定に未入力項目があります" });
-    if (!employee.transportationType) issues.push({ severity: "warning", code: "missing_transportation_setting", employeeId: employee.id, message: "交通費区分が未設定です" });
+    if (type === "fixed") {
+      const missingInsurance = [["健康保険", employee.healthInsurance], ["子育て支援金", employee.childSupportContribution], ["介護保険", employee.careInsurance], ["厚生年金", employee.employeePension], ["雇用保険", employee.employmentInsurance]].filter(([, value]) => value == null).map(([label]) => label);
+      if (missingInsurance.length) issues.push({ severity: "warning", code: "missing_social_insurance_setting", employeeId: employee.id, message: `${employeeLabel(employee)}：未入力の社会保険項目（${missingInsurance.join("、")}）` });
+      if (!employee.transportationType) issues.push({ severity: "warning", code: "missing_transportation_setting", employeeId: employee.id, message: `${employeeLabel(employee)}：交通費区分が未設定です` });
+    }
   }
   for (const day of attendance.filter((item) => item.date.startsWith(targetMonth) && item.kind !== "total")) {
     if (day.confirmed !== true) issues.push({ severity: "error", code: "attendance_unconfirmed", employeeId: day.employeeId, message: `${day.date}の勤怠が未確定です` });
@@ -248,7 +268,7 @@ export function calculatePayrollEmployee(employee: PayrollEmployee, allAttendanc
   const paymentMethod = employee.paymentMethod ?? "bank";
   return {
     employeeId: employee.id, employeeCode: employee.employeeCode, employeeName: employee.name,
-    storeId: employee.storeId, storeName: employee.storeName ?? employee.storeId, payrollType, paymentMethod,
+    storeId: payrollType === "fixed" ? "" : (employee.storeId ?? ""), storeName: payrollType === "fixed" ? "所属なし" : (employee.storeName ?? employee.storeId ?? ""), employeeType: payrollType === "fixed" ? "fullTime" : "partTime", payrollType, paymentMethod,
     payrollTransferOrder: employee.payrollTransferOrder ?? null,
     attendance: { workingDays: yen(employee.workingDays), attendanceDays, absenceDays: yen(employee.absenceDays), paidLeaveDays: yen(employee.paidLeaveDays), workMinutes: totals.work, overtimeMinutes: totals.overtime, nightMinutes: totals.night, holidayMinutes: 0, breakMinutes: totals.break, helpMinutes: totals.help },
     earnings: { baseSalary, directorCompensation: yen(employee.directorCompensation), positionAllowance: yen(employee.positionAllowance), fixedOvertimeAllowance: yen(employee.fixedOvertimeAllowance), holidayAllowance: yen(employee.holidayAllowance), businessAllowance: yen(employee.businessAllowance), overtimePremium, nightPremium, otherTaxable: yen(employee.otherAllowance), absenceDeduction, lateEarlyDeduction, taxableTotal, transportation, otherNonTaxable: yen(employee.otherNonTaxableAllowance), nonTaxableTotal, grossTotal },
@@ -262,6 +282,34 @@ export function calculatePayrollEmployee(employee: PayrollEmployee, allAttendanc
 export function calculatePayroll(employees: PayrollEmployee[], attendance: PayrollAttendanceDay[]) {
   const unique = new Map(employees.filter((item) => item.payrollEnabled !== false).map((item) => [item.id, item]));
   return [...unique.values()].map((employee) => calculatePayrollEmployee(employee, attendance));
+}
+
+export function applyFixedPayrollAdjustment(result: PayrollResult, adjustment: FixedPayrollAdjustment): PayrollResult {
+  if (result.payrollType !== "fixed") return result;
+  const overtimeMinutes = Math.max(0, Math.trunc(Number(adjustment.overtimeMinutes) || 0));
+  const automaticOvertimeAllowance = Math.floor(overtimeMinutes * (result.earnings.baseSalary / 160) * 1.25 / 60);
+  const overtimePremium = adjustment.overtimeAllowanceOverride == null ? automaticOvertimeAllowance : yen(adjustment.overtimeAllowanceOverride);
+  const transportation = yen(adjustment.transportation);
+  const otherTaxable = yen(adjustment.otherTemporaryPayment);
+  const advanceExpense = yen(adjustment.advanceExpense);
+  const otherDeduction = yen(adjustment.otherDeduction);
+  const earnings = { ...result.earnings, overtimePremium, transportation, otherTaxable };
+  earnings.taxableTotal = earnings.baseSalary + earnings.directorCompensation + earnings.positionAllowance + earnings.fixedOvertimeAllowance + earnings.holidayAllowance + earnings.businessAllowance + earnings.overtimePremium + earnings.nightPremium + earnings.otherTaxable - earnings.absenceDeduction - earnings.lateEarlyDeduction;
+  earnings.nonTaxableTotal = earnings.transportation + earnings.otherNonTaxable;
+  earnings.grossTotal = earnings.taxableTotal + earnings.nonTaxableTotal;
+  const deductions = { ...result.deductions, advanceExpense, otherDeduction };
+  deductions.total = deductions.socialInsuranceTotal + deductions.incomeTax + deductions.residentTax + deductions.yearEndAdjustment + deductions.otherDeduction + deductions.advanceExpense;
+  const netPay = earnings.grossTotal - deductions.total;
+  return {
+    ...result,
+    attendance: { ...result.attendance, overtimeMinutes },
+    earnings,
+    deductions,
+    netPay,
+    bankTransfer: result.paymentMethod === "bank" ? netPay : 0,
+    cashPayment: result.paymentMethod === "cash" ? netPay : 0,
+    fixedAdjustment: { ...adjustment, overtimeMinutes, automaticOvertimeAllowance },
+  };
 }
 
 export function summarizePayroll(results: PayrollResult[]) {
