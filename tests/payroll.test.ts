@@ -135,7 +135,7 @@ test("中村鏡太郎の当月調整は画面・両Excel・明細PDFで同じ再
   assert.equal(adjusted.earnings.transportation, 1000);
   assert.equal(adjusted.deductions.advanceExpense, 3000);
   assert.equal(adjusted.earnings.grossTotal, 204125);
-  assert.equal(adjusted.netPay, 196785);
+  assert.equal(adjusted.netPay, 196645);
   const payrollBook = XLSX.read(createPayrollWorkbook([adjusted], "2026-08"));
   const payrollSheet = payrollBook.Sheets[payrollBook.SheetNames[0]];
   assert.equal(payrollSheet[XLSX.utils.encode_cell({ r: 11, c: 2 })].v, 3125);
@@ -171,6 +171,128 @@ test("給与Excelと振込Excelの人数・合計が一致する", () => {
   const payroll = XLSX.read(createPayrollWorkbook(results, "2026-08")); const transfer = XLSX.read(createTransferWorkbook(results, "2026-08"));
   assert.equal(payroll.SheetNames[0], "FUBLEVG㈱"); const sheet = transfer.Sheets[transfer.SheetNames[0]], rows = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as unknown[][];
   assert.equal(rows.length, 5); assert.deepEqual(rows[1], ["No.", "社員コード", "氏名", "振込金額"]); assert.deepEqual(rows[2]?.slice(0, 4), [1, "1001", "従業員1001", 1000]); assert.equal(rows.at(-1)?.[0], "振込合計（2名）"); assert.equal(sheet.D5.f, "SUM(D3:D4)");
+});
+
+test("小林彗太へその他臨時支給800,000円を設定すると所得税が再計算され差引支給額が単純に800,000円増にならない", async () => {
+  // 2026-08 ドラフト想定。健康保険・厚生年金・雇用保険・住民税を含む実態に近いマスターデータを使う。
+  const kobayashi = employee("kobayashi", {
+    employeeCode: "0064", name: "小林彗太", payrollType: "fixed", fixedBaseSalary: 183000, hourlyWage: 0,
+    monthlyTransportation: 10110,
+    healthInsurance: 13888, childSupportContribution: 322, employeePension: 25620, employmentInsurance: 1580,
+    residentTax: 10000,
+  });
+  const base = calculatePayrollEmployee(kobayashi, []);
+  assert.equal(base.earnings.otherTaxable, 0);
+  assert.equal(base.earnings.transportation, 10110, "ベース交通費");
+  assert.equal(base.deductions.socialInsuranceTotal, 41410, "社会保険合計");
+  assert.equal(base.deductions.taxableIncome, 141590, "ベース課税対象額");
+  assert.equal(base.deductions.incomeTax, 2010, "ベース所得税");
+  assert.equal(base.netPay, 139690, "ベース差引支給額");
+
+  // ── 調整適用（transportation 未指定 = ベース値を引き継ぐ） ──
+  const adjusted = applyFixedPayrollAdjustment(base, { otherTemporaryPayment: 800000 });
+
+  // ① その他課税支給・課税支給合計・支給合計
+  assert.equal(adjusted.earnings.otherTaxable, 800000, "その他課税支給");
+  assert.equal(adjusted.earnings.taxableTotal, base.earnings.taxableTotal + 800000, "課税支給合計が800,000増");
+  assert.equal(adjusted.earnings.grossTotal, 993110, "支給合計");
+
+  // ② 交通費はadjustment未指定時にベース値を引き継ぐ（0上書きバグなし）
+  assert.equal(adjusted.earnings.transportation, 10110, "交通費は0にならない");
+
+  // ③ 課税対象額が再計算される（taxableTotal - 社会保険合計）
+  assert.equal(adjusted.deductions.taxableIncome, 941590, "課税対象額が再計算");
+
+  // ④ 所得税が再計算される（941,590円 → 令和8年分月額表 電算機計算の特例 甲欄 扶養0人）
+  //    別表第一：empDeduct=162,500 / 別表第三：48,334 / B=730,756 / 別表第四(23.483%)：117,490
+  assert.equal(adjusted.deductions.incomeTax, 117490, "所得税（令和8年分月額表 算式・甲欄・扶養0人）");
+  assert.notEqual(adjusted.deductions.incomeTax, base.deductions.incomeTax, "所得税がベースの2,010円から変化");
+
+  // ⑤ 控除合計 = 社保41,410 + 所得税117,490 + 住民税10,000
+  assert.equal(adjusted.deductions.total, 168900, "控除合計");
+
+  // ⑥ 差引支給額 = 支給合計993,110 - 控除合計168,900
+  assert.equal(adjusted.netPay, 824210, "差引支給額");
+  assert.equal(adjusted.netPay, adjusted.earnings.grossTotal - adjusted.deductions.total, "差引支給額の整合性");
+  assert.notEqual(adjusted.netPay, base.netPay + 800000, "差引支給額は単純に800,000円増ではない");
+
+  // ⑦ summarizePayroll も同じ run から計算する
+  const totals = summarizePayroll([adjusted]);
+  assert.equal(totals.grossTotal, adjusted.earnings.grossTotal, "集計支給合計");
+  assert.equal(totals.netTotal, adjusted.netPay, "集計差引支給額");
+
+  // ④-b その他課税支給は賞与（賞与表）ではなく月次給与（月額表）に算入されること
+  //      fixedAdjustment.otherTemporaryPayment が earnings.otherTaxable に反映されているのが証拠
+  assert.equal(adjusted.fixedAdjustment?.otherTemporaryPayment, 800000, "調整フィールド otherTemporaryPayment");
+  assert.equal(adjusted.earnings.otherTaxable, adjusted.fixedAdjustment?.otherTemporaryPayment, "otherTaxable = otherTemporaryPayment（月額表源泉徴収）");
+
+  // ⑧ 給与Excel：その他課税支給・支給合計・所得税・差引支給額が一致
+  const payrollBook = XLSX.read(createPayrollWorkbook([adjusted], "2026-09", true, "2026-08", "2026-09-25"));
+  const payrollSheet = payrollBook.Sheets[payrollBook.SheetNames[0]];
+  assert.equal(payrollSheet[XLSX.utils.encode_cell({ r: 31, c: 2 })].v, 800000, "給与Excel その他課税支給");
+  assert.equal(payrollSheet[XLSX.utils.encode_cell({ r: 17, c: 2 })].v, 993110, "給与Excel 支給合計");
+  assert.equal(payrollSheet[XLSX.utils.encode_cell({ r: 25, c: 2 })].v, 117490, "給与Excel 所得税");
+  assert.equal(payrollSheet[XLSX.utils.encode_cell({ r: 32, c: 2 })].v, 824210, "給与Excel 差引支給額");
+
+  // ⑨ 振込一覧：差引支給額 824,210円
+  const transferBook = XLSX.read(createTransferWorkbook([adjusted], "2026-09"));
+  const transferSheet = transferBook.Sheets[transferBook.SheetNames[0]];
+  assert.equal(transferSheet.D3.v, 824210, "振込一覧 振込金額 824,210円");
+
+  // ⑩ 給与明細 PDF が生成される
+  const pdf = await createPayslipPdf(adjusted, "2026-08", "2026-09-25");
+  assert.ok(pdf.length > 5000, "PDFサイズ");
+  assert.match(pdf.toString("latin1"), /PDF-/, "PDFヘッダー");
+
+  // ⑪ 調整を削除（空オブジェクト）するとベース値に完全復帰する
+  const reverted = applyFixedPayrollAdjustment(base, {});
+  assert.equal(reverted.earnings.otherTaxable, 0, "復帰後 その他課税支給 0");
+  assert.equal(reverted.deductions.taxableIncome, base.deductions.taxableIncome, "復帰後 課税対象額");
+  assert.equal(reverted.deductions.incomeTax, base.deductions.incomeTax, "復帰後 所得税 2,010円");
+  assert.equal(reverted.deductions.total, base.deductions.total, "復帰後 控除合計");
+  assert.equal(reverted.netPay, base.netPay, "復帰後 差引支給額 139,690円");
+
+  // ⑫ 調整の二重加算が起きない：adjusted に同じ調整を再適用しても数値が変わらない
+  const reapplied = applyFixedPayrollAdjustment(adjusted, { otherTemporaryPayment: 800000 });
+  assert.equal(reapplied.earnings.otherTaxable, adjusted.earnings.otherTaxable, "二重加算なし: otherTaxable");
+  assert.equal(reapplied.deductions.incomeTax, adjusted.deductions.incomeTax, "二重加算なし: 所得税");
+  assert.equal(reapplied.netPay, adjusted.netPay, "二重加算なし: 差引支給額");
+});
+
+test("令和8年分月額表 甲欄 電算機計算の特例：境界値と高額給与の回帰テスト", () => {
+  // 表の最終行（A=738,500）は算式と一致する
+  assert.equal(calculateWithholdingTax2026(738_500, "kou", 0), 71_380, "A=738,500 は表と算式が一致");
+  // 740,000円（表の上限）では算式を使う（乙欄ではない）
+  assert.ok(calculateWithholdingTax2026(740_000, "kou", 0) > 0, "A=740,000 甲欄は0にならない");
+  // 790,000円 甲欄 扶養0人 → 20.42%ブラケット
+  // empDeduct=162,500, B=579,166, raw=579,166×0.2042-36,374=81,891.70 → 81,890
+  assert.equal(calculateWithholdingTax2026(790_000, "kou", 0), 81_890, "A=790,000 甲欄 扶養0人");
+  // 941,590円 甲欄 扶養0人 → 23.483%ブラケット（小林彗太と同じ条件）
+  assert.equal(calculateWithholdingTax2026(941_590, "kou", 0), 117_490, "A=941,590 甲欄 扶養0人");
+  // 扶養1人がいる場合（B が 31,667円下がる）
+  // B=730,756-31,667=699,089, raw=699,089×0.23483-54,114=110,053.07 → 110,050
+  assert.equal(calculateWithholdingTax2026(941_590, "kou", 1), 110_050, "A=941,590 甲欄 扶養1人");
+  // 乙欄 740,000円以上は未実装のため0のまま
+  assert.equal(calculateWithholdingTax2026(941_590, "otsu", 0), 0, "A=941,590 乙欄は未実装で0");
+});
+
+test("乙欄・課税対象額740,000円以上は確定阻止エラーとして報告される", () => {
+  // 甲欄は算式で計算できるのでエラーにならない
+  const kouHigh = employee("k", { payrollType: "fixed", fixedBaseSalary: 800000, taxTableType: "kou" });
+  const kouResult = calculatePayrollEmployee(kouHigh, []);
+  assert.ok(!kouResult.issues.some((item) => item.code === "tax_formula_required"), "甲欄高額はエラーなし");
+
+  // 乙欄740,000円以上はエラー（確定阻止）
+  const otsuHigh = employee("o", { payrollType: "fixed", fixedBaseSalary: 800000, taxTableType: "otsu" });
+  const otsuResult = calculatePayrollEmployee(otsuHigh, []);
+  const issue = otsuResult.issues.find((item) => item.code === "tax_formula_required");
+  assert.ok(issue !== undefined, "tax_formula_required issue が存在する");
+  assert.equal(issue.severity, "error", "確定阻止エラー（warningではない）");
+
+  // 乙欄でも739,999円以下（表の範囲内）はエラーなし（taxableIncome = fixedBaseSalary - 社保 = 700,000 < 740,000）
+  const otsuLow = employee("ol", { payrollType: "fixed", fixedBaseSalary: 700000, taxTableType: "otsu" });
+  const otsuLowResult = calculatePayrollEmployee(otsuLow, []);
+  assert.ok(!otsuLowResult.issues.some((item) => item.code === "tax_formula_required"), "乙欄739,999以下はエラーなし");
 });
 
 test("給与テンプレート定員超過時は全従業員を複数シートへ出力する", () => {

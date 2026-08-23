@@ -86,6 +86,7 @@ export type FixedPayrollAdjustment = {
   overtimeReason?: string;
   transportation?: number;
   advanceExpense?: number;
+  /** 月次給与に算入するその他課税支給（月額表で源泉徴収）。賞与（賞与表）とは別扱い。 */
   otherTemporaryPayment?: number;
   otherDeduction?: number;
   note?: string;
@@ -181,7 +182,31 @@ export function calculateWithholdingTax2026(taxableIncome: number, type: TaxTabl
     return Math.max(0, row.kou[7] - (dependentCount - 7) * 1_610);
   }
   if (amount < 105_000) return type === "otsu" ? Math.floor(amount * 0.03063) : 0;
-  // 740,000円以上は月額表の算式適用が必要なため、自動確定を止める側で警告する。
+  // 740,000円以上：甲欄は電算機計算の特例（令和8年分 月額表 算式）で計算する
+  if (type === "kou") {
+    // 別表第一：月額給与所得控除
+    let empDeduct: number;
+    if (amount <= 130_417)      empDeduct = 45_833;
+    else if (amount <= 150_000) empDeduct = Math.floor(amount * 0.4) - 8_334;
+    else if (amount <= 300_000) empDeduct = Math.floor(amount * 0.3) + 6_667;
+    else if (amount <= 550_000) empDeduct = Math.floor(amount * 0.2) + 36_667;
+    else if (amount <= 708_333) empDeduct = Math.floor(amount * 0.1) + 91_667;
+    else                        empDeduct = 162_500;
+    // 別表第二：月額扶養控除 31,667円/人、別表第三：月額基礎控除 48,334円
+    const deps = Math.max(0, Math.trunc(dependentCount));
+    const B = Math.max(0, amount - empDeduct - 48_334 - deps * 31_667);
+    // 別表第四：税額計算（復興特別所得税込み）
+    let raw: number;
+    if (B <= 162_500)       raw = B * 0.05105;
+    else if (B <= 275_000)  raw = B * 0.10210 - 8_296;
+    else if (B <= 579_167)  raw = B * 0.20420 - 36_374;
+    else if (B <= 750_000)  raw = B * 0.23483 - 54_114;
+    else if (B <= 1_500_000) raw = B * 0.33693 - 130_690;
+    else if (B <= 3_333_333) raw = B * 0.40840 - 237_895;
+    else                    raw = B * 0.45945 - 408_062;
+    return Math.max(0, Math.round(raw / 10) * 10);
+  }
+  // 乙欄：740,000円以上の算式は非公開のため未実装
   return 0;
 }
 
@@ -259,7 +284,7 @@ export function calculatePayrollEmployee(employee: PayrollEmployee, allAttendanc
   const taxTableType = employee.taxTableType ?? "kou";
   const dependentCount = Math.max(0, Math.trunc(employee.dependentCount ?? 0));
   const issues: PayrollIssue[] = [];
-  if (taxableIncome >= 740_000) issues.push({ severity: "warning", code: "tax_formula_required", employeeId: employee.id, message: "課税対象額740,000円以上は税額表の算式確認が必要です" });
+  if (taxTableType === "otsu" && taxableIncome >= 740_000) issues.push({ severity: "error", code: "tax_formula_required", employeeId: employee.id, message: `${employeeLabel(employee)}：課税対象額740,000円以上（乙欄）の所得税は自動計算できないため確定できません。手動入力してください` });
   const incomeTax = payrollType === "fixed" && employee.incomeTax != null
     ? yen(employee.incomeTax)
     : calculateWithholdingTax2026(taxableIncome, taxTableType, dependentCount);
@@ -289,7 +314,7 @@ export function applyFixedPayrollAdjustment(result: PayrollResult, adjustment: F
   const overtimeMinutes = Math.max(0, Math.trunc(Number(adjustment.overtimeMinutes) || 0));
   const automaticOvertimeAllowance = Math.floor(overtimeMinutes * (result.earnings.baseSalary / 160) * 1.25 / 60);
   const overtimePremium = adjustment.overtimeAllowanceOverride == null ? automaticOvertimeAllowance : yen(adjustment.overtimeAllowanceOverride);
-  const transportation = yen(adjustment.transportation);
+  const transportation = adjustment.transportation != null ? yen(adjustment.transportation) : result.earnings.transportation;
   const otherTaxable = yen(adjustment.otherTemporaryPayment);
   const advanceExpense = yen(adjustment.advanceExpense);
   const otherDeduction = yen(adjustment.otherDeduction);
@@ -298,6 +323,8 @@ export function applyFixedPayrollAdjustment(result: PayrollResult, adjustment: F
   earnings.nonTaxableTotal = earnings.transportation + earnings.otherNonTaxable;
   earnings.grossTotal = earnings.taxableTotal + earnings.nonTaxableTotal;
   const deductions = { ...result.deductions, advanceExpense, otherDeduction };
+  deductions.taxableIncome = Math.max(0, earnings.taxableTotal - deductions.socialInsuranceTotal);
+  deductions.incomeTax = calculateWithholdingTax2026(deductions.taxableIncome, result.taxTableTypeSnapshot, result.dependentCountSnapshot);
   deductions.total = deductions.socialInsuranceTotal + deductions.incomeTax + deductions.residentTax + deductions.yearEndAdjustment + deductions.otherDeduction + deductions.advanceExpense;
   const netPay = earnings.grossTotal - deductions.total;
   return {

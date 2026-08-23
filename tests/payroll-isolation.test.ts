@@ -70,15 +70,19 @@ test("payroll page keeps exports separate and provides one-person fixed-employee
   assert.match(payrollPage, /この店舗の給与明細を一括ダウンロード/);
   assert.match(payrollPage, /正社員給与明細を一括ダウンロード/);
   assert.match(payrollPage, /給与を確定/);
-  assert.match(payrollPage, /正社員給与設定・当月調整/);
-  assert.match(payrollPage, /settingsOpen &&/);
+  // 固定給与マスターは右上ボタンから別モーダルで開く。当月調整はSection②に分離。
+  assert.match(payrollPage, /固定給与マスター設定/);
+  assert.match(payrollPage, /masterOpen &&/);
+  // 正社員選択はSection②（当月調整）とモーダル（マスター）の両方にある
   assert.match(payrollPage, /正社員を選択/);
   assert.match(payrollPage, /残業手当を修正する理由|修正理由/);
 });
 
 test("payroll screen separates trial, generation, download, and confirmation states", () => {
   assert.match(payrollPage, /\{run && \(/);
-  assert.match(payrollPage, /isConfirmed \|\| \(isDraft && errors\.length === 0\)/);
+  // Excel/確定セクションは canShowExcel 変数で制御（確定済み or 変更確認済みdraft）
+  assert.match(payrollPage, /canShowExcel/);
+  assert.match(payrollPage, /isConfirmed[\s\S]*adjustDecision[\s\S]*"no-change"[\s\S]*"adjusted"|adjustDecision[\s\S]*"no-change"[\s\S]*"adjusted"[\s\S]*isConfirmed/);
   assert.match(payrollPage, /給与対象人数/);
   assert.match(payrollPage, /支給合計/);
   assert.match(payrollPage, /控除合計/);
@@ -111,9 +115,11 @@ test("HQ layout does not deny access while the auth profile is temporarily unava
 });
 
 test("Excel section is visible for both draft and confirmed runs", () => {
-  // Section shows when isConfirmed too — not gated on isDraft
+  // canShowExcel = isConfirmed || (isDraft && errors===0 && adjustDecision決定済み)
+  // 「errors.length === 0 && isDraft &&」単体でセクションを制御していないことを確認
   assert.doesNotMatch(payrollPage, /errors\.length === 0 && isDraft && /);
-  assert.match(payrollPage, /isConfirmed \|\| \(isDraft && errors\.length === 0\)/);
+  assert.match(payrollPage, /const canShowExcel/);
+  assert.match(payrollPage, /isConfirmed[\s\S]*\|\|[\s\S]*isDraft[\s\S]*adjustDecision/);
   // Draft path has generate buttons
   assert.match(payrollPage, /給与Excelを生成/);
   assert.match(payrollPage, /振込一覧Excelを生成/);
@@ -232,11 +238,38 @@ test("admin employee screen has hourly and admin-only fixed tabs", () => {
   assert.match(adminPage, /正社員の新規登録・固定給与マスター/);
   assert.match(adminPage, /健康保険|所得税/);
   assert.doesNotMatch(adminPage, /当月調整入力|月次調整を反映|臨時出勤回数/);
-  assert.match(payrollPage, /当月調整を反映して再試算/);
-  assert.match(payrollPage, /① 今月の給与計算/);
-  assert.match(payrollPage, /② 帳票/);
-  assert.match(payrollPage, /③ 給与明細/);
+  // 給与業務フロー順の5セクション（Section②に当月調整、固定マスターはモーダル）
+  assert.match(payrollPage, /当月調整を保存して再試算/);
+  assert.match(payrollPage, /① 今月の給与を試算/);
+  assert.match(payrollPage, /② 正社員給与の変更確認/);
+  assert.match(payrollPage, /⑤ 給与明細ダウンロード/);
   assert.match(payrollPage, /固定給与マスター/);
   assert.match(payrollPage, /固定給与マスターを保存/);
   assert.match(payrollPage, /生成済みExcelは無効になりました/);
+});
+
+test("adjusted後の調整変更は未反映状態（canShowExcelをブロック）", () => {
+  // savedAdjustments スナップショットが存在する
+  assert.match(payrollPage, /savedAdjustments/);
+  assert.match(payrollPage, /setSavedAdjustments\(/);
+  // isAdjustmentDirty で dirty 検知
+  assert.match(payrollPage, /isAdjustmentDirty/);
+  assert.match(payrollPage, /adjustDecision === "adjusted"[\s\S]+?JSON\.stringify/);
+  // canShowExcel は !isAdjustmentDirty を含む
+  assert.match(payrollPage, /!isAdjustmentDirty/);
+  // 未反映メッセージが表示される
+  assert.match(payrollPage, /変更内容がまだ試算へ反映されていません/);
+});
+
+test("固定給与マスター保存は payrollSettings だけを更新し確定済みrunを変えない", () => {
+  // payroll-server の saveFixedPayrollMaster は payrollRuns を更新しない
+  const masterStart = payrollServer.indexOf("export async function saveFixedPayrollMaster");
+  const masterEnd = payrollServer.indexOf("\nexport async function", masterStart + 1);
+  const masterFn = payrollServer.slice(masterStart, masterEnd > masterStart ? masterEnd : undefined);
+  assert.match(masterFn, /payrollSettings/);
+  assert.doesNotMatch(masterFn, /payrollRuns/);
+  // 確定済み時のメッセージ（帳票は変わらない旨）
+  assert.match(payrollPage, /確定済みの帳票は変わりません/);
+  // 未確定時は run をクリアして再試算を促す
+  assert.match(payrollPage, /isConfirmed[\s\S]+?確定済みの帳票は変わりません[\s\S]+?setRun\(null\)|setRun\(null\)[\s\S]+?給与を再試算してください/);
 });
