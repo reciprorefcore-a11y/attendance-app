@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { auth } from "@/lib/firebase";
+import { useAuthProfile } from "@/lib/auth";
 import type { FixedPayrollAdjustment, PayrollResult } from "@/lib/payroll";
 
 type PayrollIssue = { severity: "error" | "warning"; code: string; message: string; employeeId?: string };
@@ -32,14 +32,8 @@ const fixedEmployeeCandidates = [
   ["0002", "青山佳史"], ["0003", "中村鏡太郎"], ["0017", "木月徳子"], ["0064", "小林彗太"], ["0083", "佐藤雅信"],
 ] as const;
 
-async function getToken() {
-  const t = await auth.currentUser?.getIdToken();
-  if (!t) throw new Error("認証情報を取得できません");
-  return t;
-}
-
-async function apiCall(url: string, init?: RequestInit) {
-  const res = await fetch(url, { ...init, headers: { ...(init?.headers ?? {}), Authorization: `Bearer ${await getToken()}` } });
+async function apiCall(url: string, token: string, init?: RequestInit) {
+  const res = await fetch(url, { ...init, headers: { ...(init?.headers ?? {}), Authorization: `Bearer ${token}` } });
   // エラー応答がJSONとは限らない（504のHTML等）。JSON.parseで落とさず中身を見せる。
   const text = await res.text();
   let data: { error?: string } = {};
@@ -49,8 +43,8 @@ async function apiCall(url: string, init?: RequestInit) {
   return data as any;
 }
 
-async function generateFile(url: string, init?: RequestInit): Promise<GeneratedFile> {
-  const res = await fetch(url, { ...init, headers: { ...(init?.headers ?? {}), Authorization: `Bearer ${await getToken()}` } });
+async function generateFile(url: string, token: string, init?: RequestInit): Promise<GeneratedFile> {
+  const res = await fetch(url, { ...init, headers: { ...(init?.headers ?? {}), Authorization: `Bearer ${token}` } });
   if (!res.ok) { const d = await res.json(); throw new Error(d.error ?? "ダウンロードに失敗しました"); }
   const blob = await res.blob();
   if (blob.size === 0) throw new Error("サーバーが空のファイルを返しました");
@@ -60,8 +54,8 @@ async function generateFile(url: string, init?: RequestInit): Promise<GeneratedF
   return { name, blob };
 }
 
-async function downloadFile(url: string, init?: RequestInit) {
-  const file = await generateFile(url, init);
+async function downloadFile(url: string, token: string, init?: RequestInit) {
+  const file = await generateFile(url, token, init);
   const obj = URL.createObjectURL(file.blob);
   const a = document.createElement("a");
   a.href = obj;
@@ -77,6 +71,7 @@ async function downloadFile(url: string, init?: RequestInit) {
 }
 
 export default function PayrollPage() {
+  const { user, isLoading: authLoading } = useAuthProfile();
   // 通常運用は「前月」。当月はまだ締まっていないため試算Excelのみ（確定は不可）。
   const [monthMode, setMonthMode] = useState<"prev" | "current">("prev");
   const targetMonth = useMemo(() => (monthMode === "prev" ? lastMonth() : thisMonth()), [monthMode]);
@@ -107,6 +102,7 @@ export default function PayrollPage() {
 
   // Initial load: current month run + confirmed runs list
   useEffect(() => {
+    if (authLoading || !user) return;
     let active = true;
     (async () => {
       setRun(null);
@@ -115,9 +111,10 @@ export default function PayrollPage() {
       setAdjustments({});
       setMessage("");
       try {
+        const token = await user.getIdToken(true);
         const [workspace, runsData] = await Promise.all([
-          apiCall(`/api/payroll/calculate?targetMonth=${targetMonth}`),
-          apiCall("/api/payroll/runs"),
+          apiCall(`/api/payroll/calculate?targetMonth=${targetMonth}`, token),
+          apiCall("/api/payroll/runs", token),
         ]);
         if (!active) return;
         setRun(workspace.run);
@@ -135,23 +132,31 @@ export default function PayrollPage() {
       }
     })();
     return () => { active = false; };
-  }, [targetMonth]);
+  }, [targetMonth, user, authLoading]);
 
   // Load slip run when confirmed month is selected
   useEffect(() => {
-    if (!slipMonthKey) return;
+    if (!slipMonthKey || !user) return;
     const runId = slipMonthKey.split("__")[0];
     let active = true;
-    apiCall(`/api/payroll/runs?runId=${runId}`)
-      .then((data) => { if (active) { setSlipRun(data as SlipRun); setSlipStore(""); } })
-      .catch((e) => { if (active) setMessage(e instanceof Error ? e.message : "明細データの読み込みに失敗しました"); });
+    (async () => {
+      try {
+        const token = await user.getIdToken(true);
+        const data = await apiCall(`/api/payroll/runs?runId=${runId}`, token);
+        if (active) { setSlipRun(data as SlipRun); setSlipStore(""); }
+      } catch (e) {
+        if (active) setMessage(e instanceof Error ? e.message : "明細データの読み込みに失敗しました");
+      }
+    })();
     return () => { active = false; };
-  }, [slipMonthKey]);
+  }, [slipMonthKey, user]);
 
   const calculate = async () => {
+    if (!user) { setMessage("ログインが必要です"); return; }
     setBusy(true); setMessage("");
     try {
-      const data = await apiCall("/api/payroll/calculate", {
+      const token = await user.getIdToken(true);
+      const data = await apiCall("/api/payroll/calculate", token, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ targetMonth, paymentMonth, paymentDate }),
       });
@@ -164,9 +169,10 @@ export default function PayrollPage() {
   };
 
   const generatePayrollExcel = async () => {
-    if (!run) return; setBusy(true); setMessage("");
+    if (!run || !user) return; setBusy(true); setMessage("");
     try {
-      const file = await generateFile("/api/payroll/export/payroll", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(run) });
+      const token = await user.getIdToken(true);
+      const file = await generateFile("/api/payroll/export/payroll", token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(run) });
       setPayrollFile(file); setMessage("給与Excelを生成しました。下のボタンからダウンロードできます。");
     } catch (e) { setMessage(e instanceof Error ? e.message : "給与Excelの生成に失敗しました"); }
     finally { setBusy(false); }
@@ -175,17 +181,18 @@ export default function PayrollPage() {
   const updateAdjustment = (employeeId: string, patch: Partial<FixedPayrollAdjustment>) => setAdjustments((current) => ({ ...current, [employeeId]: { ...current[employeeId], ...patch } }));
 
   const saveFixedMaster = async () => {
-    const values = masterForms[masterEmployeeId]; if (!values) return;
+    const values = masterForms[masterEmployeeId]; if (!values || !user) return;
     setBusy(true); setMessage("");
     try {
-      await apiCall("/api/payroll/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ employeeId: masterEmployeeId, values }) });
+      const token = await user.getIdToken(true);
+      await apiCall("/api/payroll/settings", token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ employeeId: masterEmployeeId, values }) });
       setRun(null); setPayrollFile(null); setTransferFile(null); setMessage("固定給与マスターを保存しました。給与を再試算し、Excelを再生成してください。");
     } catch (e) { setMessage(e instanceof Error ? e.message : "固定給与マスターの保存に失敗しました"); }
     finally { setBusy(false); }
   };
 
   const applyAdjustments = async () => {
-    if (!run) return;
+    if (!run || !user) return;
     for (const result of run.results.filter((item) => item.payrollType === "fixed")) {
       const adjustment = adjustments[result.employeeId] ?? {};
       const automatic = Math.floor((Number(adjustment.overtimeMinutes) || 0) * (result.earnings.baseSalary / 160) * 1.25 / 60);
@@ -195,27 +202,30 @@ export default function PayrollPage() {
     }
     setBusy(true); setMessage("");
     try {
-      const data = await apiCall("/api/payroll/calculate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ targetMonth, paymentMonth, paymentDate, adjustments }) });
+      const token = await user.getIdToken(true);
+      const data = await apiCall("/api/payroll/calculate", token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ targetMonth, paymentMonth, paymentDate, adjustments }) });
       setRun(data); setPayrollFile(null); setTransferFile(null); setMessage("当月調整を反映して全員分を再試算しました。生成済みExcelは無効になりました。Excelを再生成してください。");
     } catch (e) { setMessage(e instanceof Error ? e.message : "月次調整の反映に失敗しました"); }
     finally { setBusy(false); }
   };
 
   const generateTransferExcel = async () => {
-    if (!run) return; setBusy(true); setMessage("");
+    if (!run || !user) return; setBusy(true); setMessage("");
     try {
-      const file = await generateFile("/api/payroll/export/transfer", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(run) });
+      const token = await user.getIdToken(true);
+      const file = await generateFile("/api/payroll/export/transfer", token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(run) });
       setTransferFile(file); setMessage("振込一覧Excelを生成しました。下のボタンからダウンロードできます。");
     } catch (e) { setMessage(e instanceof Error ? e.message : "振込一覧Excelの生成に失敗しました"); }
     finally { setBusy(false); }
   };
 
   const confirm = async () => {
-    if (!run) return; setBusy(true); setMessage("");
+    if (!run || !user) return; setBusy(true); setMessage("");
     try {
-      const confirmed = await apiCall("/api/payroll/confirm", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ run }) });
+      const token = await user.getIdToken(true);
+      const confirmed = await apiCall("/api/payroll/confirm", token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ run }) });
       setRun(confirmed);
-      const runsData = await apiCall("/api/payroll/runs");
+      const runsData = await apiCall("/api/payroll/runs", token);
       setConfirmedRuns(runsData.runs ?? []);
       setMessage("給与を確定しました。店舗別または正社員の給与明細ZIPを出力できます。");
     } catch (e) { setMessage(e instanceof Error ? e.message : "確定に失敗しました"); }
@@ -223,8 +233,12 @@ export default function PayrollPage() {
   };
 
   const downloadPayslipZip = async (kind: "store-payslips" | "fulltime-payslips", runId: string, storeId = "") => {
+    if (!user) return;
     setBusy(true); setMessage("");
-    try { await downloadFile(`/api/payroll/export/${kind}?runId=${runId}${storeId ? `&storeId=${encodeURIComponent(storeId)}` : ""}`); }
+    try {
+      const token = await user.getIdToken(true);
+      await downloadFile(`/api/payroll/export/${kind}?runId=${runId}${storeId ? `&storeId=${encodeURIComponent(storeId)}` : ""}`, token);
+    }
     catch (e) { setMessage(e instanceof Error ? e.message : "給与明細ZIPのダウンロードに失敗しました"); }
     finally { setBusy(false); }
   };

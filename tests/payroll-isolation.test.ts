@@ -89,6 +89,27 @@ test("payroll screen separates trial, generation, download, and confirmation sta
   assert.doesNotMatch(payrollPage, /給与Excelを再作成|今月の給与Excelを作成/);
 });
 
+test("payroll trial uses useAuthProfile user to acquire ID token — no global auth.currentUser", () => {
+  assert.match(payrollPage, /useAuthProfile/);
+  assert.match(payrollPage, /await user\.getIdToken\(true\)/);
+  assert.match(payrollPage, /Authorization: `Bearer \$\{token\}`/);
+  assert.doesNotMatch(payrollPage, /auth\.currentUser/);
+  assert.doesNotMatch(payrollPage, /auth\.authStateReady/);
+  assert.doesNotMatch(payrollPage, /import \{ auth \}/);
+});
+
+test("HQ layout does not deny access while the auth profile is temporarily unavailable", () => {
+  const layout = readFileSync("app/hq/layout.tsx", "utf8");
+  // Must have 4 separate states: isLoading / !user / !profile / role check
+  assert.match(layout, /if \(isLoading\)/);
+  assert.match(layout, /if \(!user\)/);
+  assert.match(layout, /if \(!profile\)/);
+  assert.match(layout, /profile\.role !== "admin"/);
+  // Must NOT collapse states — forbidden patterns that caused the original bug
+  assert.doesNotMatch(layout, /!user \|\| profile\?\.role !== "admin"/);
+  assert.doesNotMatch(layout, /isLoading \|\| !user \|\| !profile/);
+});
+
 test("confirmed runs list API requires admin token", () => {
   assert.match(payrollRunsRoute, /verifyAdminToken/);
   assert.match(payrollRunsRoute, /listConfirmedRuns/);
@@ -127,8 +148,8 @@ test("payroll previews stay in memory and only confirmation persists them", () =
   assert.match(confirm, /batch\.set\(ref, run\)/);
   assert.match(confirm, /await batch\.commit\(\)/);
   assert.match(payrollConfirmRoute, /confirmPayrollRun/);
-  assert.match(payrollPage, /export\/payroll["], \{ method: "POST"/);
-  assert.match(payrollPage, /export\/transfer["], \{ method: "POST"/);
+  assert.match(payrollPage, /export\/payroll["], token, \{ method: "POST"/);
+  assert.match(payrollPage, /export\/transfer["], token, \{ method: "POST"/);
 });
 
 test("Firestore writes use resource names and atomic commit", () => {
