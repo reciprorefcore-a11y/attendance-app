@@ -187,3 +187,13 @@ export async function listConfirmedRuns(db: FirestoreRest) {
     })
     .sort((a, b) => b.targetMonth.localeCompare(a.targetMonth));
 }
+
+export async function cancelPayrollRun(db: FirestoreRest, runId: string, cancelledBy: string, reason: string) {
+  const ref = db.collection("payrollRuns").doc(runId);
+  const snap = await ref.get();
+  if (!snap.exists) throw new Error("not_found");
+  if (snap.data().status !== "confirmed") throw new Error("not_confirmed");
+  const batch = db.batch();
+  batch.update(ref, { status: "cancelled", cancelledAt: new Date(), cancelledBy, cancellationReason: reason });
+  await batch.commit();
+}

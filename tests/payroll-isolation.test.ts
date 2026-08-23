@@ -78,7 +78,7 @@ test("payroll page keeps exports separate and provides one-person fixed-employee
 
 test("payroll screen separates trial, generation, download, and confirmation states", () => {
   assert.match(payrollPage, /\{run && \(/);
-  assert.match(payrollPage, /errors\.length === 0 && isDraft/);
+  assert.match(payrollPage, /isConfirmed \|\| \(isDraft && errors\.length === 0\)/);
   assert.match(payrollPage, /給与対象人数/);
   assert.match(payrollPage, /支給合計/);
   assert.match(payrollPage, /控除合計/);
@@ -108,6 +108,54 @@ test("HQ layout does not deny access while the auth profile is temporarily unava
   // Must NOT collapse states — forbidden patterns that caused the original bug
   assert.doesNotMatch(layout, /!user \|\| profile\?\.role !== "admin"/);
   assert.doesNotMatch(layout, /isLoading \|\| !user \|\| !profile/);
+});
+
+test("Excel section is visible for both draft and confirmed runs", () => {
+  // Section shows when isConfirmed too — not gated on isDraft
+  assert.doesNotMatch(payrollPage, /errors\.length === 0 && isDraft && /);
+  assert.match(payrollPage, /isConfirmed \|\| \(isDraft && errors\.length === 0\)/);
+  // Draft path has generate buttons
+  assert.match(payrollPage, /給与Excelを生成/);
+  assert.match(payrollPage, /振込一覧Excelを生成/);
+  // Confirmed path has download buttons
+  assert.match(payrollPage, /確定済み給与Excelをダウンロード/);
+  assert.match(payrollPage, /確定済み振込一覧Excelをダウンロード/);
+  // Confirmed path has 確定取消 with required reason
+  assert.match(payrollPage, /確定取消の理由/);
+  assert.match(payrollPage, /unconfirmReason\.trim\(\)/);
+});
+
+test("confirmed Excel downloads use the stored run snapshot without recalculation", () => {
+  // Both draft and confirmed call generateFile with the current run body (no new calculate POST)
+  assert.match(payrollPage, /generateFile\("\/api\/payroll\/export\/payroll", token/);
+  assert.match(payrollPage, /generateFile\("\/api\/payroll\/export\/transfer", token/);
+  // 給与を試算 button is hidden for confirmed runs
+  assert.match(payrollPage, /!isConfirmed[\s\S]+?給与を試算/);
+  // Export routes do not write to Firestore (no batch/set/update in export handler)
+  assert.doesNotMatch(payrollExportRoute, /batch\(\)|\.set\(|\.update\(/);
+});
+
+test("DELETE /api/payroll/confirm requires admin and validates inputs", () => {
+  // Must verify admin token — manager/staff/unauthenticated get 403
+  assert.match(payrollConfirmRoute, /export async function DELETE/);
+  assert.match(payrollConfirmRoute, /verifyAdminToken[\s\S]+?403/);
+  // runId and reason are both required (400 if missing)
+  assert.match(payrollConfirmRoute, /!runId[\s\S]+?400/);
+  assert.match(payrollConfirmRoute, /!reason\?\.trim\(\)[\s\S]+?400/);
+  // non-confirmed runs rejected with 409
+  assert.match(payrollConfirmRoute, /not_confirmed/);
+});
+
+test("cancelPayrollRun stores cancellationReason and only updates the target run", () => {
+  // Correct field name: cancellationReason (not cancelReason)
+  assert.match(payrollServer, /cancellationReason/);
+  assert.doesNotMatch(payrollServer, /cancelReason[^cC]/);
+  // Required fields: status, cancelledBy, cancelledAt, cancellationReason
+  assert.match(payrollServer, /status.*cancelled[\s\S]+?cancelledAt[\s\S]+?cancelledBy[\s\S]+?cancellationReason|cancellationReason[\s\S]+?status.*cancelled/);
+  // Only updates payrollRuns/{runId} — does not touch employee sub-collection
+  assert.match(payrollServer, /db\.collection\("payrollRuns"\)\.doc\(runId\)/);
+  // Rejects non-confirmed runs before writing
+  assert.match(payrollServer, /status.*!==.*confirmed[\s\S]+?not_confirmed|not_confirmed/);
 });
 
 test("confirmed runs list API requires admin token", () => {

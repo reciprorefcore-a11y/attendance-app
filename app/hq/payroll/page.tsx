@@ -94,6 +94,7 @@ export default function PayrollPage() {
   const [masterForms, setMasterForms] = useState<Record<string, FixedMaster>>({});
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<"master" | "adjustment">("master");
+  const [unconfirmReason, setUnconfirmReason] = useState("");
   const payrollFileUrl = useMemo(() => payrollFile ? URL.createObjectURL(payrollFile.blob) : "", [payrollFile]);
   const transferFileUrl = useMemo(() => transferFile ? URL.createObjectURL(transferFile.blob) : "", [transferFile]);
 
@@ -232,6 +233,24 @@ export default function PayrollPage() {
     finally { setBusy(false); }
   };
 
+  const unconfirm = async () => {
+    if (!run?.id || !user) return;
+    if (!unconfirmReason.trim()) { setMessage("確定取消の理由を入力してください"); return; }
+    setBusy(true); setMessage("");
+    try {
+      const token = await user.getIdToken(true);
+      await apiCall("/api/payroll/confirm", token, { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ runId: run.id, reason: unconfirmReason }) });
+      setUnconfirmReason(""); setPayrollFile(null); setTransferFile(null);
+      const [workspace, runsData] = await Promise.all([
+        apiCall(`/api/payroll/calculate?targetMonth=${targetMonth}`, token),
+        apiCall("/api/payroll/runs", token),
+      ]);
+      setRun(workspace.run); setConfirmedRuns(runsData.runs ?? []);
+      setMessage("確定を取消しました。必要に応じて再計算してください。");
+    } catch (e) { setMessage(e instanceof Error ? e.message : "確定取消に失敗しました"); }
+    finally { setBusy(false); }
+  };
+
   const downloadPayslipZip = async (kind: "store-payslips" | "fulltime-payslips", runId: string, storeId = "") => {
     if (!user) return;
     setBusy(true); setMessage("");
@@ -271,9 +290,11 @@ export default function PayrollPage() {
 
           {message && <p style={s.msg}>{message}</p>}
 
-          <div style={s.actions}>
-            <button disabled={busy} onClick={calculate} style={s.primary}>{busy ? "試算中…" : "給与を試算"}</button>
-          </div>
+          {!isConfirmed && (
+            <div style={s.actions}>
+              <button disabled={busy} onClick={calculate} style={s.primary}>{busy ? "試算中…" : "給与を試算"}</button>
+            </div>
+          )}
 
           {run && (
             <>
@@ -299,17 +320,28 @@ export default function PayrollPage() {
           )}
         </section>
 
-        {run && errors.length === 0 && isDraft && <section style={s.card}>
+        {run && (isConfirmed || (isDraft && errors.length === 0)) && <section style={s.card}>
           <h2 style={s.h2}>② 帳票</h2>
-          <>
+          {isDraft ? (
             <div style={s.actions}>
               <button disabled={busy} onClick={generatePayrollExcel} style={s.primary}>給与Excelを生成</button>
               <button disabled={busy} onClick={generateTransferExcel} style={s.secondary}>振込一覧Excelを生成</button>
               <button disabled={busy || !run.canConfirm} onClick={confirm} style={s.confirm}>給与を確定</button>
             </div>
-            {payrollFile && <div style={s.fileBox}><span>ファイル名：{payrollFile.name}</span><a href={payrollFileUrl} download={payrollFile.name} style={s.downloadButton}>給与Excelをダウンロード</a></div>}
-            {transferFile && <div style={s.fileBox}><span>ファイル名：{transferFile.name}</span><a href={transferFileUrl} download={transferFile.name} style={s.downloadButton}>振込一覧Excelをダウンロード</a></div>}
-          </>
+          ) : (
+            <div style={s.actions}>
+              <button disabled={busy} onClick={generatePayrollExcel} style={s.primary}>確定済み給与Excelをダウンロード</button>
+              <button disabled={busy} onClick={generateTransferExcel} style={s.secondary}>確定済み振込一覧Excelをダウンロード</button>
+            </div>
+          )}
+          {payrollFile && <div style={s.fileBox}><span>ファイル名：{payrollFile.name}</span><a href={payrollFileUrl} download={payrollFile.name} style={s.downloadButton}>給与Excelをダウンロード</a></div>}
+          {transferFile && <div style={s.fileBox}><span>ファイル名：{transferFile.name}</span><a href={transferFileUrl} download={transferFile.name} style={s.downloadButton}>振込一覧Excelをダウンロード</a></div>}
+          {isConfirmed && (
+            <div style={s.unconfirmArea}>
+              <label style={s.lbl}>確定取消の理由<input value={unconfirmReason} onChange={(e) => setUnconfirmReason(e.target.value)} placeholder="必須" style={s.input} /></label>
+              <button disabled={busy || !unconfirmReason.trim()} onClick={unconfirm} style={s.danger}>確定取消</button>
+            </div>
+          )}
         </section>}
 
         <section style={s.card}>
@@ -406,6 +438,8 @@ const s: Record<string, React.CSSProperties> = {
   primary: { height: 44, border: 0, borderRadius: 9, padding: "0 20px", background: "#0284C7", color: "white", fontWeight: 800, cursor: "pointer", fontSize: 15 },
   secondary: { height: 42, border: "1px solid #38BDF8", borderRadius: 9, padding: "0 16px", background: "white", color: "#0369A1", fontWeight: 700, cursor: "pointer" },
   confirm: { height: 42, border: "1px solid #16A34A", borderRadius: 9, padding: "0 16px", background: "#F0FDF4", color: "#166534", fontWeight: 800, cursor: "pointer" },
+  danger: { height: 42, border: "1px solid #DC2626", borderRadius: 9, padding: "0 16px", background: "#FEF2F2", color: "#DC2626", fontWeight: 800, cursor: "pointer" },
+  unconfirmArea: { marginTop: 16, paddingTop: 14, borderTop: "1px solid #E2E8F0", display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" },
   fileBox: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginTop: 12, padding: 12, border: "1px solid #BAE6FD", borderRadius: 9, background: "#F0F9FF", fontSize: 14 },
   downloadButton: { display: "inline-flex", alignItems: "center", minHeight: 38, padding: "0 14px", borderRadius: 8, background: "#0369A1", color: "white", fontWeight: 800, textDecoration: "none" },
   muted: { color: "#64748B", margin: 0, fontSize: 14 },
