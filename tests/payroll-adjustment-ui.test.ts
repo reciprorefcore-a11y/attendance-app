@@ -39,7 +39,7 @@ test("休日算定基礎は根拠のないoverrideではなく月給を使う", 
 test("算定基礎未設定では役員報酬を使わず休日1回以上を拒否する", () => {
   assert.equal(resolveHolidayAllowanceBasis({ fixedBaseSalary: 0 }), null);
   assert.deepEqual(holidayAllowancePreview({ fixedBaseSalary: 0 }, 1), { basis: null, unitPay: null, automaticAllowance: null });
-  assert.equal(adjustmentDisabledReason({ selected: true, adjustment: { temporaryAttendanceCount: 1 }, holidayBasis: null, manualHolidayOverride: false, busy: false }), "固定給与マスターで休日手当算定基礎を設定してください");
+  assert.equal(adjustmentDisabledReason({ selected: true, adjustment: { temporaryAttendanceCount: 1 }, holidayBasis: null, manualHolidayOverride: false, busy: false }), "正社員マスターで休日手当算定基礎を設定してください");
 });
 
 test("休日算定基礎0円は未設定として正の固定基本給へfallbackする", () => {

@@ -63,7 +63,7 @@ test("payrollEnabled is saved to employees collection, not payrollSettings", () 
   assert.doesNotMatch(adminPage, /setDoc\(doc\(db, "payrollSettings"/);
 });
 
-test("payroll page provides one unified workbook and fixed-employee settings", () => {
+test("payroll page provides one unified workbook and links to the full-time master", () => {
   // Must have the 3 core actions
   assert.match(payrollPage, /給与を試算/);
   assert.match(payrollPage, /統合Excelを1ファイル生成/);
@@ -71,10 +71,10 @@ test("payroll page provides one unified workbook and fixed-employee settings", (
   assert.match(payrollPage, /この店舗の給与明細を一括ダウンロード/);
   assert.match(payrollPage, /正社員給与明細を一括ダウンロード/);
   assert.match(payrollPage, /給与を確定/);
-  // 固定給与マスターは右上ボタンから別モーダルで開く。当月調整はSection②に分離。
-  assert.match(payrollPage, /固定給与マスター設定/);
-  assert.match(payrollPage, /masterOpen &&/);
-  // 正社員選択はSection②（当月調整）とモーダル（マスター）の両方にある
+  assert.match(payrollPage, /正社員マスターを開く/);
+  assert.match(payrollPage, /href="\/hq\/employees"/);
+  assert.doesNotMatch(payrollPage, /masterOpen|saveFixedMaster|\/api\/payroll\/settings/);
+  // 正社員選択はSection②（当月調整）にある
   assert.match(payrollPage, /正社員を選択/);
   assert.match(payrollPage, /残業手当を修正する理由|修正理由/);
 });
@@ -227,18 +227,27 @@ test("payslip is drawn from an empty A4 landscape page without masking a filled 
   assert.doesNotMatch(payrollExport, /PDFDocument\.load|payslip-reference\.pdf/);
 });
 
-test("admin employee screen is part-time only and full-time master is in HQ", () => {
+test("本部管理者の従業員管理に正社員・アルバイトの統合導線がある", () => {
+  assert.match(adminPage, /employeeManagementTab/);
+  assert.match(adminPage, /setEmployeeManagementTab\("fulltime"\)/);
+  assert.match(adminPage, /setEmployeeManagementTab\("parttime"\)/);
+  assert.match(adminPage, /href="\/hq\/employees"/);
+  assert.match(adminPage, /正社員マスターを開く/);
   assert.match(adminPage, /アルバイト管理/);
-  assert.doesNotMatch(adminPage, /正社員の新規登録・固定給与マスター/);
+  assert.match(adminPage, /正社員マスター/);
+  assert.match(adminPage, /isAdmin && employeeManagementTab === "fulltime"/);
+  assert.match(adminPage, /employees\.filter\(\(employee\)=>!isFullTimeEmployee\(employee\)\)/);
   assert.match(hqEmployeesPage, /正社員マスター/);
   assert.doesNotMatch(adminPage, /当月調整入力|月次調整を反映|臨時出勤回数/);
-  // 給与業務フロー順の5セクション（Section②に当月調整、固定マスターはモーダル）
+  // 給与業務フロー順の5セクション（Section②に当月調整）
   assert.match(payrollPage, /当月調整を反映して再試算/);
   assert.match(payrollPage, /① 今月の給与を試算/);
   assert.match(payrollPage, /② 正社員給与の変更確認/);
   assert.match(payrollPage, /⑤ 給与明細ダウンロード/);
-  assert.match(payrollPage, /固定給与マスター/);
-  assert.match(payrollPage, /固定給与マスターを保存/);
+  assert.doesNotMatch(payrollPage, /固定給与マスター設定|固定給与マスターを保存/);
+  assert.match(payrollPage, /正社員マスターを開く/);
+  assert.match(payrollPage, /href="\/hq\/employees"/);
+  assert.doesNotMatch(payrollPage, /apiCall\("\/api\/payroll\/settings"/);
   assert.match(payrollPage, /生成済みExcelは無効になりました/);
 });
 
@@ -255,17 +264,14 @@ test("adjusted後の調整変更は未反映状態（canShowExcelをブロック
   assert.match(payrollPage, /変更内容はまだ再試算されていません/);
 });
 
-test("固定給与マスター保存は payrollSettings だけを更新し確定済みrunを変えない", () => {
+test("給与設定のサーバー処理は確定済みrunを変えず給与画面からは呼ばれない", () => {
   // payroll-server の saveFixedPayrollMaster は payrollRuns を更新しない
   const masterStart = payrollServer.indexOf("export async function saveFixedPayrollMaster");
   const masterEnd = payrollServer.indexOf("\nexport async function", masterStart + 1);
   const masterFn = payrollServer.slice(masterStart, masterEnd > masterStart ? masterEnd : undefined);
   assert.match(masterFn, /payrollSettings/);
   assert.doesNotMatch(masterFn, /payrollRuns/);
-  // 確定済み時のメッセージ（帳票は変わらない旨）
-  assert.match(payrollPage, /確定済みの帳票は変わりません/);
-  // 未確定時は run をクリアして再試算を促す
-  assert.match(payrollPage, /isConfirmed[\s\S]+?確定済みの帳票は変わりません[\s\S]+?setRun\(null\)|setRun\(null\)[\s\S]+?給与を再試算してください/);
+  assert.doesNotMatch(payrollPage, /\/api\/payroll\/settings|saveFixedMaster/);
 });
 
 test("FIXED_PAYROLL_TEMPLATEにadvanceExpenseは含まれない（立替経費返金は当月調整のみ）", () => {

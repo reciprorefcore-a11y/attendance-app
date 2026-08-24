@@ -28,7 +28,7 @@ export function adjustmentDisabledReason(input: {
   if (!input.selected) return "正社員を選択してください";
   const count = input.adjustment.temporaryAttendanceCount ?? 0;
   if (!Number.isInteger(count) || count < 0) return "休日出勤回数は0以上の整数で入力してください";
-  if (count > 0 && input.holidayBasis == null) return "固定給与マスターで休日手当算定基礎を設定してください";
+  if (count > 0 && input.holidayBasis == null) return "正社員マスターで休日手当算定基礎を設定してください";
   if (input.manualHolidayOverride) {
     const amount = input.adjustment.holidayAllowanceOverride;
     if (amount == null || !Number.isInteger(amount) || amount < 0) return "休日出勤手当の修正後金額は0以上の整数で入力してください";

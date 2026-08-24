@@ -408,6 +408,7 @@ export default function AdminPage() {
   const [targetMonth, setTargetMonth] = useState(localMonth());
   const [storeFilter, setStoreFilter] = useState("all");
   const [activeTab, setActiveTab] = useState<TabId>("attendance");
+  const [employeeManagementTab, setEmployeeManagementTab] = useState<"fulltime" | "parttime">("fulltime");
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState("");
   const [editWorkSet, setEditWorkSet] = useState<CorrectionWorkSet | null>(null);
@@ -1809,6 +1810,30 @@ export default function AdminPage() {
 
         {activeTab === "employees" && (
           <section style={styles.tabPanel}>
+            <h2 style={styles.sectionTitle}>従業員管理</h2>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 20 }} aria-label="従業員区分">
+              {isAdmin && (
+                <button type="button" onClick={() => setEmployeeManagementTab("fulltime")} style={employeeManagementTab === "fulltime" ? styles.button : styles.secondaryButton}>
+                  正社員
+                </button>
+              )}
+              <button type="button" onClick={() => setEmployeeManagementTab("parttime")} style={!isAdmin || employeeManagementTab === "parttime" ? styles.button : styles.secondaryButton}>
+                アルバイト
+              </button>
+            </div>
+            {isAdmin && employeeManagementTab === "fulltime" ? (
+              <section style={styles.panel}>
+                <div style={styles.panelHeader}>
+                  <div>
+                    <h3 style={styles.subTitle}>正社員マスター</h3>
+                    <p style={styles.helpText}>正社員の一覧、新規登録、詳細、編集、退職・無効化、再有効化を管理します。</p>
+                  </div>
+                  <Link href="/hq/employees" style={styles.button}>正社員マスターを開く</Link>
+                </div>
+                <p style={styles.helpText}>在籍／退職・無効フィルターを含む正社員管理画面へ移動します。アルバイトは正社員マスターには表示されません。</p>
+              </section>
+            ) : (
+            <>
             <div style={styles.panelHeader}>
               <h2 style={styles.sectionTitle}>アルバイト管理</h2>
               <div style={styles.inlineActions}>
@@ -2066,6 +2091,8 @@ export default function AdminPage() {
                 </tr>
               ))}
             </DataTable>
+            </>
+            )}
           </section>
         )}
 

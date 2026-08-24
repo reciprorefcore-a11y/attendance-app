@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useAuthProfile } from "@/lib/auth";
 import { calculateHolidayUnitPay } from "@/lib/payroll";
 import type { FixedPayrollAdjustment, PayrollResult } from "@/lib/payroll";
@@ -82,12 +83,9 @@ export default function PayrollPage() {
   const [transferFile, setTransferFile] = useState<GeneratedFile | null>(null);
   const [adjustments, setAdjustments] = useState<Record<string, FixedPayrollAdjustment>>({});
   const [fixedMasters, setFixedMasters] = useState<FixedMaster[]>([]);
-  const [masterEmployeeId, setMasterEmployeeId] = useState("");
   const [adjustEmployeeId, setAdjustEmployeeId] = useState("");
   const [manualHolidayOverrides, setManualHolidayOverrides] = useState<Record<string, boolean>>({});
   const [savedManualHolidayOverrides, setSavedManualHolidayOverrides] = useState<Record<string, boolean>>({});
-  const [masterForms, setMasterForms] = useState<Record<string, FixedMaster>>({});
-  const [masterOpen, setMasterOpen] = useState(false);
   // 正社員給与変更確認フロー: null=未選択 / no-change=変更なし / with-change=変更あり / adjusted=調整済み
   const [adjustDecision, setAdjustDecision] = useState<null | "no-change" | "with-change" | "adjusted">(null);
   // 直前の試算に反映済みの調整スナップショット（dirty検知用）
@@ -105,7 +103,7 @@ export default function PayrollPage() {
     if (authLoading || !user) return;
     let active = true;
     (async () => {
-      setRun(null); setPayrollFile(null); setTransferFile(null); setAdjustments({}); setSavedAdjustments({}); setAppliedDiffs([]); setManualHolidayOverrides({}); setSavedManualHolidayOverrides({}); setMessage(""); setAdjustDecision(null); setMasterOpen(false);
+      setRun(null); setPayrollFile(null); setTransferFile(null); setAdjustments({}); setSavedAdjustments({}); setAppliedDiffs([]); setManualHolidayOverrides({}); setSavedManualHolidayOverrides({}); setMessage(""); setAdjustDecision(null);
       try {
         const token = await user.getIdToken(true);
         const [workspace, runsData] = await Promise.all([
@@ -120,8 +118,7 @@ export default function PayrollPage() {
         setManualHolidayOverrides(existingManualOverrides); setSavedManualHolidayOverrides(existingManualOverrides);
         if (workspace.run?.status === "draft" && Object.keys(existingAdj).length > 0) { setAdjustDecision("adjusted"); setSavedAdjustments(existingAdj); }
         const masters: FixedMaster[] = workspace.fixedEmployees ?? [];
-        setFixedMasters(masters); setMasterForms(Object.fromEntries(masters.map((item) => [item.employeeId, item])));
-        setMasterEmployeeId((current) => current || masters[0]?.employeeId || "");
+        setFixedMasters(masters);
         setAdjustEmployeeId((current) => current || masters[0]?.employeeId || "");
         const confirmed: ConfirmedRunSummary[] = runsData.runs ?? [];
         setConfirmedRuns(confirmed);
@@ -177,23 +174,6 @@ export default function PayrollPage() {
 
   const updateAdjustment = (employeeId: string, patch: Partial<FixedPayrollAdjustment>) =>
     setAdjustments((current) => ({ ...current, [employeeId]: { ...current[employeeId], ...patch } }));
-
-  const saveFixedMaster = async () => {
-    const values = masterForms[masterEmployeeId]; if (!values || !user) return;
-    setBusy(true); setMessage("");
-    try {
-      const token = await user.getIdToken(true);
-      await apiCall("/api/payroll/settings", token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ employeeId: masterEmployeeId, values }) });
-      setPayrollFile(null); setTransferFile(null);
-      if (isConfirmed) {
-        setMessage("固定給与マスターを保存しました。次回試算から反映されます。確定済みの帳票は変わりません。");
-      } else {
-        setRun(null); setSavedAdjustments({}); setManualHolidayOverrides({}); setSavedManualHolidayOverrides({}); setAppliedDiffs([]); setAdjustDecision(null);
-        setMessage("固定給与マスターを保存しました。給与を再試算してください。");
-      }
-    } catch (e) { setMessage(e instanceof Error ? e.message : "固定給与マスターの保存に失敗しました"); }
-    finally { setBusy(false); }
-  };
 
   const applyAdjustments = async () => {
     if (!run || !user) return;
@@ -298,7 +278,7 @@ export default function PayrollPage() {
       <div style={s.shell}>
         <header style={s.headerRow}>
           <div><h1 style={s.title}>給与管理</h1><p style={s.eyebrow}>本部管理者専用</p></div>
-          <button type="button" onClick={() => setMasterOpen(true)} style={s.settingsButton}>固定給与マスター設定</button>
+          <Link href="/hq/employees" style={s.settingsButton}>正社員マスターを開く</Link>
         </header>
 
         {/* ① 今月の給与を試算 */}
@@ -328,7 +308,7 @@ export default function PayrollPage() {
               </div>
               <div style={s.issueSummary}><b>エラー件数：{errors.length}件</b></div>
               {errors.length > 0 && <div style={s.issueBox}>{errors.map((e, i) => <p key={i} style={s.errText}>エラー：{e.message}</p>)}</div>}
-              {fixedWarningEmployeeIds.length > 0 && <button type="button" onClick={() => setMasterOpen(true)} style={s.warningButton}>正社員{fixedWarningEmployeeIds.length}名に未設定項目があります</button>}
+              {fixedWarningEmployeeIds.length > 0 && <Link href="/hq/employees" style={s.warningButton}>正社員{fixedWarningEmployeeIds.length}名に未設定項目があります（正社員マスターを開く）</Link>}
               {warningGroups.filter(([code]) => code !== "missing_social_insurance_setting" && code !== "missing_transportation_setting").map(([code, items]) => <p key={code} style={s.warningText}>警告：{items[0].message}{items.length > 1 ? `（同種${items.length}件）` : ""}</p>)}
             </>
           )}
@@ -406,7 +386,7 @@ export default function PayrollPage() {
                           <div style={s.moneyCard}><span>休日出勤1回単価</span><b>{selectedHolidayPreview.unitPay == null ? "未設定" : yen(selectedHolidayPreview.unitPay)}</b></div>
                           <div style={s.moneyCard}><span>休日出勤手当</span><b>{selectedHolidayPreview.automaticAllowance == null ? "計算できません" : yen(selectedHolidayPreview.automaticAllowance)}</b></div>
                         </div>
-                        {selectedHolidayPreview.basis == null && Number(value.temporaryAttendanceCount ?? 0) > 0 && <p style={s.inlineError}>固定給与マスターで休日手当算定基礎を設定してください</p>}
+                        {selectedHolidayPreview.basis == null && Number(value.temporaryAttendanceCount ?? 0) > 0 && <p style={s.inlineError}>正社員マスターで休日手当算定基礎を設定してください</p>}
                         <label style={s.checkLabel}><input type="checkbox" checked={selectedManualHolidayOverride} onChange={(e) => {
                           const checked = e.target.checked;
                           setManualHolidayOverrides((current) => ({ ...current, [result.employeeId]: checked }));
@@ -524,39 +504,6 @@ export default function PayrollPage() {
             </>
           )}
         </section>
-
-        {/* 固定給与マスター設定モーダル */}
-        {masterOpen && (
-          <div style={s.overlay} role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) setMasterOpen(false); }}>
-            <section style={s.modal} role="dialog" aria-modal="true" aria-label="固定給与マスター設定">
-              <div style={s.modalHeader}>
-                <h2 style={s.h2}>固定給与マスター設定</h2>
-                <button type="button" onClick={() => setMasterOpen(false)} style={s.closeButton}>閉じる</button>
-              </div>
-              <p style={s.sub}>基本給・手当・社会保険・税設定を保存します。毎月変更しない固定項目です。</p>
-              <label style={s.lbl}>
-                正社員を選択
-                <select value={masterEmployeeId} onChange={(e) => setMasterEmployeeId(e.target.value)} style={s.sel}>
-                  <option value="">選択してください</option>
-                  {fixedEmployeeCandidates.map(([code, name]) => {
-                    const emp = fixedMasters.find((item) => item.employeeCode === code);
-                    return <option key={code} value={emp?.employeeId ?? `unregistered:${code}`} disabled={!emp}>{code} {name}{emp ? "" : "（未登録）"}</option>;
-                  })}
-                </select>
-              </label>
-              {masterForms[masterEmployeeId] ? (
-                <div style={s.masterGrid}>
-                  {([["fixedBaseSalary", "基本給"], ["directorCompensation", "役員報酬"], ["positionAllowance", "職能手当"], ["businessAllowance", "業務手当"], ["fixedOvertimeAllowance", "固定手当"], ["healthInsurance", "健康保険"], ["childSupportContribution", "子育て支援金"], ["careInsurance", "介護保険"], ["employeePension", "厚生年金"], ["employmentInsurance", "雇用保険"], ["incomeTax", "所得税"], ["residentTax", "住民税"]] as const).map(([key, label]) => (
-                    <label key={key} style={s.lbl}>{label}<input type="number" min="0" placeholder="未設定" value={masterForms[masterEmployeeId][key] ?? ""} onChange={(e) => setMasterForms((current) => ({ ...current, [masterEmployeeId]: { ...current[masterEmployeeId], [key]: e.target.value === "" ? null : Number(e.target.value) } }))} style={s.input} /></label>
-                  ))}
-                  <label style={s.lbl}>交通費区分<select value={masterForms[masterEmployeeId].transportationType ?? ""} onChange={(e) => setMasterForms((current) => ({ ...current, [masterEmployeeId]: { ...current[masterEmployeeId], transportationType: e.target.value as FixedMaster["transportationType"] } }))} style={s.input}><option value="" disabled>未設定</option><option value="none">なし</option><option value="daily">日額</option><option value="monthly">月額</option></select></label>
-                </div>
-              ) : <p style={s.muted}>正社員を選択してください。</p>}
-              {warnings.filter((item) => item.employeeId === masterEmployeeId).map((item) => <p key={`${item.code}:${item.message}`} style={s.warningText}>{item.message}</p>)}
-              <button disabled={busy || !masterEmployeeId} onClick={saveFixedMaster} style={s.primary}>固定給与マスターを保存</button>
-            </section>
-          </div>
-        )}
 
         {/* 確定取消 確認ダイアログ */}
         {showUnconfirmDialog && (
