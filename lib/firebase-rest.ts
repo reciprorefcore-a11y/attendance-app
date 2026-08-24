@@ -301,11 +301,11 @@ export class FirestoreRest {
   }
 }
 
-// ─── Token verification + admin role check ────────────────────────────────────
+// ─── Token verification + profile check ──────────────────────────────────────
 
-export async function verifyAdminToken(
+export async function verifyUserToken(
   authorization: string | null,
-): Promise<{ uid: string; db: FirestoreRest } | null> {
+): Promise<{ uid: string; db: FirestoreRest; profile: Record<string, unknown> } | null> {
   const apiKey = APIKEY();
   const projectId = PROJ();
 
@@ -340,7 +340,7 @@ export async function verifyAdminToken(
     return null;
   }
 
-  // Step 2: confirm role === "admin" in Firestore users/{uid}
+  // Step 2: load the authenticated user's profile.
   // Uses the user's own token so Firestore rules apply — consistent with useAuthProfile
   try {
     const docRes = await fetch(
@@ -353,15 +353,23 @@ export async function verifyAdminToken(
       return null;
     }
     const fields = docData.fields as FsField | undefined;
-    const role = (fields?.role as { stringValue?: string } | undefined)?.stringValue;
-    if (role !== "admin") {
-      console.error("[payroll-auth] Access denied — uid:", uid, "role:", role ?? "(field missing)");
-      return null;
-    }
+    if (!fields) return null;
+    return { uid, db: new FirestoreRest(token), profile: fromFields(fields) };
   } catch (e) {
     console.error("[payroll-auth] Role check error:", e instanceof Error ? e.message : "unknown");
     return null;
   }
 
-  return { uid, db: new FirestoreRest(token) };
+  return null;
+}
+
+export async function verifyAdminToken(
+  authorization: string | null,
+): Promise<{ uid: string; db: FirestoreRest } | null> {
+  const authenticated = await verifyUserToken(authorization);
+  if (!authenticated || authenticated.profile.role !== "admin") {
+    if (authenticated) console.error("[payroll-auth] Access denied — uid:", authenticated.uid, "role:", authenticated.profile.role ?? "(field missing)");
+    return null;
+  }
+  return { uid: authenticated.uid, db: authenticated.db };
 }

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const adminPage = readFileSync("app/admin/page.tsx", "utf8");
+const hqEmployeesPage = readFileSync("app/hq/employees/page.tsx", "utf8");
 const payrollPage = readFileSync("app/hq/payroll/page.tsx", "utf8");
 const payrollRoute = readFileSync("app/api/payroll/calculate/route.ts", "utf8");
 const payrollServer = readFileSync("lib/payroll-server.ts", "utf8");
@@ -239,7 +240,7 @@ test("admin employee screen has hourly and admin-only fixed tabs", () => {
   assert.match(adminPage, /健康保険|所得税/);
   assert.doesNotMatch(adminPage, /当月調整入力|月次調整を反映|臨時出勤回数/);
   // 給与業務フロー順の5セクション（Section②に当月調整、固定マスターはモーダル）
-  assert.match(payrollPage, /当月調整を保存して再試算/);
+  assert.match(payrollPage, /当月調整を反映して再試算/);
   assert.match(payrollPage, /① 今月の給与を試算/);
   assert.match(payrollPage, /② 正社員給与の変更確認/);
   assert.match(payrollPage, /⑤ 給与明細ダウンロード/);
@@ -272,4 +273,52 @@ test("固定給与マスター保存は payrollSettings だけを更新し確定
   assert.match(payrollPage, /確定済みの帳票は変わりません/);
   // 未確定時は run をクリアして再試算を促す
   assert.match(payrollPage, /isConfirmed[\s\S]+?確定済みの帳票は変わりません[\s\S]+?setRun\(null\)|setRun\(null\)[\s\S]+?給与を再試算してください/);
+});
+
+test("FIXED_PAYROLL_TEMPLATEにadvanceExpenseは含まれない（立替経費返金は当月調整のみ）", () => {
+  // テンプレートは "const FIXED_PAYROLL_TEMPLATE" から始まり "function asDate" の前で終わる
+  const templateStart = payrollServer.indexOf("const FIXED_PAYROLL_TEMPLATE");
+  const templateEnd = payrollServer.indexOf("\nfunction asDate", templateStart);
+  const templateBlock = payrollServer.slice(templateStart, templateEnd);
+  assert.doesNotMatch(templateBlock, /advanceExpense/, "テンプレートに advanceExpense があると二重計上になる");
+  // 0002 は cash 支給
+  assert.match(templateBlock, /"0002"[\s\S]{0,200}paymentMethod[\s\S]{0,50}cash/);
+  // 0017 は paymentMethod 指定なし（デフォルト bank）
+  const template0017Start = templateBlock.indexOf('"0017"');
+  const template0017End = templateBlock.indexOf("},", template0017Start);
+  const block0017 = templateBlock.slice(template0017Start, template0017End);
+  assert.doesNotMatch(block0017, /paymentMethod/, "0017 は bank がデフォルトで paymentMethod を明示しない");
+});
+
+test("store-payslipsはpartTimeのみ・fulltime-payslipsはfullTimeのみを対象とする", () => {
+  // selectStorePayslipResults は partTime かつ storeId 一致のみ
+  assert.match(payrollExport, /selectStorePayslipResults/);
+  assert.match(payrollExport, /employeeType === "partTime"[\s\S]+?storeId === storeId|storeId === storeId[\s\S]+?employeeType === "partTime"/);
+  // selectFullTimePayslipResults は fullTime のみ
+  assert.match(payrollExport, /selectFullTimePayslipResults/);
+  assert.match(payrollExport, /employeeType === "fullTime"/);
+  // 両関数は互いに条件が排他
+  const exportFn = payrollExport;
+  const storeStart = exportFn.indexOf("selectStorePayslipResults");
+  const storeEnd = exportFn.indexOf("}", storeStart);
+  const storeBlock = exportFn.slice(storeStart, storeEnd);
+  assert.doesNotMatch(storeBlock, /fullTime/, "store ZIP に fullTime フィルターは入らない");
+  const ftStart = exportFn.indexOf("selectFullTimePayslipResults");
+  const ftEnd = exportFn.indexOf("}", ftStart);
+  const ftBlock = exportFn.slice(ftStart, ftEnd);
+  assert.doesNotMatch(ftBlock, /partTime/, "fulltime ZIP に partTime フィルターは入らない");
+});
+
+test("HQ従業員ページは社員コードの重複登録を防止し、正社員クイック登録ボタンがある", () => {
+  // 社員コード重複チェック
+  assert.match(hqEmployeesPage, /where\("employeeCode", "==", employeeCode\)/);
+  assert.match(hqEmployeesPage, /同じ社員コードの従業員が既に登録されています/);
+  // 0002/0017 クイック登録ボタン（未登録時のみ表示）
+  assert.match(hqEmployeesPage, /0002[\s\S]{0,50}青山佳史/);
+  assert.match(hqEmployeesPage, /0017[\s\S]{0,50}木月徳子/);
+  // 重複確認済みの候補がすでに登録されている場合はボタンを非表示
+  assert.match(hqEmployeesPage, /employees\.some[\s\S]+?employeeCode[\s\S]+?candidate\.employeeCode/);
+  // 登録フォームは employeeType "fullTime" / payrollType "fixed" を設定する
+  assert.match(hqEmployeesPage, /employeeType.*fullTime/);
+  assert.match(hqEmployeesPage, /payrollType.*fixed|fixed.*payrollType/);
 });

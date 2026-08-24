@@ -15,6 +15,7 @@ import {
   collection,
   doc,
   deleteDoc,
+  getDoc,
   getDocs,
   orderBy,
   query,
@@ -25,6 +26,7 @@ import {
   writeBatch,
 } from "firebase/firestore";
 import type { Employee, Store } from "@/lib/attendance";
+import { isAdminPartTimeEmployee, isFullTimeEmployee } from "@/lib/employee-classification";
 import {
   aggregateLaborCostByStore,
   auditAttendance,
@@ -1014,7 +1016,13 @@ export default function AdminPage() {
     };
     try {
       if (employeeEditingId) {
-        await updateDoc(doc(db, "employees", employeeEditingId), payload);
+        const employeeRef = doc(db, "employees", employeeEditingId);
+        const latest = await getDoc(employeeRef);
+        if (!latest.exists() || isFullTimeEmployee(latest.data())) {
+          setEmployeeFormError("正社員はアルバイト画面から編集できません。");
+          return;
+        }
+        await updateDoc(employeeRef, payload);
       } else {
         await addDoc(collection(db, "employees"), payload);
       }
@@ -1030,6 +1038,10 @@ export default function AdminPage() {
   };
 
   const editEmployee = (employee: EmployeeRow) => {
+    if (isFullTimeEmployee(employee)) {
+      setEmployeeFormError("正社員はアルバイト画面から編集できません。");
+      return;
+    }
     setEmployeeEditingId(employee.id);
     setEmployeeForm({
       name: employee.name,
@@ -1064,15 +1076,23 @@ export default function AdminPage() {
   };
 
   const deleteEmployee = async (employee: EmployeeRow) => {
+    if (isFullTimeEmployee(employee)) {
+      setMessage("正社員はアルバイト画面から削除できません。");
+      return;
+    }
     const confirmed = window.confirm(`${employee.name} を削除しますか？この操作は取り消せません。`);
     if (!confirmed) return;
     try {
-      await updateDoc(doc(db, "employees", employee.id), { isDeleted: true });
+      if (!user) throw new Error("ログインが必要です。");
+      const token = await user.getIdToken(true);
+      const response = await fetch(`/api/employees/${employee.id}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
+      const body = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(body.error ?? "従業員の削除に失敗しました。");
       setMessage("従業員を削除しました。");
       await load();
     } catch (error) {
       console.error("employee delete failed", error);
-      setMessage("従業員の削除に失敗しました。");
+      setMessage(error instanceof Error ? error.message : "従業員の削除に失敗しました。");
     }
   };
 
@@ -2023,7 +2043,7 @@ export default function AdminPage() {
               </div>
             )}
             <DataTable headers={["社員コード", "氏名", "ひらがな", "所属店舗", "状態", "基本時給", "交通費", "権限", "操作"]}>
-              {employees.filter(e => e.isDeleted !== true).map((employee) => (
+              {employees.filter(isAdminPartTimeEmployee).map((employee) => (
                 <tr key={employee.id}>
                   <td style={styles.td}>{employee.employeeCode}</td>
                   <td style={styles.td}>{employee.name}</td>
@@ -2051,7 +2071,7 @@ export default function AdminPage() {
                     )}
                     <button type="button" onClick={() => editEmployee(employee)} style={styles.linkButton}>編集</button>
                     {isAdmin && <button type="button" onClick={async () => { await updateDoc(doc(db, "employees", employee.id), { status: "inactive" }); await load(); }} style={styles.linkButton}>無効化</button>}
-                    {isAdmin && <button type="button" onClick={() => deleteEmployee(employee)} style={{...styles.linkButton, color: "#B91C1C", borderColor: "#FCA5A5", background: "#FEF2F2"}}>削除</button>}
+                    {(isAdmin || isManager) && !isFullTimeEmployee(employee) && <button type="button" onClick={() => deleteEmployee(employee)} style={{...styles.linkButton, color: "#B91C1C", borderColor: "#FCA5A5", background: "#FEF2F2"}}>削除</button>}
                   </td>
                 </tr>
               ))}

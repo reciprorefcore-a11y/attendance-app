@@ -71,6 +71,7 @@ export type Employee = {
   fixedOvertimeAllowance?: number;
   otherAllowance?: number;
   otherDeduction?: number;
+  /** @deprecated 旧Firestoreフィールド。負値は expenseReimbursement へ移行済み。 */
   advanceExpense?: number;
   payrollEnabled?: boolean;
 };

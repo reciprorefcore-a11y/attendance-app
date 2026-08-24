@@ -28,6 +28,55 @@ export function payrollOrderOf(result: Pick<PayrollResult, "employeeId" | "emplo
   return byIdentity >= 0 ? byIdentity : Number.MAX_SAFE_INTEGER;
 }
 
+const EXCEL_STORE_NAMES = [
+  "灯武蔵小杉店",
+  "Pescara綱島店",
+  "GraineMarche綱島店",
+  "GraineMarche野毛店",
+] as const;
+
+const normalizedStoreName = (value: string) => value.replace(/[\s　]/g, "").toLocaleLowerCase("ja");
+
+function excelStoreGroupsById(results: PayrollResult[]): Map<string, number> {
+  const groups = new Map<string, number>();
+  for (const result of results) {
+    if (result.employeeType !== "partTime" || !result.storeId) continue;
+    const name = normalizedStoreName(result.storeName ?? "");
+    const index = EXCEL_STORE_NAMES.findIndex((expected) => normalizedStoreName(expected) === name);
+    if (index >= 0) groups.set(result.storeId, index + 1);
+    else if (!groups.has(result.storeId)) groups.set(result.storeId, EXCEL_STORE_NAMES.length + 1);
+  }
+  return groups;
+}
+
+export function sortPayrollResultsForExcel<T extends PayrollResult>(results: T[]): T[] {
+  const storeGroups = excelStoreGroupsById(results);
+  const nameCounts = new Map<string, number>();
+  for (const result of results) nameCounts.set(compact(result.employeeName), (nameCounts.get(compact(result.employeeName)) ?? 0) + 1);
+  const order = (result: T) => {
+    const strict = payrollOrderOf(result);
+    if (strict !== Number.MAX_SAFE_INTEGER) return strict;
+    const name = compact(result.employeeName);
+    if (nameCounts.get(name) === 1) {
+      const byUniqueName = REFERENCE_ORDER.findIndex(([, , expectedName]) => expectedName === name);
+      if (byUniqueName >= 0) return byUniqueName;
+    }
+    return Number.MAX_SAFE_INTEGER;
+  };
+  const group = (result: T) => {
+    if (result.employeeType === "fullTime") return 0;
+    if (!result.storeId) return EXCEL_STORE_NAMES.length + 2;
+    return storeGroups.get(result.storeId) ?? EXCEL_STORE_NAMES.length + 1;
+  };
+  return [...results].sort((a, b) =>
+    group(a) - group(b) ||
+    order(a) - order(b) ||
+    (a.payrollTransferOrder ?? Number.MAX_SAFE_INTEGER) - (b.payrollTransferOrder ?? Number.MAX_SAFE_INTEGER) ||
+    a.employeeCode.localeCompare(b.employeeCode, "ja", { numeric: true }) ||
+    a.employeeId.localeCompare(b.employeeId)
+  );
+}
+
 export function sortPayrollResults<T extends PayrollResult>(results: T[]): T[] {
   const nameCounts = new Map<string, number>();
   for (const result of results) nameCounts.set(compact(result.employeeName), (nameCounts.get(compact(result.employeeName)) ?? 0) + 1);

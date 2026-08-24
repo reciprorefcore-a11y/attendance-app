@@ -3,7 +3,8 @@ import test from "node:test";
 import XLSX from "xlsx";
 import { applyFixedPayrollAdjustment, calculatePayroll, calculatePayrollEmployee, calculateWithholdingTax2026, isPayrollMonthClosed, summarizePayroll, validatePayrollInput, type PayrollAttendanceDay, type PayrollEmployee } from "../lib/payroll.ts";
 import { createPayrollWorkbook, createPayslipPdf, createPayslipZip, createTransferWorkbook, selectFullTimePayslipResults, selectStorePayslipResults } from "../lib/payroll-export.ts";
-import { sortPayrollResults } from "../lib/payroll-order.ts";
+import { sortPayrollResults, sortPayrollResultsForExcel } from "../lib/payroll-order.ts";
+import { resolveResidentTaxForMonth } from "../lib/payroll-server.ts";
 
 const employee = (id: string, patch: Partial<PayrollEmployee> = {}): PayrollEmployee => ({ id, employeeCode: id, name: `従業員${id}`, storeId: "hq", storeName: "本部", payrollEnabled: true, payrollType: "hourly", hourlyWage: 1225, transportationType: "none", paymentMethod: "bank", bankAccountRegistered: true, taxTableType: "kou", dependentCount: 0, healthInsurance: 0, childSupportContribution: 0, careInsurance: 0, employeePension: 0, employmentInsurance: 0, residentTax: 0, ...patch });
 const day = (employeeId: string, date: string, workMinutes: number, patch: Partial<PayrollAttendanceDay> = {}): PayrollAttendanceDay => ({ employeeId, date, workMinutes, overtimeMinutes: 0, nightMinutes: 0, helpMinutes: 0, breakMinutes: 0, confirmed: true, kind: "daily", ...patch });
@@ -48,9 +49,27 @@ test("24時間未満の労働・深夜・出勤日数を倍にしない", () => 
   assert.deepEqual([result.attendance.workMinutes, result.attendance.nightMinutes, result.attendance.attendanceDays], [720, 120, 1]);
 });
 
-test("分数から1円未満切捨てで時給・残業・深夜0.25割増を計算する", () => {
+test("分数から1円未満四捨五入で時給・残業・深夜0.25割増を計算する", () => {
   const result = calculatePayrollEmployee(employee("1", { hourlyWage: 1225 }), [day("1", "2026-07-01", 61, { overtimeMinutes: 31, nightMinutes: 17 })]);
-  assert.equal(result.earnings.baseSalary, 1245); assert.equal(result.earnings.overtimePremium, 158); assert.equal(result.earnings.nightPremium, 86);
+  assert.equal(result.earnings.baseSalary, 1245); assert.equal(result.earnings.overtimePremium, 158); assert.equal(result.earnings.nightPremium, 87);
+});
+
+test("時給端数処理：0.5円以上は切り上げ（四捨五入）", () => {
+  // baseSalary: 1225 × 2910 / 60 = 59412.5 → 59413
+  const r1 = calculatePayrollEmployee(employee("1", { hourlyWage: 1225 }), [day("1", "2026-07-01", 2910)]);
+  assert.equal(r1.earnings.baseSalary, 59413, "59412.5は59413へ四捨五入");
+  // overtimePremium: 1225 × 0.25 × 420 / 60 = 2143.75 → 2144
+  const r2 = calculatePayrollEmployee(employee("hourly-2", { employeeCode: "hourly-2", hourlyWage: 1225 }), [day("hourly-2", "2026-07-01", 420, { overtimeMinutes: 420 })]);
+  assert.equal(r2.earnings.overtimePremium, 2144, "2143.75は2144へ四捨五入");
+});
+
+test("固定給の自動残業手当も給与項目ごとに四捨五入する", () => {
+  const fixed = calculatePayrollEmployee(employee("fixed-round", {
+    employeeCode: "fixed-round", payrollType: "fixed", fixedBaseSalary: 1000, hourlyWage: 0,
+  }), []);
+  const adjusted = applyFixedPayrollAdjustment(fixed, { overtimeMinutes: 60 });
+  assert.equal(adjusted.fixedAdjustment?.automaticOvertimeAllowance, 8, "7.8125円は8円へ四捨五入");
+  assert.equal(adjusted.earnings.overtimePremium, 8);
 });
 
 test("店舗間ヘルプを同一employeeIdの1明細へ合算する", () => {
@@ -97,9 +116,199 @@ test("銀行口座と税区分が未設定でも給与計算を妨げず甲欄�
   assert.equal(table.deductions.incomeTax, 170);
 });
 
-test("固定給・固定手当・休日手当と社保全額を引き継ぐ", () => {
-  const result = calculatePayrollEmployee(employee("f", { payrollType: "fixed", fixedBaseSalary: 200000, positionAllowance: 10000, holidayAllowance: 10694, fixedOvertimeAllowance: 20000, healthInsurance: 10000, childSupportContribution: 500, careInsurance: 1000, employeePension: 20000, employmentInsurance: 1000 }), []);
-  assert.equal(result.earnings.holidayAllowance, 10694); assert.equal(result.earnings.overtimePremium, 0); assert.equal(result.deductions.socialInsuranceTotal, 32500); assert.equal(result.deductions.taxableIncome, result.earnings.taxableTotal - 32500);
+test("固定給・固定手当と社保全額を引き継ぐ（休日手当はゼロ初期化）", () => {
+  const result = calculatePayrollEmployee(employee("f", { payrollType: "fixed", fixedBaseSalary: 200000, positionAllowance: 10000, fixedOvertimeAllowance: 20000, healthInsurance: 10000, childSupportContribution: 500, careInsurance: 1000, employeePension: 20000, employmentInsurance: 1000 }), []);
+  assert.equal(result.earnings.holidayAllowance, 0); assert.equal(result.earnings.overtimePremium, 0); assert.equal(result.deductions.socialInsuranceTotal, 32500); assert.equal(result.deductions.taxableIncome, result.earnings.taxableTotal - 32500);
+});
+
+test("休日出勤手当は基本給から自動計算し二重加算しない", () => {
+  const base = calculatePayrollEmployee(employee("nk", { employeeCode: "0003", name: "中村鏡太郎", payrollType: "fixed", fixedBaseSalary: 190000 }), []);
+  assert.equal(base.earnings.holidayAllowance, 0);
+  const adj1 = applyFixedPayrollAdjustment(base, { temporaryAttendanceCount: 1 });
+  assert.equal(adj1.earnings.holidayAllowance, 10694);
+  assert.equal(adj1.earnings.holidayAllowance, Math.round(190000 / 177.67 * 8 * 1.25));
+  const adj2 = applyFixedPayrollAdjustment(base, { temporaryAttendanceCount: 2 });
+  assert.equal(adj2.earnings.holidayAllowance, 21388);
+  const adj0 = applyFixedPayrollAdjustment(adj1, { temporaryAttendanceCount: 0 });
+  assert.equal(adj0.earnings.holidayAllowance, 0);
+  const base2 = calculatePayrollEmployee(employee("nk2", { employeeCode: "0003", payrollType: "fixed", fixedBaseSalary: 200000 }), []);
+  const adj1b = applyFixedPayrollAdjustment(base2, { temporaryAttendanceCount: 1 });
+  assert.equal(adj1b.earnings.holidayAllowance, Math.round(200000 / 177.67 * 8 * 1.25));
+  assert.notEqual(adj1b.earnings.holidayAllowance, 10694);
+});
+
+test("休日手当overrideは当月調整だけに反映し、自動額との差異には理由を必須とする", () => {
+  const base = calculatePayrollEmployee(employee("kobayashi-override", {
+    employeeCode: "0064", name: "小林彗太", payrollType: "fixed", fixedBaseSalary: 183000,
+  }), []);
+  const withoutReason = applyFixedPayrollAdjustment(base, { temporaryAttendanceCount: 2, holidayAllowanceOverride: 30891 });
+  assert.equal(withoutReason.earnings.holidayAllowance, 30891);
+  assert.ok(withoutReason.issues.some((issue) => issue.code === "holiday_allowance_override_reason_required" && issue.severity === "error"));
+  const reason = "公休6日のところ実休4日のため、休日出勤2回";
+  const adjusted = applyFixedPayrollAdjustment(base, { temporaryAttendanceCount: 2, holidayAllowanceOverride: 30891, overrideReason: reason });
+  assert.equal(adjusted.earnings.holidayAllowance, 30891);
+  assert.equal(adjusted.fixedAdjustment?.temporaryAttendanceCount, 2);
+  assert.equal(adjusted.fixedAdjustment?.holidayAllowanceOverride, 30891);
+  assert.equal(adjusted.fixedAdjustment?.overrideReason, reason);
+  assert.equal(adjusted.issues.some((issue) => issue.code === "holiday_allowance_override_reason_required"), false);
+  assert.equal(applyFixedPayrollAdjustment(adjusted, { temporaryAttendanceCount: 2, holidayAllowanceOverride: 30891, overrideReason: reason }).earnings.holidayAllowance, 30891, "二重加算しない");
+  assert.equal(base.earnings.holidayAllowance, 0, "元の固定給与マスター相当結果は変更しない");
+});
+
+test("住民税履歴はemployeeId単位で対象月以前の最新値を解決し、未設定時はfallback警告", () => {
+  const source = employee("employee-id-1", {
+    employeeCode: "duplicate-code", payrollType: "fixed", fixedBaseSalary: 200000, residentTax: 9999,
+    residentTaxHistory: [
+      { amount: 10000, effectiveMonth: "2026-06", updatedAt: "past", updatedBy: "admin-a" },
+      { amount: 14100, effectiveMonth: "2026-08", updatedAt: "current", updatedBy: "admin-b" },
+      { amount: 15000, effectiveMonth: "2026-09", updatedAt: "future", updatedBy: "admin-c" },
+    ],
+  });
+  const july = resolveResidentTaxForMonth(source, "2026-07");
+  const august = resolveResidentTaxForMonth(source, "2026-08");
+  assert.deepEqual([july.residentTax, july.residentTaxEffectiveMonth], [10000, "2026-06"]);
+  assert.deepEqual([august.residentTax, august.residentTaxEffectiveMonth], [14100, "2026-08"]);
+  assert.equal(calculatePayrollEmployee(august, []).residentTaxEffectiveMonthSnapshot, "2026-08");
+  const fallback = resolveResidentTaxForMonth(employee("employee-id-2", { payrollType: "fixed", fixedBaseSalary: 200000, residentTax: 12300 }), "2026-08");
+  assert.equal(fallback.residentTax, 12300);
+  assert.ok(validatePayrollInput([fallback], [], "2026-08").some((issue) => issue.code === "resident_tax_history_fallback" && issue.severity === "warning"));
+});
+
+test("2026年8月fixture：中村259,851円・小林255,836円", async () => {
+  const residentEntry = (amount: number) => [{ amount, effectiveMonth: "2026-08", updatedAt: "fixture", updatedBy: "fixture-admin" }];
+  const nakamuraEmployee = resolveResidentTaxForMonth(employee("hvjU14BKDB0pCdDrUZF1", {
+    employeeCode: "0003", name: "中村鏡太郎", payrollType: "fixed", fixedBaseSalary: 185000, holidayAllowanceBaseSalary: 190000,
+    positionAllowance: 9000, businessAllowance: 110000, monthlyTransportation: 15670,
+    healthInsurance: 15872, childSupportContribution: 368, careInsurance: 2592, employeePension: 29280, employmentInsurance: 1651,
+    incomeTax: 6650, residentTax: 10000, residentTaxHistory: residentEntry(14100),
+  }), "2026-08");
+  const nakamura = applyFixedPayrollAdjustment(calculatePayrollEmployee(nakamuraEmployee, []), { temporaryAttendanceCount: 1 });
+  assert.equal(nakamura.earnings.holidayAllowance, 10694, "中村は自動式を使用しoverrideなし");
+  assert.equal(nakamura.earnings.grossTotal, 330364);
+  assert.equal(nakamura.fixedAdjustment?.holidayAllowanceOverride, null);
+  assert.equal(nakamura.deductions.residentTax, 14100);
+  assert.equal(nakamura.netPay, 259851);
+
+  const kobayashiEmployee = resolveResidentTaxForMonth(employee("c6ADSFHwyHecwScuZ6g8", {
+    employeeCode: "0064", name: "小林彗太", payrollType: "fixed", fixedBaseSalary: 183000,
+    positionAllowance: 8000, fixedOvertimeAllowance: 27678, businessAllowance: 56417, monthlyTransportation: 10110,
+    healthInsurance: 13888, childSupportContribution: 322, careInsurance: 0, employeePension: 25620, employmentInsurance: 1580,
+    incomeTax: 6650, residentTax: 10000, residentTaxHistory: residentEntry(12200),
+  }), "2026-08");
+  const kobayashi = applyFixedPayrollAdjustment(calculatePayrollEmployee(kobayashiEmployee, []), {
+    temporaryAttendanceCount: 2,
+    holidayAllowanceOverride: 30891,
+    overrideReason: "公休6日のところ実休4日のため、休日出勤2回",
+  });
+  assert.equal(kobayashi.earnings.holidayAllowance, 30891);
+  assert.equal(kobayashi.deductions.employmentInsurance, 1580);
+  assert.equal(kobayashi.deductions.incomeTax, 6650);
+  assert.equal(kobayashi.deductions.residentTax, 12200);
+  assert.equal(kobayashi.netPay, 255836);
+  const payrollBook = XLSX.read(createPayrollWorkbook([kobayashi], "2026-08"));
+  const payrollSheet = payrollBook.Sheets[payrollBook.SheetNames[0]];
+  assert.equal(payrollSheet[XLSX.utils.encode_cell({ r: 8, c: 2 })].v, 30891, "給与Excel休日手当");
+  assert.equal(payrollSheet[XLSX.utils.encode_cell({ r: 32, c: 2 })].v, 255836, "給与Excel最終支給額");
+  const transferBook = XLSX.read(createTransferWorkbook([kobayashi], "2026-08"));
+  assert.equal(transferBook.Sheets[transferBook.SheetNames[0]].D3.v, 255836, "振込一覧");
+  const pdf = await createPayslipPdf(kobayashi, "2026-07", "2026-08-25");
+  assert.ok(pdf.length > 5000, "PDF生成");
+  const snapshot = structuredClone(kobayashi);
+  assert.equal(snapshot.fixedAdjustment?.holidayAllowanceOverride, 30891);
+  assert.equal(snapshot.fixedAdjustment?.overrideReason, "公休6日のところ実休4日のため、休日出勤2回");
+});
+
+test("青山佳史（0002）と木月徳子（0017）のBook2検算値が甲欄0扶養の自動計算と一致する", () => {
+  // 青山：役員報酬のみ・現金支給・立替経費返金当月調整
+  const aoyama = calculatePayrollEmployee(employee("aoyama", {
+    employeeCode: "0002", name: "青山佳史", payrollType: "fixed",
+    directorCompensation: 150000, fixedBaseSalary: 0,
+    healthInsurance: 7440, childSupportContribution: 172, careInsurance: 1215, employeePension: 13725, employmentInsurance: 0,
+    residentTax: 12600, paymentMethod: "cash",
+  }), []);
+  assert.equal(aoyama.earnings.taxableTotal, 150000, "青山 課税支給");
+  assert.equal(aoyama.deductions.socialInsuranceTotal, 22552, "青山 社保合計");
+  assert.equal(aoyama.deductions.taxableIncome, 127448, "青山 課税所得");
+  assert.equal(aoyama.deductions.incomeTax, 1300, "青山 所得税（甲欄0扶養 自動計算）");
+  assert.equal(aoyama.deductions.residentTax, 12600, "青山 住民税");
+  assert.equal(aoyama.paymentMethod, "cash", "青山 現金支給");
+  assert.equal(aoyama.earnings.holidayAllowance, 0, "青山 役員は休日手当0（基本給=0）");
+  // 立替経費精算 7599 を当月調整として適用（正数入力）
+  const aoyamaAdj = applyFixedPayrollAdjustment(aoyama, { expenseReimbursement: 7599 });
+  assert.equal(aoyamaAdj.reimbursements.expenseReimbursement, 7599, "青山 立替経費精算（正数）");
+  assert.equal(aoyamaAdj.deductions.total, aoyama.deductions.total, "精算で控除合計は変わらない");
+  assert.equal(aoyamaAdj.payrollNetPay, aoyama.payrollNetPay, "精算で給与差引額は変わらない");
+  assert.equal(aoyamaAdj.netPay, 121147, "青山 最終支給額（Book2）");
+
+  // 木月：基本給+職能・振込・休日出勤対象
+  const tsukiki = calculatePayrollEmployee(employee("tsukiki", {
+    employeeCode: "0017", name: "木月徳子", payrollType: "fixed",
+    fixedBaseSalary: 200000, positionAllowance: 6000,
+    healthInsurance: 9920, childSupportContribution: 230, careInsurance: 1620, employeePension: 18300, employmentInsurance: 1030,
+    residentTax: 0, paymentMethod: "bank",
+  }), []);
+  assert.equal(tsukiki.earnings.taxableTotal, 206000, "木月 課税支給");
+  assert.equal(tsukiki.deductions.socialInsuranceTotal, 31100, "木月 社保合計");
+  assert.equal(tsukiki.deductions.taxableIncome, 174900, "木月 課税所得");
+  assert.equal(tsukiki.deductions.incomeTax, 3410, "木月 所得税（甲欄0扶養 自動計算）");
+  assert.equal(tsukiki.netPay, 171490, "木月 差引支給額（Book2）");
+  assert.equal(tsukiki.paymentMethod, "bank", "木月 振込支給");
+  // 木月は基本給200000ベースで休日出勤単価が付く
+  const tsukikiAdj = applyFixedPayrollAdjustment(tsukiki, { temporaryAttendanceCount: 1 });
+  assert.equal(tsukikiAdj.earnings.holidayAllowance, Math.round(200000 / 177.67 * 8 * 1.25), "木月 休日1回単価");
+  assert.ok(tsukikiAdj.netPay > tsukiki.netPay, "木月 休日出勤で差引増加");
+  // 立替経費精算は正数入力：控除に含めず最終支給額を増やす
+  const withReimb = applyFixedPayrollAdjustment(tsukiki, { expenseReimbursement: 5000 });
+  assert.equal(withReimb.reimbursements.expenseReimbursement, 5000, "立替経費精算（正数）");
+  assert.equal(withReimb.deductions.total, tsukiki.deductions.total, "精算で控除合計は変わらない");
+  assert.equal(withReimb.payrollNetPay, tsukiki.payrollNetPay, "精算で給与差引額は変わらない");
+  assert.equal(withReimb.netPay, tsukiki.netPay + 5000, "最終支給額が5,000円増加");
+});
+
+test("青山佳史の精算なし最終支給額は113,548円・精算7,599円正数入力で増加する", () => {
+  const aoyama = calculatePayrollEmployee(employee("aoyama", {
+    employeeCode: "0002", name: "青山佳史", payrollType: "fixed",
+    directorCompensation: 150000, fixedBaseSalary: 0,
+    healthInsurance: 7440, childSupportContribution: 172, careInsurance: 1215, employeePension: 13725, employmentInsurance: 0,
+    residentTax: 12600, paymentMethod: "cash",
+  }), []);
+  assert.equal(aoyama.payrollNetPay, 113548, "精算なし時の給与差引額");
+  assert.equal(aoyama.netPay, 113548, "精算なし時の最終支給額");
+  assert.equal(aoyama.bankTransfer, 0, "現金支給のため振込額0");
+  assert.equal(aoyama.cashPayment, 113548, "現金支給額");
+  const withRefund = applyFixedPayrollAdjustment(aoyama, { expenseReimbursement: 7599 });
+  assert.equal(withRefund.reimbursements.expenseReimbursement, 7599, "立替経費精算 7,599円");
+  assert.equal(withRefund.deductions.total, aoyama.deductions.total, "控除合計は変わらない");
+  assert.equal(withRefund.payrollNetPay, 113548, "給与差引額は変わらない");
+  assert.equal(withRefund.netPay, 121147, "精算適用後の最終支給額");
+  assert.equal(withRefund.netPay - aoyama.netPay, 7599, "精算7,599円で最終支給額が増加");
+  assert.equal(withRefund.cashPayment, 121147, "現金支給額（最終支給額）");
+});
+
+test("store-payslip ZIPは正社員（fullTime）を含まずfulltime-payslip ZIPのみに含まれる", () => {
+  const employees: PayrollEmployee[] = [
+    employee("aoyama", { employeeCode: "0002", name: "青山佳史", payrollType: "fixed",
+      directorCompensation: 150000, fixedBaseSalary: 0, healthInsurance: 7440,
+      childSupportContribution: 172, careInsurance: 1215, employeePension: 13725,
+      employmentInsurance: 0, residentTax: 12600, paymentMethod: "cash" }),
+    employee("tsukiki", { employeeCode: "0017", name: "木月徳子", payrollType: "fixed",
+      fixedBaseSalary: 200000, positionAllowance: 6000, healthInsurance: 9920,
+      childSupportContribution: 230, careInsurance: 1620, employeePension: 18300,
+      employmentInsurance: 1030, residentTax: 0, paymentMethod: "bank" }),
+    employee("p1", { storeId: "store-abc", storeName: "ABC店" }),
+    employee("p2", { storeId: "store-xyz", storeName: "XYZ店" }),
+  ];
+  const results = calculatePayroll(employees, []);
+  const storeAbcResults = selectStorePayslipResults(results, "store-abc");
+  assert.equal(storeAbcResults.length, 1, "store-abc には p1 のみ");
+  assert.equal(storeAbcResults[0].employeeId, "p1");
+  assert.ok(storeAbcResults.every((r) => r.employeeType === "partTime"), "store ZIP は全員 partTime");
+  const fullTimeResults = selectFullTimePayslipResults(results);
+  assert.equal(fullTimeResults.length, 2, "fulltime ZIP は青山と木月の2名");
+  assert.ok(fullTimeResults.every((r) => r.employeeType === "fullTime"));
+  assert.ok(fullTimeResults.some((r) => r.employeeId === "aoyama"), "青山は fulltime ZIP に含まれる");
+  assert.ok(fullTimeResults.some((r) => r.employeeId === "tsukiki"), "木月は fulltime ZIP に含まれる");
+  assert.ok(!storeAbcResults.some((r) => r.employeeType === "fullTime"), "store ZIP に fullTime は含まれない");
 });
 
 test("幹部は前月確定値の税額を使用し、前月値がなければ阻止する", () => {
@@ -118,29 +327,37 @@ test("正社員5名は時給0円・勤務0でも固定給として扱う", () =>
   }
 });
 
-test("正社員の月次調整は固定給を変えず残業・非課税交通費・立替経費を反映する", () => {
+test("正社員の月次調整は固定給を変えず残業・非課税交通費・立替経費精算を反映する", () => {
   const fixed = calculatePayrollEmployee(employee("fixed", { employeeCode: "0003", payrollType: "fixed", fixedBaseSalary: 200000, hourlyWage: 0 }), []);
-  const adjusted = applyFixedPayrollAdjustment(fixed, { overtimeMinutes: 60, transportation: 1000, advanceExpense: 2000, otherTemporaryPayment: 3000, otherDeduction: 400 });
+  const adjusted = applyFixedPayrollAdjustment(fixed, { overtimeMinutes: 60, transportation: 1000, expenseReimbursement: 2000, otherTemporaryPayment: 3000, otherDeduction: 400 });
   assert.equal(adjusted.earnings.baseSalary, 200000);
-  assert.equal(adjusted.fixedAdjustment?.automaticOvertimeAllowance, 1562);
+  assert.equal(adjusted.fixedAdjustment?.automaticOvertimeAllowance, 1563);
   assert.equal(adjusted.earnings.transportation, 1000);
-  assert.equal(adjusted.deductions.advanceExpense, 2000);
+  assert.equal(adjusted.reimbursements.expenseReimbursement, 2000, "立替経費精算は reimbursements に入る");
   assert.equal(adjusted.deductions.otherDeduction, 400);
+  // 残業・臨時課税支給で所得税が再計算されるため incomeTax も変化する。expenseReimbursement は deductions に含まれない
+  const incomeTaxDiff1 = adjusted.deductions.incomeTax - fixed.deductions.incomeTax;
+  assert.equal(adjusted.deductions.total, fixed.deductions.total + incomeTaxDiff1 + 400, "控除合計は所得税変化 + otherDeduction のみ増加（expenseReimbursement は含まない）");
+  assert.equal(adjusted.netPay, adjusted.payrollNetPay + 2000, "最終支給額 = 給与差引額 + 立替経費精算");
 });
 
 test("中村鏡太郎の当月調整は画面・両Excel・明細PDFで同じ再試算結果を使う", async () => {
   const fixed = calculatePayrollEmployee(employee("nakamura", { employeeCode: "0003", name: "中村鏡太郎", payrollType: "fixed", fixedBaseSalary: 200000, hourlyWage: 0 }), []);
-  const adjusted = applyFixedPayrollAdjustment(fixed, { overtimeMinutes: 120, transportation: 1000, advanceExpense: 3000 });
+  const adjusted = applyFixedPayrollAdjustment(fixed, { overtimeMinutes: 120, transportation: 1000, expenseReimbursement: 3000 });
   assert.equal(adjusted.earnings.overtimePremium, 3125);
   assert.equal(adjusted.earnings.transportation, 1000);
-  assert.equal(adjusted.deductions.advanceExpense, 3000);
+  assert.equal(adjusted.reimbursements.expenseReimbursement, 3000, "立替経費精算は reimbursements に入る");
   assert.equal(adjusted.earnings.grossTotal, 204125);
-  assert.equal(adjusted.netPay, 196645);
+  // 残業で所得税が再計算されるため incomeTax は変化するが expenseReimbursement は deductions に含まれない
+  const incomeTaxDiff2 = adjusted.deductions.incomeTax - fixed.deductions.incomeTax;
+  assert.equal(adjusted.deductions.total, fixed.deductions.total + incomeTaxDiff2, "控除合計は所得税再計算分のみ変化（立替経費精算は含まない）");
+  assert.equal(adjusted.netPay, adjusted.payrollNetPay + 3000, "最終支給額 = 給与差引額 + 立替経費精算");
   const payrollBook = XLSX.read(createPayrollWorkbook([adjusted], "2026-08"));
   const payrollSheet = payrollBook.Sheets[payrollBook.SheetNames[0]];
   assert.equal(payrollSheet[XLSX.utils.encode_cell({ r: 11, c: 2 })].v, 3125);
   assert.equal(payrollSheet[XLSX.utils.encode_cell({ r: 10, c: 2 })].v, 1000);
-  assert.equal(payrollSheet[XLSX.utils.encode_cell({ r: 29, c: 2 })].v, 3000);
+  assert.equal(payrollSheet[XLSX.utils.encode_cell({ r: 29, c: 2 })].v, 3000, "給与Excel row29: 立替経費精算（正数）");
+  assert.equal(payrollSheet[XLSX.utils.encode_cell({ r: 32, c: 2 })].v, adjusted.netPay, "給与Excel row32: 最終支給額");
   const transferBook = XLSX.read(createTransferWorkbook([adjusted], "2026-08"));
   assert.equal(transferBook.Sheets[transferBook.SheetNames[0]].D3.v, adjusted.netPay);
   const pdf = await createPayslipPdf(adjusted, "2026-07", "2026-08-25");
@@ -154,6 +371,20 @@ test("既存振込一覧順を優先し未登録者を末尾へ置く", () => {
     calculatePayrollEmployee(employee("matsumoto", { employeeCode: "1076", name: "松本るぴな" }), []),
   ];
   assert.deepEqual(sortPayrollResults(rows).map((row) => row.employeeName), ["松本るぴな", "小林彗太", "一覧外"]);
+});
+
+test("給与ExcelだけをemployeeTypeとstoreIdの店舗順で並べ、振込一覧順は維持する", () => {
+  const rows = [
+    calculatePayrollEmployee(employee("unknown", { employeeCode: "9999", name: "一覧外", storeId: "store-none", storeName: "" }), []),
+    calculatePayrollEmployee(employee("noge", { employeeCode: "7014", name: "有泉春花", storeId: "store-noge", storeName: "Graine Marche野毛店" }), []),
+    calculatePayrollEmployee(employee("musashi", { employeeCode: "1076", name: "松本るぴな", storeId: "store-musashi", storeName: "灯 武蔵小杉店" }), []),
+    calculatePayrollEmployee(employee("full", { employeeCode: "9000", name: "正社員", payrollType: "fixed", fixedBaseSalary: 200000, storeId: undefined, storeName: undefined }), []),
+    calculatePayrollEmployee(employee("unset", { employeeCode: "9998", name: "店舗未設定", storeId: "", storeName: "" }), []),
+    calculatePayrollEmployee(employee("pescara", { employeeCode: "9001", name: "Pescara", storeId: "store-pescara", storeName: "Pescara綱島店" }), []),
+    calculatePayrollEmployee(employee("graine", { employeeCode: "9002", name: "Graine", storeId: "store-graine", storeName: "Graine Marche綱島店" }), []),
+  ];
+  assert.deepEqual(sortPayrollResultsForExcel(rows).map((row) => row.employeeId), ["full", "musashi", "pescara", "graine", "noge", "unknown", "unset"]);
+  assert.equal(sortPayrollResults(rows)[0].employeeId, "musashi", "振込一覧用の既存34名順は変えない");
 });
 
 test("時給制の時給未設定エラーには社員コードと氏名を含む", () => {
@@ -211,10 +442,11 @@ test("小林彗太へその他臨時支給800,000円を設定すると所得税�
   // ⑤ 控除合計 = 社保41,410 + 所得税117,490 + 住民税10,000
   assert.equal(adjusted.deductions.total, 168900, "控除合計");
 
-  // ⑥ 差引支給額 = 支給合計993,110 - 控除合計168,900
+  // ⑥ 差引支給額 = 支給合計993,110 - 控除合計168,900（立替経費精算なしのケース）
   assert.equal(adjusted.netPay, 824210, "差引支給額");
-  assert.equal(adjusted.netPay, adjusted.earnings.grossTotal - adjusted.deductions.total, "差引支給額の整合性");
-  assert.notEqual(adjusted.netPay, base.netPay + 800000, "差引支給額は単純に800,000円増ではない");
+  assert.equal(adjusted.payrollNetPay, adjusted.earnings.grossTotal - adjusted.deductions.total, "給与差引額の整合性");
+  assert.equal(adjusted.reimbursements.total, 0, "立替経費精算なし");
+  assert.notEqual(adjusted.netPay, base.netPay + 800000, "差引支給額は単純に800,000円増ではない（所得税増加のため）");
 
   // ⑦ summarizePayroll も同じ run から計算する
   const totals = summarizePayroll([adjusted]);
@@ -250,6 +482,7 @@ test("小林彗太へその他臨時支給800,000円を設定すると所得税�
   assert.equal(reverted.deductions.taxableIncome, base.deductions.taxableIncome, "復帰後 課税対象額");
   assert.equal(reverted.deductions.incomeTax, base.deductions.incomeTax, "復帰後 所得税 2,010円");
   assert.equal(reverted.deductions.total, base.deductions.total, "復帰後 控除合計");
+  assert.equal(reverted.reimbursements.total, 0, "復帰後 立替経費精算 0");
   assert.equal(reverted.netPay, base.netPay, "復帰後 差引支給額 139,690円");
 
   // ⑫ 調整の二重加算が起きない：adjusted に同じ調整を再適用しても数値が変わらない
@@ -257,6 +490,127 @@ test("小林彗太へその他臨時支給800,000円を設定すると所得税�
   assert.equal(reapplied.earnings.otherTaxable, adjusted.earnings.otherTaxable, "二重加算なし: otherTaxable");
   assert.equal(reapplied.deductions.incomeTax, adjusted.deductions.incomeTax, "二重加算なし: 所得税");
   assert.equal(reapplied.netPay, adjusted.netPay, "二重加算なし: 差引支給額");
+});
+
+test("立替経費精算は正数で本人へ加算し課税・社保・控除へ影響させない", async () => {
+  const kobayashi = employee("kobayashi", {
+    employeeCode: "0064", name: "小林彗太", payrollType: "fixed", fixedBaseSalary: 183000, hourlyWage: 0,
+    monthlyTransportation: 10110,
+    healthInsurance: 13888, childSupportContribution: 322, employeePension: 25620, employmentInsurance: 1580,
+    residentTax: 10000,
+  });
+  const base = calculatePayrollEmployee(kobayashi, []);
+  assert.equal(base.payrollNetPay, 139690, "ベース給与差引額");
+  assert.equal(base.reimbursements.total, 0, "ベース立替経費精算0");
+  assert.equal(base.netPay, 139690, "ベース最終支給額");
+
+  // ① 正数800,000で入力 → 控除に影響しない
+  const adjusted = applyFixedPayrollAdjustment(base, { expenseReimbursement: 800000 });
+  assert.equal(adjusted.earnings.taxableTotal, base.earnings.taxableTotal, "課税支給額不変");
+  assert.equal(adjusted.earnings.grossTotal, base.earnings.grossTotal, "支給合計不変");
+  assert.equal(adjusted.deductions.socialInsuranceTotal, base.deductions.socialInsuranceTotal, "社会保険不変");
+  assert.equal(adjusted.deductions.incomeTax, base.deductions.incomeTax, "所得税不変");
+  assert.equal(adjusted.deductions.total, base.deductions.total, "控除合計不変");
+
+  // ② reimbursements に正数で格納される
+  assert.equal(adjusted.reimbursements.expenseReimbursement, 800000, "立替経費精算800,000円");
+  assert.equal(adjusted.reimbursements.total, 800000);
+
+  // ③ 給与差引額・最終支給額の区別
+  assert.equal(adjusted.payrollNetPay, 139690, "給与差引額（変化なし）");
+  assert.equal(adjusted.netPay, 939690, "最終支給額 = 139,690 + 800,000");
+  assert.equal(adjusted.bankTransfer, 939690, "振込額（bank支給）");
+
+  // ④ 二重加算されない
+  const reapplied = applyFixedPayrollAdjustment(adjusted, { expenseReimbursement: 800000 });
+  assert.equal(reapplied.reimbursements.total, 800000, "二重加算なし: reimbursementsTotal");
+  assert.equal(reapplied.netPay, 939690, "二重加算なし: netPay");
+
+  // ⑤ 0円に戻すと元に戻る
+  const reverted = applyFixedPayrollAdjustment(base, { expenseReimbursement: 0 });
+  assert.equal(reverted.reimbursements.total, 0, "0円で元に戻る");
+  assert.equal(reverted.netPay, base.netPay, "0円でnetPayが元に戻る");
+
+  // ⑥ 給与Excel：立替経費精算は正数で row29、控除合計は row30 に影響なし、最終支給額は row32
+  const payrollBook = XLSX.read(createPayrollWorkbook([adjusted], "2026-09", true, "2026-08", "2026-09-25"));
+  const payrollSheet = payrollBook.Sheets[payrollBook.SheetNames[0]];
+  assert.equal(payrollSheet[XLSX.utils.encode_cell({ r: 29, c: 0 })].v, "立替経費精算（支給）", "給与Excel row29 ラベル: 控除ではなく精算区分");
+  assert.equal(payrollSheet[XLSX.utils.encode_cell({ r: 29, c: 2 })].v, 800000, "給与Excel row29: 立替経費精算 正数800,000");
+  assert.equal(payrollSheet[XLSX.utils.encode_cell({ r: 30, c: 2 })].v, base.deductions.total, "給与Excel row30: 控除合計変化なし");
+  assert.equal(payrollSheet[XLSX.utils.encode_cell({ r: 32, c: 2 })].v, 939690, "給与Excel row32: 最終支給額939,690");
+
+  // ⑦ 振込一覧：939,690円
+  const transferBook = XLSX.read(createTransferWorkbook([adjusted], "2026-09"));
+  const transferSheet = transferBook.Sheets[transferBook.SheetNames[0]];
+  assert.equal(transferSheet.D3.v, 939690, "振込一覧 振込金額 939,690円");
+
+  // ⑧ PDF生成：サイズ確認（PDFに最終支給額が含まれる）
+  const pdf = await createPayslipPdf(adjusted, "2026-08", "2026-09-25");
+  assert.ok(pdf.length > 5000, "PDFサイズ");
+  assert.match(pdf.toString("latin1"), /PDF-/, "PDFヘッダー");
+
+  // ─── 青山佳史（正数入力 7,599円）
+  const aoyama = calculatePayrollEmployee(employee("aoyama2", {
+    employeeCode: "0002", name: "青山佳史", payrollType: "fixed",
+    directorCompensation: 150000, fixedBaseSalary: 0,
+    healthInsurance: 7440, childSupportContribution: 172, careInsurance: 1215, employeePension: 13725, employmentInsurance: 0,
+    residentTax: 12600, paymentMethod: "cash",
+  }), []);
+  const aoyamaAdj = applyFixedPayrollAdjustment(aoyama, { expenseReimbursement: 7599 });
+  assert.equal(aoyamaAdj.reimbursements.expenseReimbursement, 7599, "青山 立替経費精算7,599円");
+  assert.equal(aoyamaAdj.deductions.total, aoyama.deductions.total, "青山 控除合計変化なし");
+  assert.equal(aoyamaAdj.payrollNetPay, 113548, "青山 給与差引額113,548円");
+  assert.equal(aoyamaAdj.netPay, 121147, "青山 最終支給額121,147円");
+  assert.equal(aoyamaAdj.cashPayment, 121147, "青山 現金支給額121,147円");
+  assert.equal(aoyamaAdj.bankTransfer, 0, "青山 振込額0（現金支給）");
+
+  // 振込一覧から青山は除外される（cash支給）
+  const transferBook2 = XLSX.read(createTransferWorkbook([aoyamaAdj], "2026-09"));
+  const transferSheet2 = transferBook2.Sheets[transferBook2.SheetNames[0]];
+  const rows2 = XLSX.utils.sheet_to_json(transferSheet2, { header: 1 }) as unknown[][];
+  assert.equal(rows2.length, 3, "青山（現金）は振込一覧に含まれない（ヘッダー+合計行のみ）");
+
+  // 複数の金額で回帰検証
+  for (const amount of [0, 1, 7599, 800000]) {
+    const r = applyFixedPayrollAdjustment(aoyama, { expenseReimbursement: amount });
+    assert.equal(r.reimbursements.expenseReimbursement, amount, `expenseReimbursement=${amount}`);
+    assert.equal(r.deductions.total, aoyama.deductions.total, `控除合計不変(amount=${amount})`);
+    assert.equal(r.netPay, aoyama.netPay + amount, `netPay=base+${amount}`);
+  }
+});
+
+test("立替経費精算：負数・NaN・小数は0にclampし、旧advanceExpense負値は自動変換、正値はblocking errorを出す", () => {
+  const base = calculatePayrollEmployee(employee("val", { payrollType: "fixed", fixedBaseSalary: 200000, hourlyWage: 0 }), []);
+
+  // 負数・NaN・小数は applyFixedPayrollAdjustment 内で0または切り捨てになる（サーバーAPIは手前で400を返す）
+  assert.equal(applyFixedPayrollAdjustment(base, { expenseReimbursement: -1000 }).reimbursements.expenseReimbursement, 0, "負数→0にclamp");
+  assert.equal(applyFixedPayrollAdjustment(base, { expenseReimbursement: NaN }).reimbursements.expenseReimbursement, 0, "NaN→0にclamp");
+  assert.equal(applyFixedPayrollAdjustment(base, { expenseReimbursement: 100.9 }).reimbursements.expenseReimbursement, 100, "小数→切り捨て");
+
+  // 旧 advanceExpense 負値（返金）→ expenseReimbursement へ自動変換（issueなし）
+  const legacyNeg = applyFixedPayrollAdjustment(base, { advanceExpense: -5000 });
+  assert.equal(legacyNeg.reimbursements.expenseReimbursement, 5000, "旧advanceExpense負値→expenseReimbursement 5,000円");
+  assert.equal(legacyNeg.deductions.total, base.deductions.total, "控除合計は変化しない");
+  assert.equal(legacyNeg.netPay, base.netPay + 5000, "最終支給額 +5,000円");
+  assert.equal(legacyNeg.issues.some((i) => i.code === "legacy_advance_expense"), false, "負値自動変換はissueを出さない");
+
+  // 旧 advanceExpense 正値（支給方向が逆転するリスク）→ 変換せずblocking errorを出す
+  const legacyPos = applyFixedPayrollAdjustment(base, { advanceExpense: 3000 });
+  assert.equal(legacyPos.reimbursements.expenseReimbursement, 0, "旧advanceExpense正値は自動変換しない");
+  assert.equal(legacyPos.deductions.total, base.deductions.total, "控除合計も変化しない");
+  assert.ok(legacyPos.issues.some((i) => i.code === "legacy_advance_expense" && i.severity === "error"), "正値はblocking errorを出す（確定阻止）");
+  assert.match(legacyPos.issues.find((i) => i.code === "legacy_advance_expense")?.message ?? "", /立替経費精算へ入力し直してください/, "エラーメッセージに再入力案内を含む");
+
+  // 新旧フィールド同時指定：新フィールドが明示されていれば旧フィールドを完全に無視する
+  const newWins = applyFixedPayrollAdjustment(base, { expenseReimbursement: 1000, advanceExpense: -5000 });
+  assert.equal(newWins.reimbursements.expenseReimbursement, 1000, "expenseReimbursement 1,000 が優先（5,000 にならない）");
+  assert.equal(newWins.issues.some((i) => i.code === "legacy_advance_expense"), false, "新フィールド指定時は旧フィールドissueなし");
+
+  const zeroWins = applyFixedPayrollAdjustment(base, { expenseReimbursement: 0, advanceExpense: -5000 });
+  assert.equal(zeroWins.reimbursements.expenseReimbursement, 0, "expenseReimbursement: 0 が明示されていれば旧フィールドを無視（0のまま）");
+
+  const bigLegacy = applyFixedPayrollAdjustment(base, { expenseReimbursement: 3000, advanceExpense: -5000 });
+  assert.equal(bigLegacy.reimbursements.expenseReimbursement, 3000, "旧フィールドの方が大きくても新フィールドの 3,000 を使う");
 });
 
 test("令和8年分月額表 甲欄 電算機計算の特例：境界値と高額給与の回帰テスト", () => {
