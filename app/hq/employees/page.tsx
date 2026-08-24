@@ -4,7 +4,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { db } from "@/lib/firebase";
 import { adminStyles as styles } from "@/lib/adminStyles";
 import { useAuthProfile } from "@/lib/auth";
-import { isActiveFullTimeEmployee, isFullTimeEmployee } from "@/lib/employee-classification";
+import { isFullTimeEmployee } from "@/lib/employee-classification";
 import {
   Employee,
   EmploymentType,
@@ -25,7 +25,7 @@ import {
   writeBatch,
 } from "firebase/firestore";
 
-type EmployeeRow = Employee & { id: string };
+type EmployeeRow = Employee & { id: string; fixedBaseSalary?: number | null; monthlyTransportation?: number | null; residentTax?: number | null; healthInsurance?: number | null; childSupportContribution?: number | null; careInsurance?: number | null; employeePension?: number | null; employmentInsurance?: number | null; incomeTax?: number | null };
 type StoreRow = Store & { id: string };
 type WageInput = {
   hourlyWage: string;
@@ -115,13 +115,16 @@ export default function HqEmployeesPage() {
   const [preview, setPreview] = useState<PreviewState | null>(null);
 
   const load = async () => {
-    const [employeeSnapshot, storeSnapshot] = await Promise.all([
+    const [employeeSnapshot, storeSnapshot, payrollSnapshot] = await Promise.all([
       getDocs(query(collection(db, "employees"), orderBy("employeeCode"))),
       getDocs(query(collection(db, "stores"), orderBy("storeName"))),
+      getDocs(collection(db, "payrollSettings")),
     ]);
+    const settings = new Map(payrollSnapshot.docs.map((item) => [item.id, item.data()]));
     const rows = employeeSnapshot.docs.map((employeeDoc) => ({
       id: employeeDoc.id,
       ...(employeeDoc.data() as Employee),
+      ...(settings.get(employeeDoc.id) ?? {}),
     }));
 
     setEmployees(rows);
@@ -247,16 +250,8 @@ export default function HqEmployeesPage() {
         });
         const payrollSettingsRef = doc(db, "payrollSettings", employeeRef.id);
         batch.set(payrollSettingsRef, {
-          directorCompensation: Number(form.directorCompensation) || 0,
           fixedBaseSalary: Number(form.fixedBaseSalary) || 0,
-          positionAllowance: Number(form.positionAllowance) || 0,
-          businessAllowance: Number(form.businessAllowance) || 0,
-          fixedOvertimeAllowance: Number(form.fixedOvertimeAllowance) || 0,
-          healthInsurance: Number(form.healthInsurance) || 0,
-          childSupportContribution: Number(form.childSupportContribution) || 0,
-          careInsurance: Number(form.careInsurance) || 0,
-          employeePension: Number(form.employeePension) || 0,
-          employmentInsurance: Number(form.employmentInsurance) || 0,
+          monthlyTransportation: Number(form.transportationCost) || 0,
           residentTax: Number(form.residentTax) || 0,
           paymentMethod: form.paymentMethod,
           updatedAt: serverTimestamp(),
@@ -271,6 +266,23 @@ export default function HqEmployeesPage() {
     } finally {
       setIsSubmitting(false);
     }
+  };
+
+  const setFullTimeActive = async (employee: EmployeeRow, active: boolean) => {
+    const action = active ? "再有効化" : "退職・無効化";
+    if (!window.confirm(`${employee.name}さんを${action}します。よろしいですか？`)) return;
+    await updateDoc(doc(db, "employees", employee.id), { isDeleted: !active, status: active ? "active" : "inactive", payrollEnabled: active, updatedAt: serverTimestamp() });
+    setMessage(`${employee.name}さんを${action}しました。`); await load();
+  };
+
+  const editFullTimePayroll = async (employee: EmployeeRow) => {
+    const salary = window.prompt("月給", String(employee.fixedBaseSalary ?? 0)); if (salary == null) return;
+    const transportation = window.prompt("交通費（月額）", String(employee.monthlyTransportation ?? 0)); if (transportation == null) return;
+    const residentTax = window.prompt("住民税", String(employee.residentTax ?? 0)); if (residentTax == null) return;
+    const values = [salary, transportation, residentTax].map(Number);
+    if (values.some((value) => !Number.isInteger(value) || value < 0)) { setMessage("月給・交通費・住民税は0以上の整数で入力してください。"); return; }
+    await updateDoc(doc(db, "payrollSettings", employee.id), { fixedBaseSalary: values[0], monthlyTransportation: values[1], residentTax: values[2], updatedAt: serverTimestamp() });
+    setMessage(`${employee.name}さんの固定給与マスターを更新しました。`); await load();
   };
 
   const approve = async (employee: EmployeeRow) => {
@@ -452,9 +464,10 @@ export default function HqEmployeesPage() {
             </> : <>
               <label style={styles.label}>固定給区分<select value="fixed" disabled style={styles.input}><option value="fixed">固定給</option></select></label>
               <label style={styles.label}>支給方法<select value={form.paymentMethod} onChange={(e) => setForm({ ...form, paymentMethod: e.target.value as "bank" | "cash" })} style={styles.input}><option value="bank">振込</option><option value="cash">現金</option></select></label>
-              {([["directorCompensation","役員報酬"],["fixedBaseSalary","基本給"],["positionAllowance","職能手当"],["businessAllowance","業務手当"],["fixedOvertimeAllowance","固定手当"],["healthInsurance","健康保険"],["childSupportContribution","子育て支援金"],["careInsurance","介護保険"],["employeePension","厚生年金"],["employmentInsurance","雇用保険"],["incomeTax","所得税（空欄=自動）"],["residentTax","住民税"]] as const).map(([key, label]) => (
+              {([["fixedBaseSalary","月給"],["transportationCost","交通費（月額）"],["residentTax","住民税"]] as const).map(([key, label]) => (
                 <label key={key} style={styles.label}>{label}<input type="number" value={String(form[key as keyof typeof form])} onChange={(e) => setForm({ ...form, [key]: e.target.value })} style={styles.input} /></label>
               ))}
+              <div style={{ gridColumn: "1 / -1", padding: 12, background: "#F8FAFC", borderRadius: 8 }}>社会保険・雇用保険・所得税は給与試算で自動計算し、ここでは読取専用で確認します。当月調整は給与管理画面で入力します。</div>
             </>}
             <label style={styles.label}>給与対象<select value={form.payrollEnabled ? "yes" : "no"} onChange={(e) => setForm({ ...form, payrollEnabled: e.target.value === "yes" })} style={styles.input}><option value="yes">対象</option><option value="no">対象外</option></select></label>
             {employeeTab === "hourly" && <label style={styles.label}>打刻対象<select value="yes" disabled style={styles.input}><option value="yes">対象</option></select></label>}
@@ -522,14 +535,14 @@ export default function HqEmployeesPage() {
                   <th style={styles.th}>ひらがな</th>
                   <th style={styles.th}>所属店舗</th>
                   <th style={styles.th}>雇用区分</th>
-                  <th style={styles.th}>状態</th>
+                  <th style={styles.th}>状態</th>{employeeTab === "fixed" && <><th style={styles.th}>月給・交通費・住民税</th><th style={styles.th}>自動控除（現行結果）</th><th style={styles.th}>操作</th></>}
                 </tr>
               </thead>
               <tbody>
                 {employees
                   .filter((employee) =>
                     employeeTab === "fixed"
-                      ? isActiveFullTimeEmployee(employee)
+                      ? isFullTimeEmployee(employee)
                       : employee.isDeleted !== true && !isFullTimeEmployee(employee)
                   )
                   .map((employee) => (
@@ -540,6 +553,7 @@ export default function HqEmployeesPage() {
                       <td style={styles.td}>{isFullTimeEmployee(employee) ? "所属なし" : employee.storeName}</td>
                       <td style={styles.td}>{employmentTypeLabels[employee.employmentType]}</td>
                       <td style={styles.td}>{statusLabels[employee.status]}</td>
+                      {employeeTab === "fixed" && <><td style={styles.td}>{yen(employee.fixedBaseSalary ?? 0)}／{yen(employee.monthlyTransportation ?? 0)}／{yen(employee.residentTax ?? 0)}</td><td style={styles.td}>社保 {yen((employee.healthInsurance ?? 0)+(employee.childSupportContribution ?? 0)+(employee.careInsurance ?? 0)+(employee.employeePension ?? 0))}<br/>雇用 {yen(employee.employmentInsurance ?? 0)}／所得税 {yen(employee.incomeTax ?? 0)}</td><td style={styles.td}><button type="button" onClick={() => editFullTimePayroll(employee)} style={styles.secondaryButton}>編集</button> <button type="button" onClick={() => setFullTimeActive(employee, employee.isDeleted === true || employee.status === "inactive")} style={employee.isDeleted === true || employee.status === "inactive" ? styles.secondaryButton : styles.dangerButton}>{employee.isDeleted === true || employee.status === "inactive" ? "再有効化" : "退職・無効化"}</button></td></>}
                     </tr>
                   ))}
               </tbody>

@@ -53,7 +53,6 @@ for (const col of employeeColumns) {
     childSupportContribution: value(20, col), careInsurance: value(21, col), employeePension: value(22, col),
     employmentInsurance: value(23, col), incomeTax: fixed ? value(26, col) : undefined, residentTax: value(27, col),
     residentTaxEffectiveMonth: fixed ? "2026-08" : null,
-    holidayAllowanceBaseSalary: name === "中村鏡太郎" ? 190000 : undefined,
   };
   if (name === "小林彗太") { employee.employmentInsurance = 1580; employee.incomeTax = 6650; employee.residentTax = 12200; }
   const attendance: PayrollAttendanceDay[] = fixed ? [] : [{

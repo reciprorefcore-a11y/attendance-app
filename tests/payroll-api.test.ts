@@ -98,6 +98,12 @@ test("POST adjustments: 休日手当修正額の負数・小数・文字列を40
   assert.equal(validateAdjustments({ employee: { holidayAllowanceOverride: 30891, overrideReason: "公休調整" } }), null);
 });
 
+test("POST adjustments: 休日出勤回数は0以上の整数だけ許可する", () => {
+  assert.equal(validateAdjustments({ employee: { temporaryAttendanceCount: 0 } }), null);
+  assert.equal(validateAdjustments({ employee: { temporaryAttendanceCount: 1 } }), null);
+  for (const value of [-1, 1.5, "1", Number.NaN]) assert.equal(validateAdjustments({ employee: { temporaryAttendanceCount: value } })?.status, 400);
+});
+
 // ── 確定済みrunの旧フォーマット互換 ─────────────────────────────────
 
 test("確定済み旧フォーマットPayrollResultは reimbursements=0・netPay保持で正規化される", async () => {

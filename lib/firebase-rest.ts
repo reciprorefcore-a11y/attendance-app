@@ -146,6 +146,11 @@ export class RestDocRef {
     return { update: { name: `${FSDOCNAME()}/${this._docPath}`, fields: toFields(d) } };
   }
 
+  _createWrite(data: object) {
+    const write = this._setWrite(data) as Record<string, unknown>;
+    return { ...write, currentDocument: { exists: false } };
+  }
+
   _updateWrite(data: object) {
     const d = data as Record<string, unknown>;
     return {
@@ -245,6 +250,10 @@ export class RestBatch {
 
   set(ref: RestDocRef, data: object): void {
     this._writes.push(ref._setWrite(data));
+  }
+
+  create(ref: RestDocRef, data: object): void {
+    this._writes.push(ref._createWrite(data));
   }
 
   update(ref: RestDocRef, data: object): void {

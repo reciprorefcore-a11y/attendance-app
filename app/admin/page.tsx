@@ -48,6 +48,7 @@ import {
   type CorrectionStatus,
   type CorrectionWorkSet,
 } from "@/lib/attendance-correction";
+import { validateManualAttendance, type ManualAttendanceInput } from "@/lib/manual-attendance";
 
 type TabId =
   | "attendance"
@@ -82,6 +83,9 @@ type TimecardRow = {
   isOutsideGps?: boolean;
   isManualEdited?: boolean;
   isDeleted?: boolean;
+  isCancelled?: boolean;
+  manuallyCreated?: boolean;
+  manualRequestId?: string;
   deletedAt?: Timestamp | null;
   deletedBy?: string | null;
   isCorrected?: boolean;
@@ -124,6 +128,7 @@ const correctionStatusLabels: Record<CorrectionStatus, string> = {
   corrected: "修正済み",
   needs_review: "要確認",
 };
+const emptyManualForm = (): ManualAttendanceInput => ({ requestId: "", employeeId: "", storeId: "", workDate: "", clockIn: "", clockOut: "", breaks: [], creationReason: "", reasonDetail: "", note: "", allowSeparateShift: false });
 const csvEmployeeFields = ["name", "nameKana", "employeeCode", "storeId", "baseHourlyWage", "pin", "status"] as const;
 
 type CsvEmployeeRow = Record<(typeof csvEmployeeFields)[number], string>;
@@ -415,11 +420,16 @@ export default function AdminPage() {
   const [editForm, setEditForm] = useState<CorrectionEditor | null>(null);
   const [isSavingCorrection, setIsSavingCorrection] = useState(false);
   const [correctionError, setCorrectionError] = useState("");
+  const [manualForm, setManualForm] = useState<ManualAttendanceInput | null>(null);
+  const [manualConfirming, setManualConfirming] = useState(false);
+  const [manualError, setManualError] = useState("");
+  const [isSavingManual, setIsSavingManual] = useState(false);
   const correctionSaveLock = useRef(false);
   const correctionPreview = useMemo(
     () => editForm ? calculateCorrectionPreview(editForm) : null,
     [editForm],
   );
+  const manualValidation = useMemo(() => manualForm ? validateManualAttendance(manualForm) : null, [manualForm]);
   const [message, setMessage] = useState("");
   const [employeeEditingId, setEmployeeEditingId] = useState("");
   const [employeeKindTab, setEmployeeKindTab] = useState<"hourly" | "fixed">("hourly");
@@ -667,7 +677,7 @@ export default function AdminPage() {
       ),
     [employees],
   );
-  const calculationLogs = useMemo(() => toCalculationLogs(timecards), [timecards]);
+  const calculationLogs = useMemo(() => toCalculationLogs(timecards.filter((item) => item.isCancelled !== true)), [timecards]);
   const correctionWorkSets = useMemo(
     () => buildCorrectionWorkSets(calculationLogs),
     [calculationLogs],
@@ -790,6 +800,40 @@ export default function AdminPage() {
     setCorrectionError("");
     setMessage("");
     setActiveTab("edits");
+  };
+
+  const openManualAttendance = () => {
+    const today = new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10);
+    const defaultStore = storeFilter !== "all" ? storeFilter : stores[0]?.id ?? "";
+    setManualForm({ ...emptyManualForm(), requestId: crypto.randomUUID(), storeId: defaultStore, workDate: today, clockIn: `${today}T09:00`, clockOut: `${today}T18:00` });
+    setManualConfirming(false); setManualError("");
+  };
+
+  const submitManualAttendance = async () => {
+    if (!manualForm || !user || !manualValidation?.preview) { setManualError(manualValidation?.errors.join("。") || "入力内容を確認してください。"); return; }
+    if (!manualConfirming) { setManualConfirming(true); return; }
+    setIsSavingManual(true); setManualError("");
+    try {
+      const token = await user.getIdToken();
+      const response = await fetch("/api/attendance/manual", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify(manualForm) });
+      const data = await response.json() as { error?: string; code?: string };
+      if (!response.ok) {
+        if (data.code === "existing_attendance") setManualError(`${data.error}「既存の打刻を修正する」か、「別勤務として追加する」を選択してください。`);
+        else setManualError(data.error ?? "手動登録に失敗しました。");
+        setManualConfirming(false); return;
+      }
+      const employee = employees.find((item) => item.id === manualForm.employeeId);
+      setMessage(`${employee?.name ?? "従業員"}さんの${manualForm.workDate.replace(/^(\d{4})-(\d{2})-(\d{2})$/, "$1年$2月$3日")}の勤怠を手動登録しました`);
+      setManualForm(null); setManualConfirming(false); await load();
+    } finally { setIsSavingManual(false); }
+  };
+
+  const cancelManualAttendance = async (requestId: string, employeeName: string) => {
+    if (!user) return; const reason = window.prompt(`${employeeName}さんの手動登録を取り消す理由を入力してください。`); if (!reason?.trim()) return;
+    const token = await user.getIdToken();
+    const response = await fetch("/api/attendance/manual/cancel", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ requestId, cancellationReason: reason.trim() }) });
+    const data = await response.json() as { error?: string }; if (!response.ok) { setMessage(data.error ?? "取消に失敗しました。"); return; }
+    setMessage(`${employeeName}さんの手動登録を取り消しました。履歴は保持されています。`); await load();
   };
 
   const startEditFromAttendance = (row: AttendanceRow) => {
@@ -2318,7 +2362,10 @@ export default function AdminPage() {
 
         {activeTab === "edits" && (
           <section style={styles.tabPanel}>
-            <h2 style={styles.sectionTitle}>打刻修正</h2>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 16 }}>
+              <h2 style={{ ...styles.sectionTitle, margin: 0 }}>打刻修正</h2>
+              <button type="button" onClick={openManualAttendance} style={styles.button}>打刻漏れを新規登録</button>
+            </div>
             <DataTable headers={["勤務日", "従業員名", "勤務店舗", "出勤", "退勤", "休憩", "労働時間", "状態", "操作"]}>
               {filteredCorrectionWorkSets.map((workSet) => (
                 <tr key={workSet.key} style={workSet.status === "normal" ? undefined : styles.warningRow}>
@@ -2337,6 +2384,7 @@ export default function AdminPage() {
                   </td>
                   <td style={styles.td}>
                     <button type="button" onClick={() => startEdit(workSet)} style={styles.linkButton}>修正</button>
+                    {(() => { const source = timecards.find((item) => item.id === workSet.clockInLog?.id || item.id === workSet.clockOutLog?.id); return source?.manuallyCreated && source.manualRequestId ? <button type="button" onClick={() => cancelManualAttendance(source.manualRequestId!, workSet.employeeName)} style={{ ...styles.linkButton, marginLeft: 8, color: "#B91C1C" }}>手動登録を取消</button> : null; })()}
                   </td>
                 </tr>
               ))}
@@ -2509,6 +2557,38 @@ export default function AdminPage() {
               </div>
             </div>
           </form>
+        </div>
+      )}
+
+      {manualForm && (
+        <div style={{ ...styles.modalOverlay, padding: 24 }} onClick={() => { if (!isSavingManual) setManualForm(null); }}>
+          <div style={{ ...styles.modal, maxWidth: 860, maxHeight: "90vh", overflowY: "auto" }} onClick={(event) => event.stopPropagation()}>
+            <h3 style={{ marginTop: 0 }}>{manualConfirming ? "手動登録内容の確認" : "打刻漏れを新規登録"}</h3>
+            {manualConfirming && manualValidation?.preview ? <>
+              <p style={{ padding: 12, background: "#FFF7ED", border: "1px solid #FDBA74", borderRadius: 8 }}>打刻できなかった勤怠を手動登録します。この操作は履歴に記録されます。内容を確認してください。</p>
+              <dl style={{ display: "grid", gridTemplateColumns: "180px 1fr", gap: 8 }}>
+                <dt>店舗名</dt><dd>{storeNameById(manualForm.storeId)}</dd>
+                <dt>従業員名</dt><dd>{employees.find((item) => item.id === manualForm.employeeId)?.name}</dd>
+                <dt>勤務日</dt><dd>{manualForm.workDate}</dd><dt>出勤</dt><dd>{manualForm.clockIn}</dd><dt>退勤</dt><dd>{manualForm.clockOut}</dd>
+                <dt>休憩</dt><dd>{formatMinutesZero(manualValidation.preview.breakMinutes)}</dd><dt>実働時間</dt><dd>{formatMinutesZero(manualValidation.preview.workMinutes)}</dd><dt>深夜時間</dt><dd>{formatMinutesZero(manualValidation.preview.nightMinutes)}</dd>
+                <dt>登録理由</dt><dd>{manualForm.creationReason}{manualForm.reasonDetail ? `：${manualForm.reasonDetail}` : ""}</dd>
+              </dl>
+            </> : <div style={{ ...styles.editForm, gridTemplateColumns: "repeat(2,minmax(0,1fr))" }}>
+              <label style={styles.label}>対象店舗<select value={manualForm.storeId} onChange={(e) => setManualForm({ ...manualForm, storeId: e.target.value, employeeId: "" })} style={styles.input}><option value="">選択してください</option>{stores.filter((s) => s.active !== false).map((s) => <option key={s.id} value={s.id}>{getStoreName(s)}</option>)}</select></label>
+              <label style={styles.label}>従業員<select value={manualForm.employeeId} onChange={(e) => setManualForm({ ...manualForm, employeeId: e.target.value })} style={styles.input}><option value="">選択してください</option>{employees.filter((e) => e.storeId === manualForm.storeId && isAdminPartTimeEmployee(e) && e.clockEnabled !== false && e.status !== "inactive").map((e) => <option key={e.id} value={e.id}>{e.employeeCode} {e.name}</option>)}</select></label>
+              <label style={styles.label}>勤務日<input type="date" value={manualForm.workDate} onChange={(e) => setManualForm({ ...manualForm, workDate: e.target.value })} style={styles.input} /></label>
+              <label style={styles.label}>出勤時刻<input type="datetime-local" value={manualForm.clockIn} onChange={(e) => setManualForm({ ...manualForm, clockIn: e.target.value, workDate: e.target.value.slice(0, 10) })} style={styles.input} /></label>
+              <label style={styles.label}>退勤時刻<input type="datetime-local" value={manualForm.clockOut} onChange={(e) => setManualForm({ ...manualForm, clockOut: e.target.value })} style={styles.input} /><small>退勤が出勤より前の場合は翌日として確認します。</small></label>
+              <label style={styles.label}>登録理由<select value={manualForm.creationReason} onChange={(e) => setManualForm({ ...manualForm, creationReason: e.target.value })} style={styles.input}><option value="">選択してください</option>{["端末不具合","PINエラー","打刻忘れ","通信障害","管理者確認済み","その他"].map((r) => <option key={r}>{r}</option>)}</select></label>
+              {manualForm.creationReason === "その他" && <label style={styles.label}>理由詳細<input value={manualForm.reasonDetail} onChange={(e) => setManualForm({ ...manualForm, reasonDetail: e.target.value })} style={styles.input} /></label>}
+              <label style={{ ...styles.label, gridColumn: "1 / -1" }}>備考（任意）<textarea value={manualForm.note} onChange={(e) => setManualForm({ ...manualForm, note: e.target.value })} style={styles.input} /></label>
+              <div style={{ gridColumn: "1 / -1" }}><b>休憩</b>{manualForm.breaks.map((item, index) => <div key={index} style={{ display: "flex", gap: 8, marginTop: 8 }}><input type="datetime-local" value={item.start} onChange={(e) => setManualForm({ ...manualForm, breaks: manualForm.breaks.map((b,i) => i === index ? { ...b, start: e.target.value } : b) })} style={styles.input}/><input type="datetime-local" value={item.end} onChange={(e) => setManualForm({ ...manualForm, breaks: manualForm.breaks.map((b,i) => i === index ? { ...b, end: e.target.value } : b) })} style={styles.input}/><button type="button" onClick={() => setManualForm({ ...manualForm, breaks: manualForm.breaks.filter((_,i) => i !== index) })} style={styles.secondaryButton}>削除</button></div>)}<button type="button" onClick={() => setManualForm({ ...manualForm, breaks: [...manualForm.breaks, { start: "", end: "" }] })} style={{ ...styles.secondaryButton, marginTop: 8 }}>休憩を追加</button></div>
+              <label style={{ ...styles.label, gridColumn: "1 / -1" }}><input type="checkbox" checked={manualForm.allowSeparateShift} onChange={(e) => setManualForm({ ...manualForm, allowSeparateShift: e.target.checked })} /> 同日の既存打刻とは別勤務として追加する</label>
+            </div>}
+            {manualError && <p style={styles.error}>{manualError}</p>}
+            {!manualConfirming && manualValidation?.errors.length ? <p style={styles.error}>{manualValidation.errors.join("。")}</p> : null}
+            <div style={{ ...styles.inlineActions, marginTop: 18 }}><button type="button" disabled={isSavingManual || (!manualConfirming && !manualValidation?.preview)} onClick={submitManualAttendance} style={{ ...styles.button, opacity: isSavingManual || (!manualConfirming && !manualValidation?.preview) ? .5 : 1 }}>{isSavingManual ? "登録中..." : manualConfirming ? "この内容で登録" : "登録内容を確認"}</button>{manualConfirming && <button type="button" onClick={() => setManualConfirming(false)} style={styles.secondaryButton}>入力へ戻る</button>}<button type="button" onClick={() => setManualForm(null)} style={styles.secondaryButton}>キャンセル</button></div>
+          </div>
         </div>
       )}
 

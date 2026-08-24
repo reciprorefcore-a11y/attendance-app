@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useAuthProfile } from "@/lib/auth";
 import { calculateHolidayUnitPay } from "@/lib/payroll";
 import type { FixedPayrollAdjustment, PayrollResult } from "@/lib/payroll";
+import { adjustmentDisabledReason, holidayAllowancePreview, reimbursementPending, resolveHolidayAllowanceBasis } from "@/lib/payroll-adjustment-ui";
 
 type PayrollIssue = { severity: "error" | "warning"; code: string; message: string; employeeId?: string };
 type PayrollRun = {
@@ -14,7 +15,7 @@ type PayrollRun = {
 type ConfirmedRunSummary = { id: string; targetMonth: string; paymentMonth: string; paymentDate: string; employeeCount: number };
 type SlipRun = { id: string; targetMonth: string; paymentDate: string; status: string; results: PayrollResult[] };
 type GeneratedFile = { name: string; blob: Blob };
-type FixedMaster = { employeeId: string; employeeCode: string; employeeName: string; storeName: string; fixedBaseSalary: number; directorCompensation: number; positionAllowance: number; businessAllowance: number; fixedOvertimeAllowance: number; healthInsurance: number | null; childSupportContribution: number | null; careInsurance: number | null; employeePension: number | null; employmentInsurance: number | null; incomeTax: number | null; residentTax: number | null; transportationType: "daily" | "monthly" | "none" };
+type FixedMaster = { employeeId: string; employeeCode: string; employeeName: string; storeName: string; fixedBaseSalary: number; holidayAllowanceBaseSalary: number | null; holidayAllowanceCalculationBasis: number | null; directorCompensation: number; positionAllowance: number; businessAllowance: number; fixedOvertimeAllowance: number; healthInsurance: number | null; childSupportContribution: number | null; careInsurance: number | null; employeePension: number | null; employmentInsurance: number | null; incomeTax: number | null; residentTax: number | null; transportationType: "daily" | "monthly" | "none" };
 type AppliedDiffSnapshot = { grossTotal: number; deductionsTotal: number; payrollNetPay: number; expenseReimbursement: number; netPay: number };
 
 function tokyoYM() {
@@ -83,6 +84,8 @@ export default function PayrollPage() {
   const [fixedMasters, setFixedMasters] = useState<FixedMaster[]>([]);
   const [masterEmployeeId, setMasterEmployeeId] = useState("");
   const [adjustEmployeeId, setAdjustEmployeeId] = useState("");
+  const [manualHolidayOverrides, setManualHolidayOverrides] = useState<Record<string, boolean>>({});
+  const [savedManualHolidayOverrides, setSavedManualHolidayOverrides] = useState<Record<string, boolean>>({});
   const [masterForms, setMasterForms] = useState<Record<string, FixedMaster>>({});
   const [masterOpen, setMasterOpen] = useState(false);
   // 正社員給与変更確認フロー: null=未選択 / no-change=変更なし / with-change=変更あり / adjusted=調整済み
@@ -102,7 +105,7 @@ export default function PayrollPage() {
     if (authLoading || !user) return;
     let active = true;
     (async () => {
-      setRun(null); setPayrollFile(null); setTransferFile(null); setAdjustments({}); setSavedAdjustments({}); setAppliedDiffs([]); setMessage(""); setAdjustDecision(null); setMasterOpen(false);
+      setRun(null); setPayrollFile(null); setTransferFile(null); setAdjustments({}); setSavedAdjustments({}); setAppliedDiffs([]); setManualHolidayOverrides({}); setSavedManualHolidayOverrides({}); setMessage(""); setAdjustDecision(null); setMasterOpen(false);
       try {
         const token = await user.getIdToken(true);
         const [workspace, runsData] = await Promise.all([
@@ -113,6 +116,8 @@ export default function PayrollPage() {
         setRun(workspace.run);
         const existingAdj = Object.fromEntries((workspace.run?.results ?? []).filter((item: PayrollResult) => item.payrollType === "fixed" && item.fixedAdjustment).map((item: PayrollResult) => [item.employeeId, item.fixedAdjustment]));
         setAdjustments(existingAdj);
+        const existingManualOverrides = Object.fromEntries(Object.entries(existingAdj).map(([employeeId, value]) => [employeeId, (value as FixedPayrollAdjustment).holidayAllowanceOverride != null]));
+        setManualHolidayOverrides(existingManualOverrides); setSavedManualHolidayOverrides(existingManualOverrides);
         if (workspace.run?.status === "draft" && Object.keys(existingAdj).length > 0) { setAdjustDecision("adjusted"); setSavedAdjustments(existingAdj); }
         const masters: FixedMaster[] = workspace.fixedEmployees ?? [];
         setFixedMasters(masters); setMasterForms(Object.fromEntries(masters.map((item) => [item.employeeId, item])));
@@ -154,7 +159,7 @@ export default function PayrollPage() {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ targetMonth, paymentMonth, paymentDate }),
       });
-      setRun(data); setPayrollFile(null); setTransferFile(null); setAdjustments({}); setSavedAdjustments({}); setAppliedDiffs([]); setAdjustDecision(null);
+      setRun(data); setPayrollFile(null); setTransferFile(null); setAdjustments({}); setSavedAdjustments({}); setAppliedDiffs([]); setManualHolidayOverrides({}); setSavedManualHolidayOverrides({}); setAdjustDecision(null);
       setMessage("給与の試算が完了しました。正社員給与の変更を確認してください。");
     } catch (e) { setMessage(e instanceof Error ? e.message : "給与計算に失敗しました"); }
     finally { setBusy(false); }
@@ -183,7 +188,7 @@ export default function PayrollPage() {
       if (isConfirmed) {
         setMessage("固定給与マスターを保存しました。次回試算から反映されます。確定済みの帳票は変わりません。");
       } else {
-        setRun(null); setSavedAdjustments({}); setAppliedDiffs([]); setAdjustDecision(null);
+        setRun(null); setSavedAdjustments({}); setManualHolidayOverrides({}); setSavedManualHolidayOverrides({}); setAppliedDiffs([]); setAdjustDecision(null);
         setMessage("固定給与マスターを保存しました。給与を再試算してください。");
       }
     } catch (e) { setMessage(e instanceof Error ? e.message : "固定給与マスターの保存に失敗しました"); }
@@ -194,6 +199,9 @@ export default function PayrollPage() {
     if (!run || !user) return;
     for (const result of run.results.filter((item) => item.payrollType === "fixed")) {
       const adjustment = adjustments[result.employeeId] ?? {};
+      const master = fixedMasters.find((item) => item.employeeId === result.employeeId);
+      const validationReason = adjustmentDisabledReason({ selected: true, adjustment, holidayBasis: resolveHolidayAllowanceBasis(master ?? {}), manualHolidayOverride: manualHolidayOverrides[result.employeeId] === true, busy: false });
+      if (validationReason) { setMessage(`${result.employeeCode} ${result.employeeName}：${validationReason}`); return; }
       const automatic = Math.round((Number(adjustment.overtimeMinutes) || 0) * (result.earnings.baseSalary / 160) * 1.25 / 60);
       if (adjustment.overtimeAllowanceOverride != null && adjustment.overtimeAllowanceOverride !== automatic && !adjustment.overtimeReason?.trim()) {
         setMessage(`${result.employeeCode} ${result.employeeName}：残業手当を修正する理由を入力してください。`); return;
@@ -219,7 +227,7 @@ export default function PayrollPage() {
             after: { grossTotal: after.earnings.grossTotal, deductionsTotal: after.deductions.total, payrollNetPay: after.payrollNetPay, expenseReimbursement: after.reimbursements.expenseReimbursement, netPay: after.netPay },
           };
         });
-      setRun(data); setPayrollFile(null); setTransferFile(null); setSavedAdjustments({ ...adjustments }); setAdjustDecision("adjusted"); setAppliedDiffs(diffs);
+      setRun(data); setPayrollFile(null); setTransferFile(null); setSavedAdjustments({ ...adjustments }); setSavedManualHolidayOverrides({ ...manualHolidayOverrides }); setAdjustDecision("adjusted"); setAppliedDiffs(diffs);
       setMessage("当月調整を反映して全員分を再試算しました。生成済みExcelは無効になりました。");
     } catch (e) { setMessage(e instanceof Error ? e.message : "月次調整の反映に失敗しました"); }
     finally { setBusy(false); }
@@ -255,7 +263,7 @@ export default function PayrollPage() {
     try {
       const token = await user.getIdToken(true);
       await apiCall("/api/payroll/confirm", token, { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ runId: run.id, reason: unconfirmReason }) });
-      setUnconfirmReason(""); setPayrollFile(null); setTransferFile(null); setSavedAdjustments({}); setAppliedDiffs([]); setAdjustDecision(null);
+      setUnconfirmReason(""); setPayrollFile(null); setTransferFile(null); setSavedAdjustments({}); setManualHolidayOverrides({}); setSavedManualHolidayOverrides({}); setAppliedDiffs([]); setAdjustDecision(null);
       const [workspace, runsData] = await Promise.all([
         apiCall(`/api/payroll/calculate?targetMonth=${targetMonth}`, token),
         apiCall("/api/payroll/runs", token),
@@ -283,7 +291,13 @@ export default function PayrollPage() {
   const isConfirmed = run?.status === "confirmed";
   const statusLabel = !run ? "未計算" : run.status === "draft" ? "試算" : run.status === "confirmed" ? "確定済み" : "確定取消済み";
   // 反映済みスナップショットと現在値が違う場合は「未反映」状態
-  const isAdjustmentDirty = adjustDecision === "adjusted" && JSON.stringify(adjustments) !== JSON.stringify(savedAdjustments);
+  const isAdjustmentDirty = adjustDecision === "adjusted" && (JSON.stringify(adjustments) !== JSON.stringify(savedAdjustments) || JSON.stringify(manualHolidayOverrides) !== JSON.stringify(savedManualHolidayOverrides));
+  const selectedAdjustmentResult = run?.results.find((item) => item.employeeId === adjustEmployeeId && item.payrollType === "fixed") ?? null;
+  const selectedAdjustmentMaster = fixedMasters.find((item) => item.employeeId === adjustEmployeeId) ?? null;
+  const selectedAdjustment = selectedAdjustmentResult ? (adjustments[selectedAdjustmentResult.employeeId] ?? selectedAdjustmentResult.fixedAdjustment ?? {}) : {};
+  const selectedHolidayPreview = holidayAllowancePreview({ holidayAllowanceBaseSalary: selectedAdjustmentMaster?.holidayAllowanceCalculationBasis, fixedBaseSalary: selectedAdjustmentMaster?.fixedBaseSalary }, Number(selectedAdjustment.temporaryAttendanceCount ?? 0));
+  const selectedManualHolidayOverride = !!selectedAdjustmentResult && manualHolidayOverrides[selectedAdjustmentResult.employeeId] === true;
+  const selectedAdjustmentDisabledReason = adjustmentDisabledReason({ selected: !!selectedAdjustmentResult, adjustment: selectedAdjustment, holidayBasis: selectedHolidayPreview.basis, manualHolidayOverride: selectedManualHolidayOverride, busy });
   // Excel/確定セクションは「変更なし」or「調整済み（かつ未反映でない）」を選択後、または確定済み時に表示
   const canShowExcel = !isAdjustmentDirty && (isConfirmed || (isDraft && errors.length === 0 && (adjustDecision === "no-change" || adjustDecision === "adjusted")));
 
@@ -357,58 +371,65 @@ export default function PayrollPage() {
             {(adjustDecision === "with-change" || adjustDecision === "adjusted") && (
               <>
                 {adjustDecision === "adjusted" && (isAdjustmentDirty
-                  ? <p style={s.pendingMsg}>変更内容がまだ試算へ反映されていません。「当月調整を反映して再試算」を押してください。</p>
+                  ? <p style={s.pendingMsg}>変更内容はまだ再試算されていません</p>
                   : <p style={s.msg}>当月調整を反映しました。内容を確認し、Excelを生成してください。</p>
                 )}
-                <label style={s.lbl}>
-                  正社員を選択
-                  <select value={adjustEmployeeId} onChange={(e) => setAdjustEmployeeId(e.target.value)} style={s.sel}>
-                    <option value="">選択してください</option>
-                    {fixedEmployeeCandidates.map(([code, name]) => {
-                      const emp = fixedMasters.find((item) => item.employeeCode === code);
-                      const hasApplied = emp && appliedDiffs.some((d) => d.employeeId === emp.employeeId);
-                      return <option key={code} value={emp?.employeeId ?? `unregistered:${code}`} disabled={!emp}>{code} {name}{emp ? (hasApplied ? " ✓" : "") : "（未登録）"}</option>;
-                    })}
-                  </select>
-                </label>
+                <div style={s.employeeButtons} aria-label="正社員を選択">
+                  {fixedEmployeeCandidates.map(([code, name]) => {
+                    const emp = fixedMasters.find((item) => item.employeeCode === code);
+                    const selected = emp?.employeeId === adjustEmployeeId;
+                    return (
+                      <button key={code} type="button" disabled={!emp} onClick={() => emp && setAdjustEmployeeId(emp.employeeId)} style={{ ...s.employeeButton, ...(selected ? s.employeeButtonActive : {}) }}>
+                        <span style={s.employeeCode}>{code}</span>{name}
+                      </button>
+                    );
+                  })}
+                </div>
                 {(() => {
-                  const result = run?.results.find((item) => item.employeeId === adjustEmployeeId && item.payrollType === "fixed");
+                  const result = selectedAdjustmentResult;
                   if (!result) return <p style={s.hint}>正社員を選択してください。</p>;
-                  const value = adjustments[result.employeeId] ?? result.fixedAdjustment ?? {};
+                  const value = selectedAdjustment;
                   const automatic = Math.floor((Number(value.overtimeMinutes) || 0) * (result.earnings.baseSalary / 160) * 1.25 / 60);
                   const appliedDiff = appliedDiffs.find((d) => d.employeeId === result.employeeId);
+                  const expenseInput = Number(value.expenseReimbursement ?? 0);
+                  const expenseIsPending = reimbursementPending(expenseInput, result.reimbursements.expenseReimbursement);
+                  const selectedHasUnappliedInput = adjustDecision === "adjusted" ? isAdjustmentDirty : Object.keys(value).length > 0;
                   return (
                     <>
-                      {appliedDiff && (
+                      {adjustDecision === "with-change" && selectedHasUnappliedInput && <p style={s.pendingMsg}>変更内容はまだ再試算されていません</p>}
+                      {appliedDiff && !isAdjustmentDirty && (
                         <div style={s.appliedBox}>
-                          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-                            <span style={{ ...s.badge, ...s.badgeGreen }}>試算反映済み</span>
-                            <span style={s.appliedMsg}>反映済み：{appliedDiff.employeeName}さんの当月調整を給与試算へ反映しました</span>
+                          <p style={s.appliedMsg}>{appliedDiff.employeeName}さんの当月調整を反映しました</p>
+                          <div style={s.diffRows}>
+                            <span>給与差引額：<b>{yen(appliedDiff.before.payrollNetPay)} → {yen(appliedDiff.after.payrollNetPay)}</b></span>
+                            <span>立替経費精算：<b>{yen(appliedDiff.before.expenseReimbursement)} → {yen(appliedDiff.after.expenseReimbursement)}</b></span>
+                            <span>最終支給額：<b>{yen(appliedDiff.before.netPay)} → {yen(appliedDiff.after.netPay)}</b></span>
+                            <span>増減：<b>{appliedDiff.after.netPay - appliedDiff.before.netPay >= 0 ? "+" : ""}{yen(appliedDiff.after.netPay - appliedDiff.before.netPay)}</b></span>
                           </div>
-                          <table style={s.table}>
-                            <thead><tr><th style={s.th}>項目</th><th style={s.th}>変更前</th><th style={s.th}>変更後</th><th style={s.th}>増減</th></tr></thead>
-                            <tbody>
-                              {([["支給合計", "grossTotal"], ["控除合計", "deductionsTotal"], ["給与差引額", "payrollNetPay"], ["立替経費精算", "expenseReimbursement"], ["最終振込額", "netPay"]] as [string, keyof AppliedDiffSnapshot][]).map(([label, key]) => {
-                                const delta = appliedDiff.after[key] - appliedDiff.before[key];
-                                return (
-                                  <tr key={key}>
-                                    <td style={s.td}>{label}</td>
-                                    <td style={s.td}>{yen(appliedDiff.before[key])}</td>
-                                    <td style={s.td}>{yen(appliedDiff.after[key])}</td>
-                                    <td style={{ ...s.td, color: delta > 0 ? "#166534" : delta < 0 ? "#DC2626" : undefined, fontWeight: delta !== 0 ? 700 : undefined }}>{delta > 0 ? "+" : ""}{yen(delta)}</td>
-                                  </tr>
-                                );
-                              })}
-                            </tbody>
-                          </table>
                         </div>
                       )}
+                      <section style={s.holidaySection}>
+                        <h3 style={s.h3}>休日出勤</h3>
+                        <p style={s.basisText}>算定基礎となる月給：{selectedHolidayPreview.basis == null ? <b style={s.unset}>未設定</b> : <b>{yen(selectedHolidayPreview.basis)}</b>}</p>
+                        <div style={s.holidayGrid}>
+                          <label style={s.lbl}>休日出勤回数<input type="number" min="0" step="1" inputMode="numeric" value={value.temporaryAttendanceCount ?? 0} onChange={(e) => updateAdjustment(result.employeeId, { temporaryAttendanceCount: Number(e.target.value) })} style={s.input} /></label>
+                          <div style={s.moneyCard}><span>休日出勤1回単価</span><b>{selectedHolidayPreview.unitPay == null ? "未設定" : yen(selectedHolidayPreview.unitPay)}</b></div>
+                          <div style={s.moneyCard}><span>休日出勤手当</span><b>{selectedHolidayPreview.automaticAllowance == null ? "計算できません" : yen(selectedHolidayPreview.automaticAllowance)}</b></div>
+                        </div>
+                        {selectedHolidayPreview.basis == null && Number(value.temporaryAttendanceCount ?? 0) > 0 && <p style={s.inlineError}>固定給与マスターで休日手当算定基礎を設定してください</p>}
+                        <label style={s.checkLabel}><input type="checkbox" checked={selectedManualHolidayOverride} onChange={(e) => {
+                          const checked = e.target.checked;
+                          setManualHolidayOverrides((current) => ({ ...current, [result.employeeId]: checked }));
+                          if (!checked) updateAdjustment(result.employeeId, { holidayAllowanceOverride: null, overrideReason: "" });
+                        }} />自動計算額を修正する</label>
+                        {selectedManualHolidayOverride && (
+                          <div style={s.manualOverrideBox}>
+                            <label style={s.lbl}>休日出勤手当の修正後金額<input type="number" min="0" step="1" value={value.holidayAllowanceOverride ?? ""} onChange={(e) => updateAdjustment(result.employeeId, { holidayAllowanceOverride: e.target.value === "" ? null : Number(e.target.value) })} style={s.input} /></label>
+                            <label style={s.lbl}>修正理由<input value={value.overrideReason ?? ""} onChange={(e) => updateAdjustment(result.employeeId, { overrideReason: e.target.value })} style={s.input} /></label>
+                          </div>
+                        )}
+                      </section>
                       <div style={s.adjustGrid}>
-                        <label style={s.lbl}>臨時出勤回数<input type="number" min="0" value={value.temporaryAttendanceCount ?? ""} onChange={(e) => updateAdjustment(result.employeeId, { temporaryAttendanceCount: Number(e.target.value) })} style={s.input} /></label>
-                        <label style={s.lbl}>休日出勤1回単価（自動）<input readOnly value={calculateHolidayUnitPay(result.holidayAllowanceBaseSalarySnapshot ?? result.earnings.baseSalary)} style={s.input} /></label>
-                        <label style={s.lbl}>休日出勤手当（自動）<input readOnly value={calculateHolidayUnitPay(result.holidayAllowanceBaseSalarySnapshot ?? result.earnings.baseSalary) * (Number(value.temporaryAttendanceCount) || 0)} style={s.input} /></label>
-                        <label style={s.lbl}>休日手当修正額<input type="number" min="0" value={value.holidayAllowanceOverride ?? ""} onChange={(e) => updateAdjustment(result.employeeId, { holidayAllowanceOverride: e.target.value === "" ? null : Number(e.target.value) })} style={s.input} /></label>
-                        <label style={s.lbl}>休日手当修正理由<input value={value.overrideReason ?? ""} onChange={(e) => updateAdjustment(result.employeeId, { overrideReason: e.target.value })} style={s.input} /></label>
                         <label style={s.lbl}>残業時間（時間）<input type="number" min="0" step="0.25" value={value.overtimeMinutes == null ? "" : value.overtimeMinutes / 60} onChange={(e) => updateAdjustment(result.employeeId, { overtimeMinutes: Number(e.target.value) * 60 })} style={s.input} /></label>
                         <label style={s.lbl}>自動計算した残業手当<input readOnly value={automatic} style={s.input} /></label>
                         <label style={s.lbl}>残業手当修正額<input type="number" min="0" value={value.overtimeAllowanceOverride ?? ""} onChange={(e) => updateAdjustment(result.employeeId, { overtimeAllowanceOverride: e.target.value === "" ? null : Number(e.target.value) })} style={s.input} /></label>
@@ -416,23 +437,24 @@ export default function PayrollPage() {
                         {([["transportation", "交通費"], ["otherTemporaryPayment", "その他課税支給"], ["otherDeduction", "その他控除"]] as const).map(([key, label]) => (
                           <label key={key} style={s.lbl}>{label}<input type="number" min="0" value={value[key] ?? ""} onChange={(e) => updateAdjustment(result.employeeId, { [key]: Number(e.target.value) })} style={s.input} /></label>
                         ))}
-                        <label style={s.lbl}>立替経費精算（会社から本人へ返金）<input type="number" min="0" value={value.expenseReimbursement ?? 0} onChange={(e) => updateAdjustment(result.employeeId, { expenseReimbursement: e.target.value === "" ? 0 : Math.max(0, Number(e.target.value)) })} style={s.input} /></label>
+                        <label style={s.lbl}>立替経費精算（本人へ支給）<input type="number" min="0" step="1" value={value.expenseReimbursement ?? 0} onChange={(e) => updateAdjustment(result.employeeId, { expenseReimbursement: e.target.value === "" ? 0 : Number(e.target.value) })} style={s.input} /><span style={s.fieldHelp}>本人が立て替えた経費を給与と一緒に返金します。課税・社会保険・控除には含みません。</span>{expenseIsPending && <span style={s.pendingInput}>今回入力：{yen(expenseInput)}（再試算前）</span>}</label>
                         <label style={s.lbl}>備考<input value={value.note ?? ""} onChange={(e) => updateAdjustment(result.employeeId, { note: e.target.value })} style={s.input} /></label>
                       </div>
-                      <div style={s.adjustResult}>
+                      {!selectedHasUnappliedInput && <div style={s.adjustResult}>
                         <span>残業手当 <b>{yen(result.earnings.overtimePremium)}</b></span>
                         <span>給与支給合計 <b>{yen(result.earnings.grossTotal)}</b></span>
                         <span>控除合計 <b>{yen(result.deductions.total)}</b></span>
                         <span>給与差引額 <b>{yen(result.payrollNetPay)}</b></span>
                         <span>立替経費精算 <b>{yen(result.reimbursements.expenseReimbursement)}</b></span>
-                        <span>最終振込額 <b>{yen(result.netPay)}</b></span>
-                      </div>
+                        <span>最終支給額 <b>{yen(result.netPay)}</b></span>
+                      </div>}
                     </>
                   );
                 })()}
+                {selectedAdjustmentDisabledReason && <p style={s.inlineError}>{selectedAdjustmentDisabledReason}</p>}
                 <div style={s.actions}>
-                  <button disabled={busy} onClick={applyAdjustments} style={s.secondary}>当月調整を反映して再試算</button>
-                  <button type="button" onClick={() => { setAdjustments({}); setSavedAdjustments({}); setAppliedDiffs([]); setAdjustDecision("no-change"); }} style={s.small}>変更なしに戻る</button>
+                  <button disabled={selectedAdjustmentDisabledReason != null} onClick={applyAdjustments} style={s.secondary}>当月調整を反映して再試算</button>
+                  <button type="button" onClick={() => { setAdjustments({}); setSavedAdjustments({}); setManualHolidayOverrides({}); setSavedManualHolidayOverrides({}); setAppliedDiffs([]); setAdjustDecision("no-change"); }} style={s.small}>変更なしに戻る</button>
                 </div>
               </>
             )}
@@ -630,4 +652,20 @@ const s: Record<string, React.CSSProperties> = {
   payslipBox: { display: "grid", gap: 9, padding: 14, border: "1px solid #CBD5E1", borderRadius: 9, background: "#F8FAFC" },
   appliedBox: { background: "#F0FDF4", border: "1px solid #86EFAC", borderRadius: 9, padding: 14, marginBottom: 14 },
   appliedMsg: { fontSize: 14, fontWeight: 700, color: "#166534" },
+  employeeButtons: { display: "flex", flexWrap: "wrap", gap: 8, margin: "12px 0 16px" },
+  employeeButton: { minHeight: 42, border: "1px solid #CBD5E1", borderRadius: 999, padding: "0 15px", background: "white", color: "#334155", fontWeight: 700, cursor: "pointer" },
+  employeeButtonActive: { borderColor: "#0284C7", background: "#0284C7", color: "white", boxShadow: "0 2px 8px rgba(2,132,199,.24)" },
+  employeeCode: { marginRight: 6, fontSize: 11, opacity: 0.78 },
+  holidaySection: { margin: "12px 0", padding: 16, border: "1px solid #BAE6FD", borderRadius: 11, background: "#F8FCFF" },
+  h3: { margin: "0 0 8px", fontSize: 16 },
+  basisText: { margin: "0 0 12px", color: "#475569", fontSize: 14 },
+  holidayGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 10 },
+  moneyCard: { display: "grid", gap: 7, padding: 11, border: "1px solid #E2E8F0", borderRadius: 8, background: "white", color: "#64748B", fontSize: 13 },
+  checkLabel: { display: "flex", alignItems: "center", gap: 8, marginTop: 13, color: "#0369A1", fontWeight: 700, fontSize: 14, cursor: "pointer" },
+  manualOverrideBox: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 10, marginTop: 12, padding: 12, border: "1px solid #FCA5A5", borderRadius: 8, background: "#FFF7F7" },
+  inlineError: { margin: "10px 0", color: "#B91C1C", fontWeight: 700, fontSize: 14 },
+  unset: { color: "#B45309" },
+  fieldHelp: { color: "#64748B", fontWeight: 400, fontSize: 12, lineHeight: 1.5 },
+  pendingInput: { color: "#92400E", background: "#FEF3C7", borderRadius: 6, padding: "6px 8px", fontWeight: 700, fontSize: 13 },
+  diffRows: { display: "grid", gap: 6, marginTop: 10, fontSize: 14 },
 };

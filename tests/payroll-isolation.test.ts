@@ -183,7 +183,7 @@ test("payslip ZIP requires admin and a confirmed run", () => {
 
 test("employee management has no monthly adjustment and payroll has exactly one adjustment editor", () => {
   assert.doesNotMatch(adminPage, /当月調整入力|月次調整を反映|臨時出勤回数/);
-  assert.equal((payrollPage.match(/臨時出勤回数/g) ?? []).length, 1);
+  assert.equal((payrollPage.match(/休日出勤回数/g) ?? []).length, 1);
   assert.match(payrollPage, /残業時間（時間）/);
   assert.doesNotMatch(payrollPage, /対象月[^\n]+type="month"/);
 });
@@ -259,7 +259,7 @@ test("adjusted後の調整変更は未反映状態（canShowExcelをブロック
   // canShowExcel は !isAdjustmentDirty を含む
   assert.match(payrollPage, /!isAdjustmentDirty/);
   // 未反映メッセージが表示される
-  assert.match(payrollPage, /変更内容がまだ試算へ反映されていません/);
+  assert.match(payrollPage, /変更内容はまだ再試算されていません/);
 });
 
 test("固定給与マスター保存は payrollSettings だけを更新し確定済みrunを変えない", () => {

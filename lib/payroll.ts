@@ -1,4 +1,5 @@
 import tax2026 from "./tax-tables/2026.ts";
+import { calculateAutomaticStatutoryDeductions } from "./payroll-statutory.ts";
 
 export const HOLIDAY_MONTHLY_HOURS = 177.67;
 export const HOLIDAY_DAILY_HOURS = 8;
@@ -36,6 +37,10 @@ export type PayrollEmployee = {
   careInsurance?: number;
   employeePension?: number;
   employmentInsurance?: number;
+  socialInsuranceEnrolled?: boolean | null;
+  standardMonthlyRemuneration?: number | null;
+  careInsuranceApplicable?: boolean | null;
+  employmentInsuranceEnrolled?: boolean | null;
   residentTax?: number;
   residentTaxHistory?: ResidentTaxHistoryEntry[];
   residentTaxFallbackUsed?: boolean;
@@ -313,7 +318,13 @@ export function calculatePayrollEmployee(employee: PayrollEmployee, allAttendanc
   const taxableTotal = baseSalary + yen(employee.directorCompensation) + yen(employee.positionAllowance) + yen(employee.fixedOvertimeAllowance) + yen(employee.businessAllowance) + overtimePremium + nightPremium + yen(employee.otherAllowance) - absenceDeduction - lateEarlyDeduction;
   const nonTaxableTotal = transportation + yen(employee.otherNonTaxableAllowance);
   const grossTotal = taxableTotal + nonTaxableTotal;
-  const socialInsuranceTotal = yen(employee.healthInsurance) + yen(employee.childSupportContribution) + yen(employee.careInsurance) + yen(employee.employeePension) + yen(employee.employmentInsurance);
+  const automatic = calculateAutomaticStatutoryDeductions({ taxableEarnings: taxableTotal, socialInsuranceEnrolled: employee.socialInsuranceEnrolled, standardMonthlyRemuneration: employee.standardMonthlyRemuneration, careInsuranceApplicable: employee.careInsuranceApplicable, employmentInsuranceEnrolled: employee.employmentInsuranceEnrolled });
+  const healthInsurance = automatic.healthInsurance ?? yen(employee.healthInsurance);
+  const childSupportContribution = automatic.childSupportContribution ?? yen(employee.childSupportContribution);
+  const careInsurance = automatic.careInsurance ?? yen(employee.careInsurance);
+  const employeePension = automatic.employeePension ?? yen(employee.employeePension);
+  const employmentInsurance = automatic.employmentInsurance ?? yen(employee.employmentInsurance);
+  const socialInsuranceTotal = healthInsurance + childSupportContribution + careInsurance + employeePension + employmentInsurance;
   const taxableIncome = Math.max(0, taxableTotal - socialInsuranceTotal);
   const taxTableType = employee.taxTableType ?? "kou";
   const dependentCount = Math.max(0, Math.trunc(employee.dependentCount ?? 0));
@@ -334,11 +345,11 @@ export function calculatePayrollEmployee(employee: PayrollEmployee, allAttendanc
     payrollTransferOrder: employee.payrollTransferOrder ?? null,
     attendance: { workingDays: yen(employee.workingDays), attendanceDays, absenceDays: yen(employee.absenceDays), paidLeaveDays: yen(employee.paidLeaveDays), workMinutes: totals.work, overtimeMinutes: totals.overtime, nightMinutes: totals.night, holidayMinutes: 0, breakMinutes: totals.break, helpMinutes: totals.help },
     earnings: { baseSalary, directorCompensation: yen(employee.directorCompensation), positionAllowance: yen(employee.positionAllowance), fixedOvertimeAllowance: yen(employee.fixedOvertimeAllowance), holidayAllowance: 0, businessAllowance: yen(employee.businessAllowance), overtimePremium, nightPremium, otherTaxable: yen(employee.otherAllowance), absenceDeduction, lateEarlyDeduction, taxableTotal, transportation, otherNonTaxable: yen(employee.otherNonTaxableAllowance), nonTaxableTotal, grossTotal },
-    deductions: { healthInsurance: yen(employee.healthInsurance), childSupportContribution: yen(employee.childSupportContribution), careInsurance: yen(employee.careInsurance), employeePension: yen(employee.employeePension), employmentInsurance: yen(employee.employmentInsurance), socialInsuranceTotal, taxableIncome, incomeTax, residentTax: yen(employee.residentTax), yearEndAdjustment: yen(employee.yearEndAdjustment), otherDeduction: yen(employee.otherDeduction), total: deductionTotal },
+    deductions: { healthInsurance, childSupportContribution, careInsurance, employeePension, employmentInsurance, socialInsuranceTotal, taxableIncome, incomeTax, residentTax: yen(employee.residentTax), yearEndAdjustment: yen(employee.yearEndAdjustment), otherDeduction: yen(employee.otherDeduction), total: deductionTotal },
     reimbursements, payrollNetPay, netPay, bankTransfer: paymentMethod === "bank" ? netPay : 0, cashPayment: paymentMethod === "cash" ? netPay : 0,
     hourlyWageSnapshot: payrollType === "hourly" ? hourlyWage : null, taxTableTypeSnapshot: taxTableType, dependentCountSnapshot: dependentCount,
     residentTaxEffectiveMonthSnapshot: employee.residentTaxEffectiveMonth ?? null,
-    holidayAllowanceBaseSalarySnapshot: payrollType === "fixed" ? yen(employee.holidayAllowanceBaseSalary ?? employee.fixedBaseSalary) : 0,
+    holidayAllowanceBaseSalarySnapshot: payrollType === "fixed" ? yen(employee.fixedBaseSalary) : 0,
     issues, attendanceDaysDetail,
   };
 }

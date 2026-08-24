@@ -16,6 +16,10 @@ export function validateAdjustments(adjustments: unknown): AdjValidationError | 
       return { status: 400, error: `adjustmentsの値はオブジェクトで指定してください（社員ID: ${id}）` };
     }
     const val = (adj as Record<string, unknown>).expenseReimbursement;
+    const attendanceCount = (adj as Record<string, unknown>).temporaryAttendanceCount;
+    if (attendanceCount !== undefined && attendanceCount !== null && (typeof attendanceCount !== "number" || !Number.isFinite(attendanceCount) || attendanceCount < 0 || !Number.isInteger(attendanceCount))) {
+      return { status: 400, error: `休日出勤回数は0以上の整数で入力してください（社員ID: ${id}）` };
+    }
     if (val !== undefined && val !== null) {
       // 文字列や非数値型は JSON API では数値型として送信しなければならない
       if (typeof val !== "number") {

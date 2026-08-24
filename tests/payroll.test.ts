@@ -174,20 +174,20 @@ test("住民税履歴はemployeeId単位で対象月以前の最新値を解決�
   assert.ok(validatePayrollInput([fallback], [], "2026-08").some((issue) => issue.code === "resident_tax_history_fallback" && issue.severity === "warning"));
 });
 
-test("2026年8月fixture：中村259,851円・小林255,836円", async () => {
+test("2026年8月fixture：中村は根拠のない190,000円を使わず、小林overrideを維持", async () => {
   const residentEntry = (amount: number) => [{ amount, effectiveMonth: "2026-08", updatedAt: "fixture", updatedBy: "fixture-admin" }];
   const nakamuraEmployee = resolveResidentTaxForMonth(employee("hvjU14BKDB0pCdDrUZF1", {
-    employeeCode: "0003", name: "中村鏡太郎", payrollType: "fixed", fixedBaseSalary: 185000, holidayAllowanceBaseSalary: 190000,
+    employeeCode: "0003", name: "中村鏡太郎", payrollType: "fixed", fixedBaseSalary: 185000,
     positionAllowance: 9000, businessAllowance: 110000, monthlyTransportation: 15670,
     healthInsurance: 15872, childSupportContribution: 368, careInsurance: 2592, employeePension: 29280, employmentInsurance: 1651,
     incomeTax: 6650, residentTax: 10000, residentTaxHistory: residentEntry(14100),
   }), "2026-08");
   const nakamura = applyFixedPayrollAdjustment(calculatePayrollEmployee(nakamuraEmployee, []), { temporaryAttendanceCount: 1 });
-  assert.equal(nakamura.earnings.holidayAllowance, 10694, "中村は自動式を使用しoverrideなし");
-  assert.equal(nakamura.earnings.grossTotal, 330364);
+  assert.equal(nakamura.earnings.holidayAllowance, 10413, "中村は月給185,000円の自動式を使用しoverrideなし");
+  assert.equal(nakamura.earnings.grossTotal, 330083);
   assert.equal(nakamura.fixedAdjustment?.holidayAllowanceOverride, null);
   assert.equal(nakamura.deductions.residentTax, 14100);
-  assert.equal(nakamura.netPay, 259851);
+  assert.equal(nakamura.netPay, 259570);
 
   const kobayashiEmployee = resolveResidentTaxForMonth(employee("c6ADSFHwyHecwScuZ6g8", {
     employeeCode: "0064", name: "小林彗太", payrollType: "fixed", fixedBaseSalary: 183000,
