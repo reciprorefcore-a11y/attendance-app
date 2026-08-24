@@ -134,6 +134,7 @@ export type PayrollResult = {
   payrollType: PayrollType;
   paymentMethod: PaymentMethod;
   payrollTransferOrder: number | null;
+  bankAccountRegisteredSnapshot: boolean | null;
   attendance: {
     workingDays: number;
     attendanceDays: number;
@@ -347,6 +348,7 @@ export function calculatePayrollEmployee(employee: PayrollEmployee, allAttendanc
     earnings: { baseSalary, directorCompensation: yen(employee.directorCompensation), positionAllowance: yen(employee.positionAllowance), fixedOvertimeAllowance: yen(employee.fixedOvertimeAllowance), holidayAllowance: 0, businessAllowance: yen(employee.businessAllowance), overtimePremium, nightPremium, otherTaxable: yen(employee.otherAllowance), absenceDeduction, lateEarlyDeduction, taxableTotal, transportation, otherNonTaxable: yen(employee.otherNonTaxableAllowance), nonTaxableTotal, grossTotal },
     deductions: { healthInsurance, childSupportContribution, careInsurance, employeePension, employmentInsurance, socialInsuranceTotal, taxableIncome, incomeTax, residentTax: yen(employee.residentTax), yearEndAdjustment: yen(employee.yearEndAdjustment), otherDeduction: yen(employee.otherDeduction), total: deductionTotal },
     reimbursements, payrollNetPay, netPay, bankTransfer: paymentMethod === "bank" ? netPay : 0, cashPayment: paymentMethod === "cash" ? netPay : 0,
+    bankAccountRegisteredSnapshot: employee.bankAccountRegistered == null ? null : employee.bankAccountRegistered === true,
     hourlyWageSnapshot: payrollType === "hourly" ? hourlyWage : null, taxTableTypeSnapshot: taxTableType, dependentCountSnapshot: dependentCount,
     residentTaxEffectiveMonthSnapshot: employee.residentTaxEffectiveMonth ?? null,
     holidayAllowanceBaseSalarySnapshot: payrollType === "fixed" ? yen(employee.fixedBaseSalary) : 0,

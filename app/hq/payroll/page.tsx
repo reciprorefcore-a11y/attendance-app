@@ -169,8 +169,8 @@ export default function PayrollPage() {
     if (!run || !user) return; setBusy(true); setMessage("");
     try {
       const token = await user.getIdToken(true);
-      const file = await generateFile("/api/payroll/export/payroll", token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(run) });
-      setPayrollFile(file); setMessage("給与Excelを生成しました。下のボタンからダウンロードできます。");
+      const file = await generateFile("/api/payroll/export/unified", token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(run) });
+      setPayrollFile(file); setTransferFile(null); setMessage("給与・振込統合Excelを生成しました。下のボタンからダウンロードできます。");
     } catch (e) { setMessage(e instanceof Error ? e.message : "給与Excelの生成に失敗しました"); }
     finally { setBusy(false); }
   };
@@ -230,16 +230,6 @@ export default function PayrollPage() {
       setRun(data); setPayrollFile(null); setTransferFile(null); setSavedAdjustments({ ...adjustments }); setSavedManualHolidayOverrides({ ...manualHolidayOverrides }); setAdjustDecision("adjusted"); setAppliedDiffs(diffs);
       setMessage("当月調整を反映して全員分を再試算しました。生成済みExcelは無効になりました。");
     } catch (e) { setMessage(e instanceof Error ? e.message : "月次調整の反映に失敗しました"); }
-    finally { setBusy(false); }
-  };
-
-  const generateTransferExcel = async () => {
-    if (!run || !user) return; setBusy(true); setMessage("");
-    try {
-      const token = await user.getIdToken(true);
-      const file = await generateFile("/api/payroll/export/transfer", token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(run) });
-      setTransferFile(file); setMessage("振込一覧Excelを生成しました。下のボタンからダウンロードできます。");
-    } catch (e) { setMessage(e instanceof Error ? e.message : "振込一覧Excelの生成に失敗しました"); }
     finally { setBusy(false); }
   };
 
@@ -464,20 +454,17 @@ export default function PayrollPage() {
         {/* ③ 給与Excel・振込一覧Excel */}
         {canShowExcel && (
           <section style={s.card}>
-            <h2 style={s.h2}>③ 給与Excel・振込一覧Excel</h2>
+            <h2 style={s.h2}>③ 給与・振込統合Excel</h2>
             {isDraft ? (
               <div style={s.actions}>
-                <button disabled={busy} onClick={generatePayrollExcel} style={s.primary}>給与Excelを生成</button>
-                <button disabled={busy} onClick={generateTransferExcel} style={s.secondary}>振込一覧Excelを生成</button>
+                <button disabled={busy} onClick={generatePayrollExcel} style={s.primary}>統合Excelを1ファイル生成</button>
               </div>
             ) : (
               <div style={s.actions}>
-                <button disabled={busy} onClick={generatePayrollExcel} style={s.primary}>確定済み給与Excelをダウンロード</button>
-                <button disabled={busy} onClick={generateTransferExcel} style={s.secondary}>確定済み振込一覧Excelをダウンロード</button>
+                <button disabled={busy} onClick={generatePayrollExcel} style={s.primary}>確定済み統合Excelをダウンロード</button>
               </div>
             )}
-            {payrollFile && <div style={s.fileBox}><span>ファイル名：{payrollFile.name}</span><a href={payrollFileUrl} download={payrollFile.name} style={s.downloadButton}>給与Excelをダウンロード</a></div>}
-            {transferFile && <div style={s.fileBox}><span>ファイル名：{transferFile.name}</span><a href={transferFileUrl} download={transferFile.name} style={s.downloadButton}>振込一覧Excelをダウンロード</a></div>}
+            {payrollFile && <div style={s.fileBox}><span>ファイル名：{payrollFile.name}</span><a href={payrollFileUrl} download={payrollFile.name} style={s.downloadButton}>統合Excelをダウンロード</a></div>}
           </section>
         )}
 

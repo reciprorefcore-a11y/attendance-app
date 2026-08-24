@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyAdminToken } from "@/lib/firebase-admin";
 import { loadPayrollRun } from "@/lib/payroll-server";
-import { createPayrollWorkbook, createTransferWorkbook, createPayslipPdf, createPayslipZip, selectFullTimePayslipResults, selectStorePayslipResults } from "@/lib/payroll-export";
+import { createPayrollWorkbook, createTransferWorkbook, createUnifiedPayrollWorkbook, createPayslipPdf, createPayslipZip, selectFullTimePayslipResults, selectStorePayslipResults } from "@/lib/payroll-export";
 
 export const runtime = "nodejs";
 
@@ -13,6 +13,7 @@ function exportResponse(kind: string, run: ExportRun, excludeZero = true) {
   let buffer: Buffer, filename: string, contentType: string;
   if (kind === "payroll") { buffer = createPayrollWorkbook(run.results, run.paymentMonth, draft, run.targetMonth, run.paymentDate); filename = `${label}支給給与${draft ? "_試算" : ""}.xlsx`; contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"; }
   else if (kind === "transfer") { buffer = createTransferWorkbook(run.results, run.paymentMonth, excludeZero, draft, run.targetMonth, run.paymentDate); filename = `${label}給与振込一覧${draft ? "_試算" : ""}.xlsx`; contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"; }
+  else if (kind === "unified") { buffer = createUnifiedPayrollWorkbook(run.results,run.paymentMonth,draft); filename=`${label}給与・振込統合${draft?"_試算":""}.xlsx`; contentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"; }
   else return null;
   return new NextResponse(new Uint8Array(buffer), { headers: { "Content-Type": contentType, "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`, "Cache-Control": "no-store" } });
 }
@@ -34,7 +35,7 @@ export async function GET(request: NextRequest, context: { params: Promise<{ kin
   const run = await loadPayrollRun(admin.db, runId);
   if (!run) return NextResponse.json({ error: "給与計算結果がありません" }, { status: 404 });
   const { kind } = await context.params;
-  if (kind === "payroll" || kind === "transfer") return exportResponse(kind, run, request.nextUrl.searchParams.get("excludeZero") !== "false")!;
+  if (kind === "payroll" || kind === "transfer" || kind === "unified") return exportResponse(kind, run, request.nextUrl.searchParams.get("excludeZero") !== "false")!;
   if ((kind === "pdf" || kind === "store-payslips" || kind === "fulltime-payslips") && run.status !== "confirmed") return NextResponse.json({ error: "未確定月の給与明細は取得できません" }, { status: 409 });
   if (kind === "pdf") {
     const employeeId = request.nextUrl.searchParams.get("employeeId"); const result = run.results.find((item) => item.employeeId === employeeId);

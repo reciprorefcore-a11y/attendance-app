@@ -1,0 +1,15 @@
+import { NextRequest, NextResponse } from "next/server";
+import { verifyAdminToken } from "@/lib/firebase-rest";
+import { validateFullTimeMasterInput, type FullTimeMasterInput } from "@/lib/fulltime-master";
+export const runtime = "nodejs";
+export async function POST(request: NextRequest) {
+  const auth = await verifyAdminToken(request.headers.get("authorization")); if (!auth) return NextResponse.json({ error: "本部管理者権限が必要です" }, { status: 403 });
+  const value = await request.json().catch(() => null) as FullTimeMasterInput | null; if (!value) return NextResponse.json({ error: "入力形式が不正です" }, { status: 400 });
+  const errors = validateFullTimeMasterInput(value); if (errors.length) return NextResponse.json({ error: errors.join("。") }, { status: 400 });
+  const duplicate = await auth.db.collection("employees").where("employeeCode", "==", value.employeeCode.trim()).limit(1).get(); if (!duplicate.empty) return NextResponse.json({ error: "同じ社員コードが既に存在します" }, { status: 409 });
+  const employeeRef = auth.db.collection("employees").doc(); const settingsRef = auth.db.collection("payrollSettings").doc(employeeRef.id); const now = new Date();
+  const entry = { effectiveMonth: value.effectiveMonth, updatedAt: now, updatedBy: auth.uid };
+  const batch = auth.db.batch(); batch.create(employeeRef, { name:value.name.trim(), nameKana:value.nameKana?.trim()??"", employeeCode:value.employeeCode.trim(), storeId:value.storeId??"", storeName:value.storeName??"", employeeType:"fullTime", employmentType:"full_time", payrollType:"fixed", payrollEnabled:true, clockEnabled:false, status:"active", isActive:true, isDeleted:false, createdAt:now, updatedAt:now });
+  batch.create(settingsRef, { fixedBaseSalary:value.fixedBaseSalary, transportationType:value.transportationType, monthlyTransportation:value.transportationType === "monthly" ? value.transportationAmount : 0, dailyTransportation:value.transportationType === "daily" ? value.transportationAmount : 0, residentTax:value.residentTax, dependentCount:value.dependentCount, taxTableType:value.taxTableType, socialInsuranceEnrolled:value.socialInsuranceEnrolled, standardMonthlyRemuneration:value.standardMonthlyRemuneration, careInsuranceApplicable:value.careInsuranceApplicable, employmentInsuranceEnrolled:value.employmentInsuranceEnrolled, fixedBaseSalaryHistory:[{...entry,amount:value.fixedBaseSalary}], transportationHistory:[{...entry,type:value.transportationType,amount:value.transportationAmount}], residentTaxHistory:[{...entry,amount:value.residentTax}], updatedAt:now, updatedBy:auth.uid }); await batch.commit();
+  return NextResponse.json({ ok:true, employeeId:employeeRef.id }, { status:201 });
+}

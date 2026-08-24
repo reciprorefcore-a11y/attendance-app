@@ -127,4 +127,7 @@ export const adminStyles = {
     padding: 10,
     fontSize: 14,
   },
+  empty: { color: "#64748b", padding: 12 },
+  modalOverlay: { position: "fixed", inset: 0, zIndex: 100, display: "grid", placeItems: "center", padding: 16, background: "rgba(15,23,42,.55)" },
+  modal: { width: "100%", background: "#fff", borderRadius: 12, padding: 24, boxShadow: "0 24px 70px rgba(15,23,42,.25)" },
 } satisfies Record<string, CSSProperties>;

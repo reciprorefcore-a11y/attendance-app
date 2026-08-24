@@ -15,7 +15,6 @@ import {
   collection,
   doc,
   deleteDoc,
-  getDoc,
   getDocs,
   orderBy,
   query,
@@ -102,11 +101,6 @@ const emptyEmployeeForm = () => ({
   transportationCost: "", transportationType: "daily" as "daily" | "monthly" | "none",
   payrollEnabled: true,
   clockEnabled: true,
-});
-const emptyFullTimeForm = () => ({
-  name: "", nameKana: "", employeeCode: "", status: "active", payrollEnabled: true,
-  fixedBaseSalary: "", directorCompensation: "", positionAllowance: "", businessAllowance: "", holidayAllowance: "", fixedOvertimeAllowance: "",
-  healthInsurance: "", childSupportContribution: "", careInsurance: "", employeePension: "", employmentInsurance: "", incomeTax: "", residentTax: "",
 });
 type AccountManagerRow = { uid: string; name?: string; email?: string; role: "area_manager" | "fc_manager"; storeId?: string; storeIds?: string[] };
 
@@ -432,17 +426,14 @@ export default function AdminPage() {
   const manualValidation = useMemo(() => manualForm ? validateManualAttendance(manualForm) : null, [manualForm]);
   const [message, setMessage] = useState("");
   const [employeeEditingId, setEmployeeEditingId] = useState("");
-  const [employeeKindTab, setEmployeeKindTab] = useState<"hourly" | "fixed">("hourly");
   useEffect(() => {
     const timer = window.setTimeout(() => {
       const params = new URLSearchParams(window.location.search);
       if (params.get("tab") === "employees") setActiveTab("employees");
-      if (params.get("employeeKind") === "fixed") setEmployeeKindTab("fixed");
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
   const [employeeForm, setEmployeeForm] = useState(emptyEmployeeForm);
-  const [fullTimeForm, setFullTimeForm] = useState(emptyFullTimeForm);
   const [storeEditingId, setStoreEditingId] = useState("");
   const [storeForm, setStoreForm] = useState({
     id: "",
@@ -503,8 +494,6 @@ export default function AdminPage() {
     : isAreaManager
       ? tabs.filter((tab) => areaManagerAllowedTabs.includes(tab.id))
       : tabs.filter((tab) => managerAllowedTabs.includes(tab.id));
-  const fixedEmployeeCodes = ["0002", "0003", "0017", "0064", "0083"];
-  const registeredFixedEmployees = employees.filter((employee) => employee.isDeleted !== true && (employee.employeeType === "fullTime" || fixedEmployeeCodes.includes(String(employee.employeeCode).padStart(4, "0"))));
   const [appBaseUrl, setAppBaseUrl] = useState(
     process.env.NEXT_PUBLIC_APP_URL ??
       (typeof window !== "undefined" ? window.location.origin : ""),
@@ -1060,13 +1049,9 @@ export default function AdminPage() {
     };
     try {
       if (employeeEditingId) {
-        const employeeRef = doc(db, "employees", employeeEditingId);
-        const latest = await getDoc(employeeRef);
-        if (!latest.exists() || isFullTimeEmployee(latest.data())) {
-          setEmployeeFormError("正社員はアルバイト画面から編集できません。");
-          return;
-        }
-        await updateDoc(employeeRef, payload);
+        if (!user) throw new Error("ログインが必要です。");
+        const token=await user.getIdToken(true),response=await fetch(`/api/employees/${employeeEditingId}`,{method:"PATCH",headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},body:JSON.stringify(payload)}),body=await response.json() as {error?:string};
+        if(!response.ok)throw new Error(body.error??"従業員の更新に失敗しました。");
       } else {
         await addDoc(collection(db, "employees"), payload);
       }
@@ -1103,22 +1088,6 @@ export default function AdminPage() {
     setActiveTab("employees");
   };
 
-  const saveFullTimeEmployee = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!fullTimeForm.name.trim() || !fullTimeForm.employeeCode.trim()) { setEmployeeFormError("氏名と社員コードを入力してください。"); return; }
-    if (employees.some((employee) => String(employee.employeeCode).padStart(4, "0") === fullTimeForm.employeeCode.trim().padStart(4, "0"))) { setEmployeeFormError("同じ社員コードの従業員が既に登録されています。"); return; }
-    const fixedFields = ["fixedBaseSalary","directorCompensation","positionAllowance","businessAllowance","holidayAllowance","fixedOvertimeAllowance","healthInsurance","childSupportContribution","careInsurance","employeePension","employmentInsurance","incomeTax","residentTax"] as const;
-    try {
-      await addDoc(collection(db, "employees"), {
-        name: fullTimeForm.name.trim(), nameKana: fullTimeForm.nameKana.trim(), employeeCode: fullTimeForm.employeeCode.trim(),
-        employeeType: "fullTime", employmentType: "full_time", payrollType: "fixed", clockEnabled: false,
-        payrollEnabled: fullTimeForm.payrollEnabled, status: fullTimeForm.status, createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
-        ...Object.fromEntries(fixedFields.map((field) => [field, Number(fullTimeForm[field]) || 0])),
-      });
-      setFullTimeForm(emptyFullTimeForm()); setEmployeeFormError(""); setMessage("正社員を保存しました。"); await load();
-    } catch (error) { console.error("full-time employee save failed", error); setEmployeeFormError("正社員の保存に失敗しました。"); }
-  };
-
   const deleteEmployee = async (employee: EmployeeRow) => {
     if (isFullTimeEmployee(employee)) {
       setMessage("正社員はアルバイト画面から削除できません。");
@@ -1139,6 +1108,7 @@ export default function AdminPage() {
       setMessage(error instanceof Error ? error.message : "従業員の削除に失敗しました。");
     }
   };
+  const reactivateEmployee=async(employee:EmployeeRow)=>{if(!user)return;const token=await user.getIdToken(true),response=await fetch(`/api/employees/${employee.id}`,{method:"PATCH",headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},body:JSON.stringify({action:"reactivate"})}),body=await response.json() as {error?:string};if(!response.ok){setMessage(body.error??"再有効化に失敗しました。");return;}setMessage(`${employee.name}さんを再有効化しました。`);await load();};
 
   const saveStore = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -1839,32 +1809,8 @@ export default function AdminPage() {
 
         {activeTab === "employees" && (
           <section style={styles.tabPanel}>
-            <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
-              <button type="button" onClick={() => setEmployeeKindTab("hourly")} style={employeeKindTab === "hourly" ? styles.button : styles.secondaryButton}>① アルバイト</button>
-              {isAdmin && <button type="button" onClick={() => setEmployeeKindTab("fixed")} style={employeeKindTab === "fixed" ? styles.button : styles.secondaryButton}>② 正社員</button>}
-            </div>
-            {isAdmin && employeeKindTab === "fixed" && (
-              <div>
-                <section style={styles.panel}>
-                  <h2 style={styles.sectionTitle}>正社員の新規登録・固定給与マスター</h2>
-                  <p style={styles.helpText}>正社員は所属店舗・PIN・時給・打刻対象を持ちません。当月調整は給与管理画面で行います。</p>
-                  <form onSubmit={saveFullTimeEmployee} style={styles.editForm}>
-                    <label style={styles.label}>氏名<input value={fullTimeForm.name} onChange={(e) => setFullTimeForm({ ...fullTimeForm, name: e.target.value })} style={styles.input}/></label>
-                    <label style={styles.label}>ふりがな<input value={fullTimeForm.nameKana} onChange={(e) => setFullTimeForm({ ...fullTimeForm, nameKana: e.target.value })} style={styles.input}/></label>
-                    <label style={styles.label}>社員コード<input value={fullTimeForm.employeeCode} onChange={(e) => setFullTimeForm({ ...fullTimeForm, employeeCode: e.target.value })} style={styles.input}/></label>
-                    <label style={styles.label}>給与対象<select value={fullTimeForm.payrollEnabled ? "yes" : "no"} onChange={(e) => setFullTimeForm({ ...fullTimeForm, payrollEnabled: e.target.value === "yes" })} style={styles.input}><option value="yes">対象</option><option value="no">対象外</option></select></label>
-                    {([['fixedBaseSalary','基本給'],['directorCompensation','役員報酬'],['positionAllowance','職能手当'],['businessAllowance','業務手当'],['holidayAllowance','休日手当'],['fixedOvertimeAllowance','固定手当'],['healthInsurance','健康保険'],['childSupportContribution','子育て支援金'],['careInsurance','介護保険'],['employeePension','厚生年金'],['employmentInsurance','雇用保険'],['incomeTax','所得税'],['residentTax','住民税']] as const).map(([field, label]) => <label key={field} style={styles.label}>{label}<input type="number" min="0" value={fullTimeForm[field]} onChange={(e) => setFullTimeForm({ ...fullTimeForm, [field]: e.target.value })} style={styles.input}/></label>)}
-                    <button type="submit" style={styles.button}>正社員として登録</button>
-                  </form>
-                </section>
-                <DataTable headers={["氏名", "ふりがな", "社員コード", "所属", "雇用区分", "給与対象", "在籍状態"]}>
-                  {registeredFixedEmployees.map((employee) => <tr key={employee.id}><td style={styles.td}>{employee.name}</td><td style={styles.td}>{employee.nameKana}</td><td style={styles.td}>{employee.employeeCode}</td><td style={styles.td}>所属なし</td><td style={styles.td}>正社員</td><td style={styles.td}>{employee.payrollEnabled === false ? "対象外" : "対象"}</td><td style={styles.td}>{employee.status === "active" ? "在籍" : "退職・休職"}</td></tr>)}
-                </DataTable>
-              </div>
-            )}
-            <div style={{ display: employeeKindTab === "hourly" ? "block" : "none" }}>
             <div style={styles.panelHeader}>
-              <h2 style={styles.sectionTitle}>従業員管理</h2>
+              <h2 style={styles.sectionTitle}>アルバイト管理</h2>
               <div style={styles.inlineActions}>
                 <button
                   type="button"
@@ -2087,7 +2033,7 @@ export default function AdminPage() {
               </div>
             )}
             <DataTable headers={["社員コード", "氏名", "ひらがな", "所属店舗", "状態", "基本時給", "交通費", "権限", "操作"]}>
-              {employees.filter(isAdminPartTimeEmployee).map((employee) => (
+              {employees.filter((employee)=>!isFullTimeEmployee(employee)).map((employee) => (
                 <tr key={employee.id}>
                   <td style={styles.td}>{employee.employeeCode}</td>
                   <td style={styles.td}>{employee.name}</td>
@@ -2113,14 +2059,13 @@ export default function AdminPage() {
                     {isAdmin && (
                       <button type="button" onClick={() => openPermissionModal(employee)} style={styles.linkButton}>権限設定</button>
                     )}
+                    <button type="button" onClick={()=>window.alert(`${employee.employeeCode} ${employee.name}\n所属：${storeNameById(employee.storeId)}\n状態：${employee.isDeleted===true||employee.status==="inactive"?"無効":"有効"}`)} style={styles.linkButton}>詳細</button>
                     <button type="button" onClick={() => editEmployee(employee)} style={styles.linkButton}>編集</button>
-                    {isAdmin && <button type="button" onClick={async () => { await updateDoc(doc(db, "employees", employee.id), { status: "inactive" }); await load(); }} style={styles.linkButton}>無効化</button>}
-                    {(isAdmin || isManager) && !isFullTimeEmployee(employee) && <button type="button" onClick={() => deleteEmployee(employee)} style={{...styles.linkButton, color: "#B91C1C", borderColor: "#FCA5A5", background: "#FEF2F2"}}>削除</button>}
+                    {employee.isDeleted===true||employee.status==="inactive"?<button type="button" onClick={()=>reactivateEmployee(employee)} style={styles.linkButton}>再有効化</button>:(isAdmin || isManager) && <button type="button" onClick={() => deleteEmployee(employee)} style={{...styles.linkButton, color: "#B91C1C", borderColor: "#FCA5A5", background: "#FEF2F2"}}>無効化・論理削除</button>}
                   </td>
                 </tr>
               ))}
             </DataTable>
-            </div>
           </section>
         )}
 

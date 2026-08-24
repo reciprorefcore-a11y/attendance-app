@@ -86,6 +86,48 @@ export function createTransferWorkbook(results: PayrollResult[], paymentMonth: s
   return XLSX.write(workbook, { type: "buffer", bookType: "xlsx" }) as Buffer;
 }
 
+const unifiedHeaders = ["employeeId","社員コード","氏名","雇用区分","所属店舗","課税支給","非課税支給","支給合計","控除合計","立替経費精算","最終支給額","支給方法"];
+function hasMonthlyAdjustment(result: PayrollResult) {
+  const adjustment = result.fixedAdjustment;
+  return adjustment != null && Object.entries(adjustment).some(([key, value]) =>
+    key !== "automaticOvertimeAllowance" && value !== undefined && value !== null && value !== "" && value !== 0,
+  );
+}
+
+export function selectPayrollExportResults(results: PayrollResult[], confirmed = false) {
+  return results.filter((result) => confirmed
+    || result.earnings.grossTotal !== 0
+    || result.deductions.total !== 0
+    || result.reimbursements.expenseReimbursement !== 0
+    || hasMonthlyAdjustment(result)
+    || result.attendance.workMinutes !== 0
+    || result.attendance.attendanceDays !== 0);
+}
+
+export function payrollTransferWarnings(results: PayrollResult[]) {
+  return results
+    .filter((result) => result.paymentMethod === "bank" && result.bankTransfer > 0 && result.bankAccountRegisteredSnapshot !== true)
+    .map((result) => `${result.employeeCode} ${result.employeeName}：${result.bankAccountRegisteredSnapshot === false ? "口座情報が未登録です" : "口座情報の登録状態を確認できません"}`);
+}
+
+function unifiedRows(results: PayrollResult[]) { return sortPayrollResultsForExcel(results).map(item=>[item.employeeId,item.employeeCode,item.employeeName,item.employeeType==="fullTime"?"正社員":"アルバイト",item.storeName,item.earnings.taxableTotal,item.earnings.nonTaxableTotal,item.earnings.grossTotal,item.deductions.total,item.reimbursements.expenseReimbursement,item.netPay,item.paymentMethod==="bank"?"振込":"現金"]); }
+export function createUnifiedPayrollWorkbook(results:PayrollResult[],paymentMonth:string,draft=false){
+  const included = selectPayrollExportResults(results, !draft);
+  const payrollWorkbook = XLSX.read(createPayrollWorkbook(included, paymentMonth, draft), { type: "buffer", cellStyles: true, cellFormula: true });
+  if (payrollWorkbook.SheetNames.length !== 1) throw new Error("給与一覧の対象人数が横型帳票の1シート上限を超えています");
+  const originalPayrollName = payrollWorkbook.SheetNames[0];
+  payrollWorkbook.SheetNames = ["給与一覧"];
+  payrollWorkbook.Sheets["給与一覧"] = payrollWorkbook.Sheets[originalPayrollName];
+  if (originalPayrollName !== "給与一覧") delete payrollWorkbook.Sheets[originalPayrollName];
+  const workbook=payrollWorkbook,allRows=unifiedRows(included),fixedRows=allRows.filter(row=>row[3]==="正社員"),hourlyRows=allRows.filter(row=>row[3]==="アルバイト");
+  const add=(name:string,rows:unknown[][])=>XLSX.utils.book_append_sheet(workbook,XLSX.utils.aoa_to_sheet(rows),name);
+  add("正社員",[[`${paymentLabel(paymentMonth)}支給 正社員`],unifiedHeaders,...fixedRows]); add("アルバイト",[[`${paymentLabel(paymentMonth)}支給 アルバイト`],unifiedHeaders,...hourlyRows]);
+  const stores=new Map<string,PayrollResult[]>(); for(const item of included){const key=item.employeeType==="fullTime"?"所属なし（正社員）":item.storeName||"店舗未設定";stores.set(key,[...(stores.get(key)??[]),item]);}
+  add("店舗別集計",[["店舗","人数","支給合計","控除合計","立替経費精算","最終支給総額"],...[...stores.entries()].map(([name,items])=>[name,items.length,items.reduce((s,x)=>s+x.earnings.grossTotal,0),items.reduce((s,x)=>s+x.deductions.total,0),items.reduce((s,x)=>s+x.reimbursements.expenseReimbursement,0),items.reduce((s,x)=>s+x.netPay,0)])]);
+  const transfers=sortPayrollResults(included).filter(item=>item.paymentMethod==="bank"&&item.bankTransfer>0),warnings=payrollTransferWarnings(transfers); add("振込データ",[[`${paymentLabel(paymentMonth)}支給 給与振込一覧`],["No.","社員コード","氏名","振込金額","employeeId","警告"],...transfers.map((item,index)=>[index+1,item.employeeCode,item.employeeName,item.bankTransfer,item.employeeId,item.bankAccountRegisteredSnapshot===true?"":item.bankAccountRegisteredSnapshot===false?"口座情報未登録":"口座情報状態未確認"]),["振込合計","","",transfers.reduce((sum,item)=>sum+item.bankTransfer,0),"",warnings.length?`警告 ${warnings.length}件`:""]]);
+  return XLSX.write(workbook,{type:"buffer",bookType:"xlsx"}) as Buffer;
+}
+
 async function loadJapaneseFont() {
   return readFile(path.join(process.cwd(), "public", "fonts", "ipaexg.ttf"));
 }

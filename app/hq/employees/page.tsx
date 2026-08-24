@@ -5,6 +5,8 @@ import { db } from "@/lib/firebase";
 import { adminStyles as styles } from "@/lib/adminStyles";
 import { useAuthProfile } from "@/lib/auth";
 import { isFullTimeEmployee } from "@/lib/employee-classification";
+import { isActiveFullTimeMaster, isInactiveFullTimeMaster, type FullTimeMasterInput } from "@/lib/fulltime-master";
+import { calculateAutomaticStatutoryDeductions } from "@/lib/payroll-statutory";
 import {
   Employee,
   EmploymentType,
@@ -22,29 +24,14 @@ import {
   serverTimestamp,
   updateDoc,
   where,
-  writeBatch,
 } from "firebase/firestore";
 
-type EmployeeRow = Employee & { id: string; fixedBaseSalary?: number | null; monthlyTransportation?: number | null; residentTax?: number | null; healthInsurance?: number | null; childSupportContribution?: number | null; careInsurance?: number | null; employeePension?: number | null; employmentInsurance?: number | null; incomeTax?: number | null };
+type EmployeeRow = Employee & { id: string; fixedBaseSalary?: number | null; monthlyTransportation?: number | null; dailyTransportation?: number | null; residentTax?: number | null; healthInsurance?: number | null; childSupportContribution?: number | null; careInsurance?: number | null; employeePension?: number | null; employmentInsurance?: number | null; incomeTax?: number | null; dependentCount?: number; taxTableType?: "kou"|"otsu"; socialInsuranceEnrolled?: boolean; standardMonthlyRemuneration?: number; careInsuranceApplicable?: boolean; employmentInsuranceEnrolled?: boolean; isActive?: boolean; retirementDate?: string };
 type StoreRow = Store & { id: string };
 type WageInput = {
   hourlyWage: string;
   lateNightHourlyWage: string;
   dailyTransportation: string;
-};
-type EmployeeMatch = {
-  id: string;
-  employeeCode: string;
-  name: string;
-  nameKana: string;
-  status: string;
-  matchedBy: string[];
-};
-type PreviewState = {
-  employeeCode: string;
-  isChecking: boolean;
-  matches: EmployeeMatch[];
-  checked: boolean;
 };
 
 const emptyForm = {
@@ -59,45 +46,9 @@ const emptyForm = {
   healthInsurance: "", childSupportContribution: "", careInsurance: "", employeePension: "", employmentInsurance: "", incomeTax: "", residentTax: "",
 };
 
-// Book2検算済みの初期値（固定給与テンプレートと一致）。ひらがなは入力済み。
-const FIXED_EMPLOYEE_PRESETS: Record<string, Partial<typeof emptyForm>> = {
-  "0002": {
-    employeeCode: "0002", name: "青山佳史", nameKana: "あおやま よしふみ",
-    employmentType: "full_time" as EmploymentType,
-    directorCompensation: "150000", fixedBaseSalary: "0",
-    healthInsurance: "7440", childSupportContribution: "172", careInsurance: "1215",
-    employeePension: "13725", employmentInsurance: "0", residentTax: "12600",
-    paymentMethod: "cash" as "bank" | "cash",
-  },
-  "0017": {
-    employeeCode: "0017", name: "木月徳子", nameKana: "きづき のりこ",
-    employmentType: "full_time" as EmploymentType,
-    fixedBaseSalary: "200000", positionAllowance: "6000", directorCompensation: "0",
-    healthInsurance: "9920", childSupportContribution: "230", careInsurance: "1620",
-    employeePension: "18300", employmentInsurance: "1030", residentTax: "0",
-    paymentMethod: "bank" as "bank" | "cash",
-  },
-};
-
-// Book2検算済みの給与プレビュー値（テストで検証済み）
-const PAYROLL_PREVIEW: Record<string, {
-  basicNetPay: number;
-  paymentMethod: "cash" | "bank";
-  notes: string[];
-}> = {
-  "0002": {
-    basicNetPay: 113548,
-    paymentMethod: "cash",
-    notes: ["振込一覧に含めない（現金支給）", "店舗別明細ZIPに含めない", "正社員明細ZIPに含める"],
-  },
-  "0017": {
-    basicNetPay: 171490,
-    paymentMethod: "bank",
-    notes: ["振込一覧に含める", "店舗別明細ZIPに含めない", "正社員明細ZIPに含める"],
-  },
-};
-
 const yen = (v: number) => `${Math.trunc(v || 0).toLocaleString()}円`;
+const currentMonth = () => new Date(Date.now()+9*3600000).toISOString().slice(0,7);
+const blankFullTimeMaster = (): FullTimeMasterInput => ({name:"",nameKana:"",employeeCode:"",storeId:"",storeName:"",fixedBaseSalary:0,transportationType:"none",transportationAmount:0,residentTax:0,dependentCount:0,taxTableType:"kou",socialInsuranceEnrolled:false,standardMonthlyRemuneration:0,careInsuranceApplicable:false,employmentInsuranceEnrolled:false,effectiveMonth:currentMonth()});
 
 function todayString() {
   return new Date().toISOString().slice(0, 10);
@@ -111,8 +62,11 @@ export default function HqEmployeesPage() {
   const [message, setMessage] = useState("");
   const [form, setForm] = useState(emptyForm);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [employeeTab, setEmployeeTab] = useState<"hourly" | "fixed">("hourly");
-  const [preview, setPreview] = useState<PreviewState | null>(null);
+  const [employeeTab, setEmployeeTab] = useState<"hourly" | "fixed">("fixed");
+  const [fullTimeFilter,setFullTimeFilter]=useState<"active"|"inactive">("active");
+  const [fullTimeEditor,setFullTimeEditor]=useState<{mode:"create"|"edit";employeeId?:string;before?:FullTimeMasterInput;value:FullTimeMasterInput}|null>(null);
+  const [fullTimeDetail,setFullTimeDetail]=useState<EmployeeRow|null>(null);
+  const [fullTimeConfirm,setFullTimeConfirm]=useState(false);
 
   const load = async () => {
     const [employeeSnapshot, storeSnapshot, payrollSnapshot] = await Promise.all([
@@ -158,37 +112,13 @@ export default function HqEmployeesPage() {
   );
 
   const selectedStore = stores.find((store) => store.id === form.storeId);
-
-  const checkDuplicates = async (employeeCode: string, name: string, nameKana: string) => {
-    if (!user) { setMessage("ログインが必要です"); return; }
-    setPreview({ employeeCode, isChecking: true, matches: [], checked: false });
-    setMessage("");
-    try {
-      const token = await user.getIdToken(true);
-      const params = new URLSearchParams({ employeeCode, name, nameKana });
-      const res = await fetch(`/api/employees/check?${params}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const data = await res.json() as { results?: EmployeeMatch[]; error?: string };
-      if (!res.ok) throw new Error(data.error ?? "確認に失敗しました");
-      setPreview({ employeeCode, isChecking: false, matches: data.results ?? [], checked: true });
-    } catch (e) {
-      setPreview(null);
-      setMessage(e instanceof Error ? e.message : "重複確認に失敗しました");
-    }
-  };
+  const fullTimeRows=useMemo(()=>employees.filter((employee)=>fullTimeFilter==="active"?isActiveFullTimeMaster(employee):isInactiveFullTimeMaster(employee)),[employees,fullTimeFilter]);
 
   const createEmployee = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const employeeCode = form.employeeCode.trim();
-    if (!employeeCode || !form.name.trim() || !form.nameKana.trim() || (employeeTab === "hourly" && !selectedStore)) {
-      setMessage(employeeTab === "hourly" ? "社員コード、氏名、ひらがな、所属店舗を入力してください。" : "社員コード、氏名、ひらがなを入力してください。");
-      return;
-    }
-
-    // Block if duplicate confirmed
-    if (preview?.checked && preview.matches.length > 0) {
-      setMessage("重複する社員が確認されています。新規登録できません。");
+    if (!employeeCode || !form.name.trim() || !form.nameKana.trim() || !selectedStore) {
+      setMessage("社員コード、氏名、ひらがな、所属店舗を入力してください。");
       return;
     }
 
@@ -196,16 +126,14 @@ export default function HqEmployeesPage() {
     setMessage("");
 
     try {
-      if (employeeTab === "hourly") {
-        // Hourly employees: single addDoc (existing flow)
-        const duplicateSnapshot = await getDocs(
-          query(collection(db, "employees"), where("employeeCode", "==", employeeCode)),
-        );
-        if (!duplicateSnapshot.empty) {
-          setMessage("同じ社員コードの従業員が既に登録されています。");
-          return;
-        }
-        await addDoc(collection(db, "employees"), {
+      const duplicateSnapshot = await getDocs(
+        query(collection(db, "employees"), where("employeeCode", "==", employeeCode)),
+      );
+      if (!duplicateSnapshot.empty) {
+        setMessage("同じ社員コードの従業員が既に登録されています。");
+        return;
+      }
+      await addDoc(collection(db, "employees"), {
           employeeCode,
           name: form.name.trim(),
           nameKana: form.nameKana.trim(),
@@ -223,67 +151,19 @@ export default function HqEmployeesPage() {
           status: "active",
           createdAt: new Date(),
           updatedAt: new Date(),
-        });
-      } else {
-        // Fixed employees: atomic batch - employees + payrollSettings
-        const duplicateSnapshot = await getDocs(
-          query(collection(db, "employees"), where("employeeCode", "==", employeeCode)),
-        );
-        if (!duplicateSnapshot.empty) {
-          setMessage("同じ社員コードの従業員が既に登録されています。");
-          return;
-        }
-        const batch = writeBatch(db);
-        const employeeRef = doc(collection(db, "employees"));
-        batch.set(employeeRef, {
-          employeeCode,
-          name: form.name.trim(),
-          nameKana: form.nameKana.trim(),
-          employeeType: "fullTime",
-          employmentType: "full_time",
-          payrollType: "fixed",
-          clockEnabled: false,
-          payrollEnabled: form.payrollEnabled,
-          status: "active",
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-        const payrollSettingsRef = doc(db, "payrollSettings", employeeRef.id);
-        batch.set(payrollSettingsRef, {
-          fixedBaseSalary: Number(form.fixedBaseSalary) || 0,
-          monthlyTransportation: Number(form.transportationCost) || 0,
-          residentTax: Number(form.residentTax) || 0,
-          paymentMethod: form.paymentMethod,
-          updatedAt: serverTimestamp(),
-        });
-        await batch.commit();
-      }
+      });
 
       setMessage("従業員を登録しました。");
       setForm(emptyForm);
-      setPreview(null);
       await load();
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  const setFullTimeActive = async (employee: EmployeeRow, active: boolean) => {
-    const action = active ? "再有効化" : "退職・無効化";
-    if (!window.confirm(`${employee.name}さんを${action}します。よろしいですか？`)) return;
-    await updateDoc(doc(db, "employees", employee.id), { isDeleted: !active, status: active ? "active" : "inactive", payrollEnabled: active, updatedAt: serverTimestamp() });
-    setMessage(`${employee.name}さんを${action}しました。`); await load();
-  };
-
-  const editFullTimePayroll = async (employee: EmployeeRow) => {
-    const salary = window.prompt("月給", String(employee.fixedBaseSalary ?? 0)); if (salary == null) return;
-    const transportation = window.prompt("交通費（月額）", String(employee.monthlyTransportation ?? 0)); if (transportation == null) return;
-    const residentTax = window.prompt("住民税", String(employee.residentTax ?? 0)); if (residentTax == null) return;
-    const values = [salary, transportation, residentTax].map(Number);
-    if (values.some((value) => !Number.isInteger(value) || value < 0)) { setMessage("月給・交通費・住民税は0以上の整数で入力してください。"); return; }
-    await updateDoc(doc(db, "payrollSettings", employee.id), { fixedBaseSalary: values[0], monthlyTransportation: values[1], residentTax: values[2], updatedAt: serverTimestamp() });
-    setMessage(`${employee.name}さんの固定給与マスターを更新しました。`); await load();
-  };
+  const editorValue=(employee:EmployeeRow):FullTimeMasterInput=>({name:employee.name,nameKana:employee.nameKana??"",employeeCode:employee.employeeCode,storeId:employee.storeId??"",storeName:employee.storeName??"",fixedBaseSalary:Number(employee.fixedBaseSalary)||0,transportationType:employee.transportationType??"none",transportationAmount:Number(employee.transportationType==="daily"?employee.dailyTransportation:employee.monthlyTransportation)||0,residentTax:Number(employee.residentTax)||0,dependentCount:Number(employee.dependentCount)||0,taxTableType:employee.taxTableType??"kou",socialInsuranceEnrolled:employee.socialInsuranceEnrolled===true,standardMonthlyRemuneration:Number(employee.standardMonthlyRemuneration)||0,careInsuranceApplicable:employee.careInsuranceApplicable===true,employmentInsuranceEnrolled:employee.employmentInsuranceEnrolled===true,effectiveMonth:currentMonth()});
+  const saveFullTimeMaster=async()=>{if(!fullTimeEditor||!user)return;setIsSubmitting(true);try{const token=await user.getIdToken(true),url=fullTimeEditor.mode==="create"?"/api/fulltime-employees":`/api/fulltime-employees/${fullTimeEditor.employeeId}`,response=await fetch(url,{method:fullTimeEditor.mode==="create"?"POST":"PATCH",headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},body:JSON.stringify(fullTimeEditor.value)}),body=await response.json() as {error?:string};if(!response.ok)throw new Error(body.error??"保存に失敗しました");setMessage(fullTimeEditor.mode==="create"?"正社員を登録しました。":"正社員マスターを更新しました。");setFullTimeEditor(null);setFullTimeConfirm(false);await load();}catch(error){setMessage(error instanceof Error?error.message:"保存に失敗しました");}finally{setIsSubmitting(false);}};
+  const changeFullTimeStatus=async(employee:EmployeeRow,active:boolean)=>{if(!user)return;const retirementDate=active?undefined:window.prompt(`${employee.name}さんの退職日（YYYY-MM-DD）`,todayString());if(!active&&!retirementDate)return;const reason=active?"再有効化":window.prompt(`${employee.name}さんを退職・無効化する理由`);if(!reason)return;if(!window.confirm(`${employee.name}さんを${active?"再有効化":"退職・無効化"}します。物理削除は行いません。`))return;const token=await user.getIdToken(true),response=await fetch(`/api/fulltime-employees/${employee.id}/status`,{method:"PATCH",headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},body:JSON.stringify({active,retirementDate,reason})}),body=await response.json() as {error?:string};if(!response.ok){setMessage(body.error??"状態変更に失敗しました");return;}setMessage(`${employee.name}さんを${active?"再有効化":"退職・無効化"}しました。`);await load();};
 
   const approve = async (employee: EmployeeRow) => {
     const wage = wages[employee.id];
@@ -325,8 +205,6 @@ export default function HqEmployeesPage() {
     await load();
   };
 
-  const hasDuplicate = (preview?.checked && preview.matches.length > 0) ?? false;
-
   return (
     <main style={styles.page}>
       <div style={styles.shell}>
@@ -335,105 +213,26 @@ export default function HqEmployeesPage() {
         </header>
 
         <div style={{ display: "flex", gap: 8, margin: "16px 0" }}>
-          <button type="button" onClick={() => { setEmployeeTab("hourly"); setPreview(null); }} style={employeeTab === "hourly" ? styles.button : styles.secondaryButton}>① アルバイト</button>
-          <button type="button" onClick={() => { setEmployeeTab("fixed"); setPreview(null); }} style={employeeTab === "fixed" ? styles.button : styles.secondaryButton}>② 正社員</button>
+          <button type="button" onClick={() => setEmployeeTab("hourly")} style={employeeTab === "hourly" ? styles.button : styles.secondaryButton}>① アルバイト</button>
+          <button type="button" onClick={() => setEmployeeTab("fixed")} style={employeeTab === "fixed" ? styles.button : styles.secondaryButton}>② 正社員</button>
         </div>
 
         {message && <p style={styles.success}>{message}</p>}
 
         {employeeTab === "fixed" && (
           <section style={styles.panel}>
-            <b>正社員マスター（5名）</b>
-            <p style={{ margin: "8px 0" }}>0002 青山佳史／0003 中村鏡太郎／0017 木月徳子／0064 小林彗太／0083 佐藤雅信</p>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
-              {[{ employeeCode: "0002", name: "青山佳史" }, { employeeCode: "0017", name: "木月徳子" }]
-                .filter((candidate) => !employees.some((emp) => String(emp.employeeCode).padStart(4, "0") === candidate.employeeCode))
-                .map((candidate) => (
-                  <button key={candidate.employeeCode} type="button"
-                    disabled={preview?.isChecking}
-                    onClick={async () => {
-                      const preset = FIXED_EMPLOYEE_PRESETS[candidate.employeeCode];
-                      setForm({ ...emptyForm, ...(preset ?? { employeeCode: candidate.employeeCode, name: candidate.name, employmentType: "full_time" }) });
-                      setMessage("");
-                      setEmployeeTab("fixed");
-                      await checkDuplicates(
-                        candidate.employeeCode,
-                        candidate.name,
-                        preset?.nameKana ?? "",
-                      );
-                    }}
-                    style={styles.secondaryButton}>
-                    {candidate.employeeCode} {candidate.name}を入力
-                  </button>
-                ))}
-            </div>
-
-            {/* 重複確認結果 */}
-            {preview && (
-              <div style={{ marginTop: 14, padding: "12px 16px", borderRadius: 8, border: "1px solid #CBD5E1", background: "#F8FAFC" }}>
-                {preview.isChecking && <p style={{ margin: 0, color: "#64748B", fontSize: 14 }}>🔍 Firestore で重複確認中…</p>}
-                {preview.checked && (
-                  <>
-                    {preview.matches.length === 0 ? (
-                      <p style={{ margin: 0, color: "#166534", fontWeight: 700, fontSize: 14 }}>
-                        ✓ {preview.employeeCode} {FIXED_EMPLOYEE_PRESETS[preview.employeeCode]?.name ?? ""}：既存登録なし・新規登録可能
-                      </p>
-                    ) : (
-                      <div>
-                        <p style={{ margin: "0 0 6px", color: "#DC2626", fontWeight: 700, fontSize: 14 }}>
-                          ✗ {preview.employeeCode}：既存登録あり・新規登録不可
-                        </p>
-                        {preview.matches.map((m) => (
-                          <p key={m.id} style={{ margin: "2px 0", fontSize: 13, color: "#475569" }}>
-                            → 既存社員ID {m.id}（{m.name} / {m.nameKana}）と一致（判定: {m.matchedBy.join(", ")}）
-                          </p>
-                        ))}
-                      </div>
-                    )}
-                  </>
-                )}
-
-                {/* 給与プレビュー（重複なしの場合のみ） */}
-                {preview.checked && preview.matches.length === 0 && PAYROLL_PREVIEW[preview.employeeCode] && (
-                  <div style={{ marginTop: 12, borderTop: "1px solid #E2E8F0", paddingTop: 10 }}>
-                    <p style={{ margin: "0 0 6px", fontWeight: 700, fontSize: 13, color: "#0369A1" }}>給与試算プレビュー（Book2検算済み・登録前確認用）</p>
-                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                      <tbody>
-                        <tr>
-                          <td style={{ padding: "3px 8px", color: "#64748B" }}>差引支給額（基本）</td>
-                          <td style={{ padding: "3px 8px", fontWeight: 700 }}>{yen(PAYROLL_PREVIEW[preview.employeeCode].basicNetPay)}</td>
-                        </tr>
-                        <tr>
-                          <td style={{ padding: "3px 8px", color: "#64748B" }}>支給方法</td>
-                          <td style={{ padding: "3px 8px" }}>{PAYROLL_PREVIEW[preview.employeeCode].paymentMethod === "cash" ? "現金" : "振込"}</td>
-                        </tr>
-                        {PAYROLL_PREVIEW[preview.employeeCode].notes.map((note) => (
-                          <tr key={note}>
-                            <td colSpan={2} style={{ padding: "2px 8px", color: "#475569", fontSize: 12 }}>• {note}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                    <p style={{ margin: "8px 0 0", fontSize: 12, color: "#94A3B8" }}>※ 立替経費返金は当月調整で別途入力してください。固定マスターには登録しません。</p>
-                  </div>
-                )}
-              </div>
-            )}
+            <h2 style={{...styles.title,fontSize:22}}>正社員マスター</h2>
+            <button type="button" onClick={()=>setFullTimeEditor({mode:"create",value:blankFullTimeMaster()})} style={styles.button}>正社員を新規登録</button>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap",margin:"16px 0"}}><button type="button" onClick={()=>setFullTimeFilter("active")} style={fullTimeFilter==="active"?styles.button:styles.secondaryButton}>在籍</button><button type="button" onClick={()=>setFullTimeFilter("inactive")} style={fullTimeFilter==="inactive"?styles.button:styles.secondaryButton}>退職・無効</button></div>
+            <p style={{fontWeight:800}}>正社員 {fullTimeRows.length}人</p>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(300px,1fr))",gap:12}}>{fullTimeRows.map(employee=>{const automatic=calculateAutomaticStatutoryDeductions({taxableEarnings:Number(employee.fixedBaseSalary)||0,socialInsuranceEnrolled:employee.socialInsuranceEnrolled,standardMonthlyRemuneration:employee.standardMonthlyRemuneration,careInsuranceApplicable:employee.careInsuranceApplicable,employmentInsuranceEnrolled:employee.employmentInsuranceEnrolled});return <article key={employee.id} style={{border:"1px solid #CBD5E1",borderRadius:12,padding:16,minWidth:0}}><h3 style={{margin:"0 0 4px"}}>{employee.name}</h3><p style={{margin:"0 0 12px",color:"#64748B"}}>{employee.employeeCode}・{employee.status==="inactive"?"退職・無効":"在籍"}</p><dl style={{display:"grid",gridTemplateColumns:"120px 1fr",gap:6,fontSize:13}}><dt>所属店舗</dt><dd>{employee.storeName||"所属なし"}</dd><dt>雇用区分</dt><dd>正社員</dd><dt>月給</dt><dd>{yen(employee.fixedBaseSalary??0)}</dd><dt>交通費</dt><dd>{employee.transportationType??"none"}・{yen(Number(employee.transportationType==="daily"?employee.dailyTransportation:employee.monthlyTransportation)||0)}</dd><dt>住民税</dt><dd>{yen(employee.residentTax??0)}</dd><dt>標準報酬月額</dt><dd>{employee.standardMonthlyRemuneration?yen(employee.standardMonthlyRemuneration):"未設定"}</dd><dt>社会保険</dt><dd>{automatic.socialInsuranceTotal==null?"自動計算不可（設定不足）":`自動 ${yen(automatic.socialInsuranceTotal)}`}</dd><dt>所得税</dt><dd>{employee.incomeTax==null?"給与試算で自動計算":"現行固定値あり"}</dd></dl><div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:14}}><button type="button" onClick={()=>setFullTimeDetail(employee)} style={styles.secondaryButton}>詳細</button><button type="button" onClick={()=>{const value=editorValue(employee);setFullTimeEditor({mode:"edit",employeeId:employee.id,before:value,value});}} style={styles.secondaryButton}>編集</button>{isActiveFullTimeMaster(employee)?<button type="button" onClick={()=>changeFullTimeStatus(employee,false)} style={styles.dangerButton}>退職・無効化</button>:<button type="button" onClick={()=>changeFullTimeStatus(employee,true)} style={styles.button}>再有効化</button>}</div></article>;})}</div>
+            {fullTimeRows.length===0&&<p style={{color:"#64748B"}}>対象の正社員はいません</p>}
           </section>
         )}
 
+        {employeeTab === "hourly" && <>
         <form style={styles.panel} onSubmit={createEmployee}>
-          <h2 style={{ ...styles.title, fontSize: 18 }}>{employeeTab === "hourly" ? "アルバイト" : "正社員"}を新規登録</h2>
-          {preview?.checked && preview.matches.length === 0 && employeeTab === "fixed" && (
-            <p style={{ margin: "0 0 12px", padding: "8px 12px", borderRadius: 6, background: "#F0FDF4", border: "1px solid #86EFAC", fontSize: 13, fontWeight: 700, color: "#166534" }}>
-              Book2検算済みの初期値（社員コード {preview.employeeCode}）を設定しました。内容を確認後「登録」してください。
-            </p>
-          )}
-          {hasDuplicate && (
-            <p style={{ margin: "0 0 12px", padding: "8px 12px", borderRadius: 6, background: "#FEF2F2", border: "1px solid #FCA5A5", fontSize: 13, fontWeight: 700, color: "#DC2626" }}>
-              重複する社員が確認されているため登録できません。
-            </p>
-          )}
+          <h2 style={{ ...styles.title, fontSize: 18 }}>アルバイトを新規登録</h2>
           <div style={{ ...styles.grid, marginTop: 14 }}>
             <label style={styles.label}>
               社員コード
@@ -447,7 +246,7 @@ export default function HqEmployeesPage() {
               ひらがな
               <input required value={form.nameKana} onChange={(event) => setForm({ ...form, nameKana: event.target.value })} style={styles.input} />
             </label>
-            {employeeTab === "hourly" && <label style={styles.label}>
+            <label style={styles.label}>
               所属店舗
               <select required value={form.storeId} onChange={(event) => setForm({ ...form, storeId: event.target.value })} style={styles.input}>
                 <option value="">選択してください</option>
@@ -455,24 +254,17 @@ export default function HqEmployeesPage() {
                   <option key={store.id} value={store.id}>{store.storeName}</option>
                 ))}
               </select>
-            </label>}
-            {employeeTab === "hourly" ? <>
+            </label>
+            <>
               <label style={styles.label}>PIN<input value={form.pin} onChange={(e) => setForm({ ...form, pin: e.target.value.replace(/\D/g, "").slice(0, 4) })} style={styles.input} /></label>
               <label style={styles.label}>時給<input type="number" value={form.hourlyWage} onChange={(e) => setForm({ ...form, hourlyWage: e.target.value })} style={styles.input} /></label>
               <label style={styles.label}>交通費<input type="number" value={form.transportationCost} onChange={(e) => setForm({ ...form, transportationCost: e.target.value })} style={styles.input} /></label>
               <label style={styles.label}>交通費種別<select value={form.transportationType} onChange={(e) => setForm({ ...form, transportationType: e.target.value as typeof form.transportationType })} style={styles.input}><option value="none">なし</option><option value="daily">日額</option><option value="monthly">月額</option></select></label>
-            </> : <>
-              <label style={styles.label}>固定給区分<select value="fixed" disabled style={styles.input}><option value="fixed">固定給</option></select></label>
-              <label style={styles.label}>支給方法<select value={form.paymentMethod} onChange={(e) => setForm({ ...form, paymentMethod: e.target.value as "bank" | "cash" })} style={styles.input}><option value="bank">振込</option><option value="cash">現金</option></select></label>
-              {([["fixedBaseSalary","月給"],["transportationCost","交通費（月額）"],["residentTax","住民税"]] as const).map(([key, label]) => (
-                <label key={key} style={styles.label}>{label}<input type="number" value={String(form[key as keyof typeof form])} onChange={(e) => setForm({ ...form, [key]: e.target.value })} style={styles.input} /></label>
-              ))}
-              <div style={{ gridColumn: "1 / -1", padding: 12, background: "#F8FAFC", borderRadius: 8 }}>社会保険・雇用保険・所得税は給与試算で自動計算し、ここでは読取専用で確認します。当月調整は給与管理画面で入力します。</div>
-            </>}
+            </>
             <label style={styles.label}>給与対象<select value={form.payrollEnabled ? "yes" : "no"} onChange={(e) => setForm({ ...form, payrollEnabled: e.target.value === "yes" })} style={styles.input}><option value="yes">対象</option><option value="no">対象外</option></select></label>
-            {employeeTab === "hourly" && <label style={styles.label}>打刻対象<select value="yes" disabled style={styles.input}><option value="yes">対象</option></select></label>}
+            <label style={styles.label}>打刻対象<select value="yes" disabled style={styles.input}><option value="yes">対象</option></select></label>
           </div>
-          <button type="submit" disabled={isSubmitting || hasDuplicate} style={{ ...styles.button, marginTop: 14 }}>
+          <button type="submit" disabled={isSubmitting} style={{ ...styles.button, marginTop: 14 }}>
             {isSubmitting ? "登録中" : "登録"}
           </button>
         </form>
@@ -523,8 +315,12 @@ export default function HqEmployeesPage() {
             </table>
           </div>
         </section>
+        </>}
 
-        <section style={styles.panel}>
+        {fullTimeDetail&&<div style={styles.modalOverlay} onClick={()=>setFullTimeDetail(null)}><div style={{...styles.modal,maxWidth:620}} onClick={e=>e.stopPropagation()}><h2>{fullTimeDetail.name}さんの詳細</h2><pre style={{whiteSpace:"pre-wrap",fontFamily:"inherit",lineHeight:1.8}}>社員コード：{fullTimeDetail.employeeCode}{"\n"}在籍状態：{isActiveFullTimeMaster(fullTimeDetail)?"在籍":"退職・無効"}{"\n"}所属店舗：{fullTimeDetail.storeName||"所属なし"}{"\n"}月給：{yen(fullTimeDetail.fixedBaseSalary??0)}{"\n"}交通費：{yen(Number(fullTimeDetail.transportationType==="daily"?fullTimeDetail.dailyTransportation:fullTimeDetail.monthlyTransportation)||0)}{"\n"}住民税：{yen(fullTimeDetail.residentTax??0)}{"\n"}標準報酬月額：{fullTimeDetail.standardMonthlyRemuneration?yen(fullTimeDetail.standardMonthlyRemuneration):"未設定"}{"\n"}扶養人数：{fullTimeDetail.dependentCount??0}人{"\n"}税区分：{fullTimeDetail.taxTableType==="otsu"?"乙欄":"甲欄"}</pre><button type="button" onClick={()=>setFullTimeDetail(null)} style={styles.secondaryButton}>閉じる</button></div></div>}
+        {fullTimeEditor&&<div style={styles.modalOverlay} onClick={()=>{if(!isSubmitting){setFullTimeEditor(null);setFullTimeConfirm(false);}}}><div style={{...styles.modal,maxWidth:800,maxHeight:"90vh",overflowY:"auto"}} onClick={e=>e.stopPropagation()}><h2>{fullTimeEditor.mode==="create"?"正社員を新規登録":"正社員を編集"}</h2>{fullTimeConfirm?<><p>以下の変更を保存します。既存社員の編集では新しいemployeeIdを作成しません。</p><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}><pre style={{whiteSpace:"pre-wrap"}}>変更前{"\n"}{fullTimeEditor.before?JSON.stringify(fullTimeEditor.before,null,2):"新規登録"}</pre><pre style={{whiteSpace:"pre-wrap"}}>変更後{"\n"}{JSON.stringify(fullTimeEditor.value,null,2)}</pre></div></>:<div style={{...styles.grid,marginTop:12}}>{([["name","氏名","text"],["employeeCode","社員コード","text"],["nameKana","ひらがな","text"],["fixedBaseSalary","月給","number"],["transportationAmount","交通費金額","number"],["residentTax","住民税","number"],["dependentCount","扶養人数","number"],["standardMonthlyRemuneration","標準報酬月額","number"],["effectiveMonth","各履歴の適用開始月","month"]] as const).map(([key,label,type])=><label key={key} style={styles.label}>{label}<input type={type} value={String(fullTimeEditor.value[key])} onChange={e=>setFullTimeEditor({...fullTimeEditor,value:{...fullTimeEditor.value,[key]:type==="number"?Number(e.target.value):e.target.value}})} style={styles.input}/></label>)}<label style={styles.label}>所属店舗<select value={fullTimeEditor.value.storeId} onChange={e=>{const store=stores.find(s=>s.id===e.target.value);setFullTimeEditor({...fullTimeEditor,value:{...fullTimeEditor.value,storeId:e.target.value,storeName:store?.storeName??""}})}} style={styles.input}><option value="">所属なし</option>{stores.map(s=><option key={s.id} value={s.id}>{s.storeName}</option>)}</select></label><label style={styles.label}>交通費区分<select value={fullTimeEditor.value.transportationType} onChange={e=>setFullTimeEditor({...fullTimeEditor,value:{...fullTimeEditor.value,transportationType:e.target.value as FullTimeMasterInput["transportationType"]}})} style={styles.input}><option value="none">なし</option><option value="daily">日額</option><option value="monthly">月額</option></select></label><label style={styles.label}>甲欄・乙欄<select value={fullTimeEditor.value.taxTableType} onChange={e=>setFullTimeEditor({...fullTimeEditor,value:{...fullTimeEditor.value,taxTableType:e.target.value as "kou"|"otsu"}})} style={styles.input}><option value="kou">甲欄</option><option value="otsu">乙欄</option></select></label>{([['socialInsuranceEnrolled','社会保険加入'],['careInsuranceApplicable','介護保険対象'],['employmentInsuranceEnrolled','雇用保険加入']] as const).map(([key,label])=><label key={key} style={styles.label}>{label}<select value={fullTimeEditor.value[key]?"yes":"no"} onChange={e=>setFullTimeEditor({...fullTimeEditor,value:{...fullTimeEditor.value,[key]:e.target.value==="yes"}})} style={styles.input}><option value="yes">はい</option><option value="no">いいえ</option></select></label>)}</div>}<div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:16}}>{fullTimeConfirm?<button type="button" disabled={isSubmitting} onClick={saveFullTimeMaster} style={styles.button}>{isSubmitting?"保存中":"保存する"}</button>:<button type="button" onClick={()=>setFullTimeConfirm(true)} style={styles.button}>変更前後を確認</button>}{fullTimeConfirm&&<button type="button" onClick={()=>setFullTimeConfirm(false)} style={styles.secondaryButton}>入力へ戻る</button>}<button type="button" onClick={()=>setFullTimeEditor(null)} style={styles.secondaryButton}>キャンセル</button></div></div></div>}
+
+        {employeeTab === "hourly" && <section style={styles.panel}>
           <h2 style={{ ...styles.title, fontSize: 18, marginBottom: 14 }}>登録済み従業員一覧</h2>
           <div style={styles.tableWrap}>
             <table style={styles.table}>
@@ -535,16 +331,12 @@ export default function HqEmployeesPage() {
                   <th style={styles.th}>ひらがな</th>
                   <th style={styles.th}>所属店舗</th>
                   <th style={styles.th}>雇用区分</th>
-                  <th style={styles.th}>状態</th>{employeeTab === "fixed" && <><th style={styles.th}>月給・交通費・住民税</th><th style={styles.th}>自動控除（現行結果）</th><th style={styles.th}>操作</th></>}
+                  <th style={styles.th}>状態</th>
                 </tr>
               </thead>
               <tbody>
                 {employees
-                  .filter((employee) =>
-                    employeeTab === "fixed"
-                      ? isFullTimeEmployee(employee)
-                      : employee.isDeleted !== true && !isFullTimeEmployee(employee)
-                  )
+                  .filter((employee) => employee.isDeleted !== true && !isFullTimeEmployee(employee))
                   .map((employee) => (
                     <tr key={employee.id}>
                       <td style={styles.td}>{employee.employeeCode}</td>
@@ -553,13 +345,12 @@ export default function HqEmployeesPage() {
                       <td style={styles.td}>{isFullTimeEmployee(employee) ? "所属なし" : employee.storeName}</td>
                       <td style={styles.td}>{employmentTypeLabels[employee.employmentType]}</td>
                       <td style={styles.td}>{statusLabels[employee.status]}</td>
-                      {employeeTab === "fixed" && <><td style={styles.td}>{yen(employee.fixedBaseSalary ?? 0)}／{yen(employee.monthlyTransportation ?? 0)}／{yen(employee.residentTax ?? 0)}</td><td style={styles.td}>社保 {yen((employee.healthInsurance ?? 0)+(employee.childSupportContribution ?? 0)+(employee.careInsurance ?? 0)+(employee.employeePension ?? 0))}<br/>雇用 {yen(employee.employmentInsurance ?? 0)}／所得税 {yen(employee.incomeTax ?? 0)}</td><td style={styles.td}><button type="button" onClick={() => editFullTimePayroll(employee)} style={styles.secondaryButton}>編集</button> <button type="button" onClick={() => setFullTimeActive(employee, employee.isDeleted === true || employee.status === "inactive")} style={employee.isDeleted === true || employee.status === "inactive" ? styles.secondaryButton : styles.dangerButton}>{employee.isDeleted === true || employee.status === "inactive" ? "再有効化" : "退職・無効化"}</button></td></>}
                     </tr>
                   ))}
               </tbody>
             </table>
           </div>
-        </section>
+        </section>}
       </div>
     </main>
   );

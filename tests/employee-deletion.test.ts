@@ -33,5 +33,6 @@ test("admin画面は氏名付き確認後に削除APIを呼び正社員ボタン
   const page = readFileSync(new URL("../app/admin/page.tsx", import.meta.url), "utf8");
   assert.match(page, /window\.confirm\(`\$\{employee\.name\} を削除しますか/);
   assert.match(page, /fetch\(`\/api\/employees\/\$\{employee\.id\}`/);
-  assert.match(page, /\(isAdmin \|\| isManager\) && !isFullTimeEmployee\(employee\)/);
+  assert.match(page, /employees\.filter\(\(employee\)\s*=>\s*!isFullTimeEmployee\(employee\)\)/);
+  assert.match(page, /isAdmin \|\| isManager[\s\S]*無効化・論理削除/);
 });

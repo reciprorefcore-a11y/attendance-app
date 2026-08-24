@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import XLSX from "xlsx";
 import { applyFixedPayrollAdjustment, calculatePayroll, calculatePayrollEmployee, calculateWithholdingTax2026, isPayrollMonthClosed, summarizePayroll, validatePayrollInput, type PayrollAttendanceDay, type PayrollEmployee } from "../lib/payroll.ts";
-import { createPayrollWorkbook, createPayslipPdf, createPayslipZip, createTransferWorkbook, selectFullTimePayslipResults, selectStorePayslipResults } from "../lib/payroll-export.ts";
+import { createPayrollWorkbook, createPayslipPdf, createPayslipZip, createTransferWorkbook, createUnifiedPayrollWorkbook, payrollTransferWarnings, selectFullTimePayslipResults, selectPayrollExportResults, selectStorePayslipResults } from "../lib/payroll-export.ts";
 import { sortPayrollResults, sortPayrollResultsForExcel } from "../lib/payroll-order.ts";
 import { resolveResidentTaxForMonth } from "../lib/payroll-server.ts";
 
@@ -403,6 +403,25 @@ test("給与Excelと振込Excelの人数・合計が一致する", () => {
   assert.equal(payroll.SheetNames[0], "FUBLEVG㈱"); const sheet = transfer.Sheets[transfer.SheetNames[0]], rows = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as unknown[][];
   assert.equal(rows.length, 5); assert.deepEqual(rows[1], ["No.", "社員コード", "氏名", "振込金額"]); assert.deepEqual(rows[2]?.slice(0, 4), [1, "1001", "従業員1001", 1000]); assert.equal(rows.at(-1)?.[0], "振込合計（2名）"); assert.equal(sheet.D5.f, "SUM(D3:D4)");
 });
+
+test("統合給与Excelは横型帳票の9名だけを1ブック5シートへ出力する",()=>{
+  const full = Array.from({length:5},(_,index)=>calculatePayrollEmployee(employee(`full-${index}`,{employeeCode:`000${index+1}`,name:`正社員${index+1}`,employeeType:"fullTime",payrollType:"fixed",fixedBaseSalary:200000+index*1000,paymentMethod:index===0?"cash":"bank"}),[]));
+  const hourly = Array.from({length:4},(_,index)=>calculatePayrollEmployee(employee(`part-${index}`,{employeeCode:`700${index+1}`,name:`アルバイト${index+1}`,employeeType:"partTime",hourlyWage:1300,storeId:"noge",storeName:"野毛店"}),[day(`part-${index}`,"2026-08-01",60+index*10)]));
+  const zero = Array.from({length:31},(_,index)=>calculatePayrollEmployee(employee(`zero-${index}`,{employeeCode:`8${String(index).padStart(3,"0")}`,name:`0円${index+1}`,employeeType:"partTime"}),[]));
+  const results=[...full,...hourly,...zero], included=selectPayrollExportResults(results);
+  assert.equal(included.length,9); assert.equal(included.filter(item=>item.employeeType==="fullTime").length,5); assert.equal(included.filter(item=>item.employeeType==="partTime").length,4);
+  const oldBook=XLSX.read(createPayrollWorkbook(results,"2026-08",true),{cellFormula:true}),book=XLSX.read(createUnifiedPayrollWorkbook(results,"2026-08",true),{cellStyles:true,cellFormula:true});
+  assert.deepEqual(book.SheetNames,["給与一覧","正社員","アルバイト","店舗別集計","振込データ"]); assert.equal(book.SheetNames.filter(name=>/1\/2|2\/2/.test(name)).length,0);
+  const payroll=book.Sheets["給与一覧"]; assert.equal(payroll.AN4.v,"9人"); assert.match(String(payroll.A1.v),/^【試算】FUBLEV Group㈱/);
+  const fixedRows=XLSX.utils.sheet_to_json(book.Sheets["正社員"],{header:1}) as unknown[][],hourlyRows=XLSX.utils.sheet_to_json(book.Sheets["アルバイト"],{header:1}) as unknown[][],transfer=XLSX.utils.sheet_to_json(book.Sheets["振込データ"],{header:1}) as unknown[][];
+  assert.equal(fixedRows.slice(2).length,5); assert.equal(hourlyRows.slice(2).length,4); assert.equal(new Set(transfer.slice(2,-1).map(row=>row[4])).size,8); assert.equal(transfer.at(-1)?.[3],included.reduce((sum,item)=>sum+item.bankTransfer,0));
+  assert.equal(transfer.slice(2,-1).some(row=>row[4]==="full-0"),false,"現金支給者は振込データから除外");
+  const stores=XLSX.utils.sheet_to_json(book.Sheets["店舗別集計"],{header:1}) as unknown[][]; assert.equal(stores.slice(1).reduce((sum,row)=>sum+Number(row[5]),0),included.reduce((sum,item)=>sum+item.netPay,0));
+  const oldValues=new Map<string,number[]>(); for(const sheetName of oldBook.SheetNames){const sheet=oldBook.Sheets[sheetName];for(const column of [2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,28,29,30,31,33,34,35,36,37]){const code=String(sheet[XLSX.utils.encode_cell({r:2,c:column})]?.v??"");if(code)oldValues.set(code,[17,18,19,20,21,22,25,26,29,32,33,34].map(row=>Number(sheet[XLSX.utils.encode_cell({r:row,c:column})]?.v??0)));}}
+  for(const column of [2,3,4,5,6,7,8,9,10]){const code=String(payroll[XLSX.utils.encode_cell({r:2,c:column})]?.v??"");assert.deepEqual([17,18,19,20,21,22,25,26,29,32,33,34].map(row=>Number(payroll[XLSX.utils.encode_cell({r:row,c:column})]?.v??0)),oldValues.get(code),`${code}の金額一致`);}
+});
+
+test("振込対象の口座未登録・未確認を警告する",()=>{const missing=calculatePayrollEmployee(employee("missing",{bankAccountRegistered:false}),[day("missing","2026-08-01",60)]),unknown={...calculatePayrollEmployee(employee("unknown"),[day("unknown","2026-08-01",60)]),bankAccountRegisteredSnapshot:null};assert.equal(payrollTransferWarnings([missing,unknown]).length,2);});
 
 test("小林彗太へその他臨時支給800,000円を設定すると所得税が再計算され差引支給額が単純に800,000円増にならない", async () => {
   // 2026-08 ドラフト想定。健康保険・厚生年金・雇用保険・住民税を含む実態に近いマスターデータを使う。

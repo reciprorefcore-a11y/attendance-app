@@ -63,11 +63,11 @@ test("payrollEnabled is saved to employees collection, not payrollSettings", () 
   assert.doesNotMatch(adminPage, /setDoc\(doc\(db, "payrollSettings"/);
 });
 
-test("payroll page keeps exports separate and provides one-person fixed-employee settings", () => {
+test("payroll page provides one unified workbook and fixed-employee settings", () => {
   // Must have the 3 core actions
   assert.match(payrollPage, /給与を試算/);
-  assert.match(payrollPage, /給与Excelを生成/);
-  assert.match(payrollPage, /振込一覧Excelを生成/);
+  assert.match(payrollPage, /統合Excelを1ファイル生成/);
+  assert.doesNotMatch(payrollPage, /export\/transfer/);
   assert.match(payrollPage, /この店舗の給与明細を一括ダウンロード/);
   assert.match(payrollPage, /正社員給与明細を一括ダウンロード/);
   assert.match(payrollPage, /給与を確定/);
@@ -89,8 +89,7 @@ test("payroll screen separates trial, generation, download, and confirmation sta
   assert.match(payrollPage, /控除合計/);
   assert.match(payrollPage, /差引支給額/);
   assert.match(payrollPage, /ファイル名：\{payrollFile\.name\}/);
-  assert.match(payrollPage, /給与Excelをダウンロード/);
-  assert.match(payrollPage, /振込一覧Excelをダウンロード/);
+  assert.match(payrollPage, /統合Excelをダウンロード/);
   assert.doesNotMatch(payrollPage, /給与Excelを再作成|今月の給与Excelを作成/);
 });
 
@@ -122,11 +121,9 @@ test("Excel section is visible for both draft and confirmed runs", () => {
   assert.match(payrollPage, /const canShowExcel/);
   assert.match(payrollPage, /isConfirmed[\s\S]*\|\|[\s\S]*isDraft[\s\S]*adjustDecision/);
   // Draft path has generate buttons
-  assert.match(payrollPage, /給与Excelを生成/);
-  assert.match(payrollPage, /振込一覧Excelを生成/);
+  assert.match(payrollPage, /統合Excelを1ファイル生成/);
   // Confirmed path has download buttons
-  assert.match(payrollPage, /確定済み給与Excelをダウンロード/);
-  assert.match(payrollPage, /確定済み振込一覧Excelをダウンロード/);
+  assert.match(payrollPage, /確定済み統合Excelをダウンロード/);
   // Confirmed path has 確定取消 with required reason
   assert.match(payrollPage, /確定取消の理由/);
   assert.match(payrollPage, /unconfirmReason\.trim\(\)/);
@@ -134,8 +131,7 @@ test("Excel section is visible for both draft and confirmed runs", () => {
 
 test("confirmed Excel downloads use the stored run snapshot without recalculation", () => {
   // Both draft and confirmed call generateFile with the current run body (no new calculate POST)
-  assert.match(payrollPage, /generateFile\("\/api\/payroll\/export\/payroll", token/);
-  assert.match(payrollPage, /generateFile\("\/api\/payroll\/export\/transfer", token/);
+  assert.match(payrollPage, /generateFile\("\/api\/payroll\/export\/unified", token/);
   // 給与を試算 button is hidden for confirmed runs
   assert.match(payrollPage, /!isConfirmed[\s\S]+?給与を試算/);
   // Export routes do not write to Firestore (no batch/set/update in export handler)
@@ -203,8 +199,7 @@ test("payroll previews stay in memory and only confirmation persists them", () =
   assert.match(confirm, /batch\.set\(ref, run\)/);
   assert.match(confirm, /await batch\.commit\(\)/);
   assert.match(payrollConfirmRoute, /confirmPayrollRun/);
-  assert.match(payrollPage, /export\/payroll["], token, \{ method: "POST"/);
-  assert.match(payrollPage, /export\/transfer["], token, \{ method: "POST"/);
+  assert.match(payrollPage, /export\/unified["], token, \{ method: "POST"/);
 });
 
 test("Firestore writes use resource names and atomic commit", () => {
@@ -232,12 +227,10 @@ test("payslip is drawn from an empty A4 landscape page without masking a filled 
   assert.doesNotMatch(payrollExport, /PDFDocument\.load|payslip-reference\.pdf/);
 });
 
-test("admin employee screen has hourly and admin-only fixed tabs", () => {
-  assert.match(adminPage, /① アルバイト/);
-  assert.match(adminPage, /\{isAdmin && <button[\s\S]+?② 正社員<\/button>\}/);
-  assert.match(adminPage, /雇用区分/);
-  assert.match(adminPage, /正社員の新規登録・固定給与マスター/);
-  assert.match(adminPage, /健康保険|所得税/);
+test("admin employee screen is part-time only and full-time master is in HQ", () => {
+  assert.match(adminPage, /アルバイト管理/);
+  assert.doesNotMatch(adminPage, /正社員の新規登録・固定給与マスター/);
+  assert.match(hqEmployeesPage, /正社員マスター/);
   assert.doesNotMatch(adminPage, /当月調整入力|月次調整を反映|臨時出勤回数/);
   // 給与業務フロー順の5セクション（Section②に当月調整、固定マスターはモーダル）
   assert.match(payrollPage, /当月調整を反映して再試算/);
@@ -309,16 +302,13 @@ test("store-payslipsはpartTimeのみ・fulltime-payslipsはfullTimeのみを対
   assert.doesNotMatch(ftBlock, /partTime/, "fulltime ZIP に partTime フィルターは入らない");
 });
 
-test("HQ従業員ページは社員コードの重複登録を防止し、正社員クイック登録ボタンがある", () => {
+test("HQ従業員ページは正社員の新規と編集・状態変更を分離する", () => {
   // 社員コード重複チェック
   assert.match(hqEmployeesPage, /where\("employeeCode", "==", employeeCode\)/);
   assert.match(hqEmployeesPage, /同じ社員コードの従業員が既に登録されています/);
-  // 0002/0017 クイック登録ボタン（未登録時のみ表示）
-  assert.match(hqEmployeesPage, /0002[\s\S]{0,50}青山佳史/);
-  assert.match(hqEmployeesPage, /0017[\s\S]{0,50}木月徳子/);
-  // 重複確認済みの候補がすでに登録されている場合はボタンを非表示
-  assert.match(hqEmployeesPage, /employees\.some[\s\S]+?employeeCode[\s\S]+?candidate\.employeeCode/);
-  // 登録フォームは employeeType "fullTime" / payrollType "fixed" を設定する
-  assert.match(hqEmployeesPage, /employeeType.*fullTime/);
-  assert.match(hqEmployeesPage, /payrollType.*fixed|fixed.*payrollType/);
+  assert.match(hqEmployeesPage, /mode:"create"[\s\S]*\/api\/fulltime-employees/);
+  assert.match(hqEmployeesPage, /mode:"edit"[\s\S]*employeeId/);
+  assert.match(hqEmployeesPage, /詳細/);
+  assert.match(hqEmployeesPage, /退職・無効化/);
+  assert.match(hqEmployeesPage, /再有効化/);
 });
