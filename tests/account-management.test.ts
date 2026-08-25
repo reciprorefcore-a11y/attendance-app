@@ -22,7 +22,7 @@ test("従業員管理から旧アカウント一覧・作成フォーム・権�
 
 test("独立画面は一覧・新規・編集・履歴・状態操作をモーダルで提供する",()=>{
   const page=read("../app/hq/accounts/page.tsx");
-  for(const text of ["アカウント管理","＋ アカウントを追加","基本情報","変更履歴","パスワード再設定","無効化","再有効化","メールアドレス変更は本部管理者による別操作"])assert.match(page,new RegExp(text));
+  for(const text of ["アカウント管理","＋ アカウントを追加","基本情報","変更履歴","パスワード再設定","無効化","再有効化"])assert.match(page,new RegExp(text));
   assert.doesNotMatch(page,/usersコレクション|users コレクション/);
 });
 
@@ -32,7 +32,7 @@ test("パスワードはレスポンス・変更履歴・通常編集へ含め�
   const changes=accountChanges({}, {name:"管理者",password:"secret",initialPassword:"secret"});
   assert.deepEqual(changes,[{field:"name",before:null,after:"管理者"}]);
   const page=read("../app/hq/accounts/page.tsx");
-  assert.match(page,/editor\.mode==="create"&&<label[^>]*>初期パスワード/);
+  assert.match(page,/editor\.mode==="create"&&<Field label="初期パスワード"/);
 });
 
 test("アカウントAPIはemployeesを変更せず、完全削除は監査ログを保持する",()=>{
@@ -54,9 +54,10 @@ test("編集時のパスワード上書きはAdmin SDKだけを使い秘密値�
   assert.match(page,/現在のパスワードは安全上表示できません/);
   assert.match(page,/passwordConfirmation/);
   assert.match(page,/showPassword/);
-  assert.match(page,/パスワード.*変更あり/);
+  assert.match(page,/editor\.form\.newPassword\?"変更あり":"変更なし"/);
   assert.match(page,/削除対象のメールアドレス/);
-  assert.match(page,/変更前後/);
+  assert.match(page,/変更前権限/);
+  assert.match(page,/変更後担当店舗/);
   assert.match(route,/adminAuth!\.updateUser\(uid,\{password:newPassword\}\)/);
   const updateLiteral=route.match(/update = \{ name:[^;]+/)?.[0]??"";
   assert.doesNotMatch(updateLiteral,/password/i);
@@ -68,7 +69,7 @@ test("権限説明と店舗選択数を明示しmanager系からExcelを隠す",
   assert.match(page,/担当する1店舗の日常管理/);
   assert.match(page,/担当する複数店舗の日常管理/);
   assert.match(page,/指定されたFC店舗を管理/);
-  assert.match(page,/form\.role==="manager"\?"radio":"checkbox"/);
+  assert.match(page,/editor\.form\.role==="manager"\?"radio":"checkbox"/);
   assert.match(page,/店舗マネージャーは1店舗だけ選択できます/);
   assert.match(admin,/const areaManagerAllowedTabs: TabId\[\] = \["attendance", "employees", "edits"\]/);
   assert.match(admin,/const visibleTabs = isAdmin\s*\? tabs/);
@@ -81,5 +82,35 @@ test("確認ボタンは無効化せずクリック時に項目別エラーを�
   assert.match(page,/onClick=\{openConfirmation\}/);
   assert.match(page,/disabled=\{working\}/);
   for(const message of ["修正理由を入力してください","担当店舗を選択してください","店舗マネージャーは1店舗だけ選択できます"])assert.match(page,new RegExp(message));
-  assert.match(page,/editorErrors\.map/);
+  assert.match(page,/errors\.stores&&/);
+  assert.match(page,/label="登録・修正理由" error=\{errors\.reason\}/);
+});
+
+test("編集・削除モーダルは本文だけスクロールし固定フッターから操作する",()=>{
+  const page=read("../app/hq/accounts/page.tsx");
+  assert.match(page,/maxHeight:"90vh"/);
+  assert.match(page,/overflowY:"auto"/);
+  assert.match(page,/position:"sticky"[\s\S]*bottom:0[\s\S]*borderTop/);
+  assert.match(page,/data-testid="account-modal-footer"/);
+  assert.match(page,/入力内容を破棄しますか？/);
+  assert.match(page,/event\.key!=="Escape"/);
+});
+
+test("店舗・理由は同じcontrolled stateを使い入力時に項目別エラーを消す",()=>{
+  const page=read("../app/hq/accounts/page.tsx");
+  assert.match(page,/const selectStore[\s\S]*updateForm\(\{storeIds\},\["stores"\]\)/);
+  assert.match(page,/role:e\.target\.value as AccountRole,storeIds:\[\]/);
+  assert.match(page,/value=\{editor\.form\.reason\}[\s\S]*updateForm\(\{reason:e\.target\.value\},\["reason"\]\)/);
+  assert.doesNotMatch(page,/errors\.map/);
+});
+
+test("確認後だけ保存APIを呼び削除はメール一致とuid付きDELETEを要求する",()=>{
+  const page=read("../app/hq/accounts/page.tsx");
+  assert.match(page,/onClick=\{openConfirmation\}/);
+  assert.match(page,/onClick=\{save\}/);
+  assert.match(page,/url=reset\?`\/api\/accounts\/\$\{action\.account\.uid\}\/password-reset`:`\/api\/accounts\/\$\{action\.account\.uid\}`/);
+  assert.match(page,/method:deleting\?"DELETE"/);
+  assert.match(page,/emailConfirmation!==action\.account\.email/);
+  assert.match(page,/確認のためメールアドレスを入力してください/);
+  assert.match(page,/working\?"処理中\.\.\."/);
 });
