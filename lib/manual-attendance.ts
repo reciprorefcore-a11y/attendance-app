@@ -13,7 +13,7 @@ export type ManualAttendancePreview = {
   breakMinutes: number; workMinutes: number; nightMinutes: number;
 };
 
-const REASONS = new Set(["端末不具合", "PINエラー", "打刻忘れ", "通信障害", "管理者確認済み", "その他"]);
+const REASONS = new Set(["端末不具合", "社員コードエラー", "打刻忘れ", "通信障害", "管理者確認済み", "その他"]);
 const JST_OFFSET = 9 * 60 * 60 * 1000;
 
 export function fromJstLocal(value: string): Date | null {

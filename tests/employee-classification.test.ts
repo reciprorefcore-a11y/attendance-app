@@ -42,16 +42,15 @@ test("論理削除解除後の正社員5名はhq対象となり店舗側から�
 
 test("admin削除処理はサーバーAPIを使用して正社員を拒否する", () => {
   const source = readFileSync(new URL("../app/admin/page.tsx", import.meta.url), "utf8");
-  const deleteBlock = source.slice(source.indexOf("const deleteEmployee"), source.indexOf("const saveStore"));
-  assert.match(deleteBlock, /isFullTimeEmployee\(employee\)/);
-  assert.match(deleteBlock, /\/api\/employees\/\$\{employee\.id\}/);
-  assert.doesNotMatch(deleteBlock, /updateDoc|deleteDoc/);
-  assert.match(source, /employees\.filter\(\(employee\)\s*=>\s*!isFullTimeEmployee\(employee\)\)/);
-  assert.match(source, /employee\.isDeleted===true\|\|employee\.status==="inactive"[\s\S]*再有効化/);
+  const operationBlock = source.slice(source.indexOf("const submitEmployeeOperation"), source.indexOf("const saveStore"));
+  assert.match(operationBlock, /\/api\/employees\/\$\{employee\.id\}/);
+  assert.doesNotMatch(operationBlock, /updateDoc|deleteDoc/);
+  assert.match(source, /!isFullTimeEmployee\(employee\)/);
+  assert.match(source, /state==="deleted"[\s\S]*復元/);
 });
 
 test("旧形式のアルバイトを編集・再有効化すると雇用区分を補完する", () => {
   const route = readFileSync(new URL("../app/api/employees/[employeeId]/route.ts", import.meta.url), "utf8");
-  assert.match(route, /employeeType: "partTime", employmentType: "part_time", payrollType: "hourly"/);
+  assert.match(route, /employeeType:"partTime",employmentType:"part_time",payrollType:"hourly"/);
   assert.equal(isAdminPartTimeEmployee({}), true, "未設定旧データも互換判定で一覧から消えない");
 });

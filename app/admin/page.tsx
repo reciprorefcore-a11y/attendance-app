@@ -4,14 +4,12 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { signOut, getAuth, createUserWithEmailAndPassword } from "firebase/auth";
-import { initializeApp, deleteApp } from "firebase/app";
-import { auth, db, firebaseConfig } from "@/lib/firebase";
+import { signOut } from "firebase/auth";
+import { auth, db } from "@/lib/firebase";
 import { useAuthProfile } from "@/lib/auth";
 import { BreakEditorSection } from "@/components/BreakEditorSection";
 import {
   Timestamp,
-  addDoc,
   collection,
   doc,
   deleteDoc,
@@ -48,6 +46,7 @@ import {
   type CorrectionWorkSet,
 } from "@/lib/attendance-correction";
 import { validateManualAttendance, type ManualAttendanceInput } from "@/lib/manual-attendance";
+import { classifyPartTimeEmployee, EMPLOYEE_REASON_OPTIONS, validateEmployeeReason, type EmployeeAction } from "@/lib/employee-management";
 
 type TabId =
   | "attendance"
@@ -93,16 +92,18 @@ type TimecardRow = {
   correctionReason?: string | null;
 };
 
-type EmployeeRow = Employee & { id: string; hourlyWage?: number | null; hasManagerAccount?: boolean; managerUid?: string | null; accountRole?: "manager" | "area_manager" | "fc_manager" | null; accountStoreIds?: string[] };
+type EmployeeRow = Employee & { id: string; hourlyWage?: number | null; lateNightHourlyWage?:number|null; hasManagerAccount?: boolean; managerUid?: string | null; accountRole?: "manager" | "area_manager" | "fc_manager" | null; accountStoreIds?: string[] };
+type EmployeeEditValue = ReturnType<typeof emptyEmployeeForm> & {lateNightHourlyWage:string;effectiveFrom:string;reasonType:string;reasonDetail:string};
+type EmployeeHistoryRow={id:string;action:string;changes:Array<{field:string;label:string;before:unknown;after:unknown}>;effectiveFrom:string;reason:string;performedBy:string;performedByName:string;performedByRole:string;performedAt:string|Date};
 type StoreRow = Store & { id: string };
 
 const emptyEmployeeForm = () => ({
-  name: "", nameKana: "", employeeCode: "", pin: "", storeId: "", baseWage: "", status: "active",
+  name: "", nameKana: "", employeeCode: "", storeId: "", baseWage: "", status: "active",
   transportationCost: "", transportationType: "daily" as "daily" | "monthly" | "none",
   payrollEnabled: true,
   clockEnabled: true,
 });
-type AccountManagerRow = { uid: string; name?: string; email?: string; role: "area_manager" | "fc_manager"; storeId?: string; storeIds?: string[] };
+const localDate=()=>new Date(Date.now()+9*3600000).toISOString().slice(0,10);
 
 type AttendanceRow = CalculatedAttendanceRow;
 
@@ -123,7 +124,7 @@ const correctionStatusLabels: Record<CorrectionStatus, string> = {
   needs_review: "要確認",
 };
 const emptyManualForm = (): ManualAttendanceInput => ({ requestId: "", employeeId: "", storeId: "", workDate: "", clockIn: "", clockOut: "", breaks: [], creationReason: "", reasonDetail: "", note: "", allowSeparateShift: false });
-const csvEmployeeFields = ["name", "nameKana", "employeeCode", "storeId", "baseHourlyWage", "pin", "status"] as const;
+const csvEmployeeFields = ["name", "nameKana", "employeeCode", "storeId", "baseHourlyWage", "status"] as const;
 
 type CsvEmployeeRow = Record<(typeof csvEmployeeFields)[number], string>;
 type CsvEmployeeError = { rowNumber: number; message: string; values: CsvEmployeeRow | null };
@@ -165,7 +166,6 @@ function toCsvEmployeeRow(headers: string[], values: string[]): CsvEmployeeRow {
     employeeCode: row.employeeCode ?? "",
     storeId: row.storeId ?? "",
     baseHourlyWage: row.baseHourlyWage ?? "",
-    pin: row.pin ?? "",
     status: row.status ?? "",
   };
 }
@@ -426,7 +426,14 @@ export default function AdminPage() {
   );
   const manualValidation = useMemo(() => manualForm ? validateManualAttendance(manualForm) : null, [manualForm]);
   const [message, setMessage] = useState("");
-  const [employeeEditingId, setEmployeeEditingId] = useState("");
+  const [employeeFilter,setEmployeeFilter]=useState<"active"|"inactive"|"deleted"|"all">("active");
+  const [employeeEditor,setEmployeeEditor]=useState<{employee:EmployeeRow;value:EmployeeEditValue;confirming:boolean}|null>(null);
+  const [employeeActionDialog,setEmployeeActionDialog]=useState<{employee:EmployeeRow;action:Exclude<EmployeeAction,"edit">;reasonType:string;reasonDetail:string;effectiveFrom:string}|null>(null);
+  const [employeeDetail,setEmployeeDetail]=useState<{employee:EmployeeRow;tab:"basic"|"history";history:EmployeeHistoryRow[];loading:boolean}|null>(null);
+  const [employeeOperationError,setEmployeeOperationError]=useState("");
+  const [employeeMenuId,setEmployeeMenuId]=useState<string|null>(null);
+  const [employeeTopMenuOpen,setEmployeeTopMenuOpen]=useState(false);
+  const [showEmployeeCreate,setShowEmployeeCreate]=useState(false);
   useEffect(() => {
     const timer = window.setTimeout(() => {
       const params = new URLSearchParams(window.location.search);
@@ -448,18 +455,6 @@ export default function AdminPage() {
     gpsEnabled: true,
     isFc: false,
   });
-  const [accountManagers, setAccountManagers] = useState<AccountManagerRow[]>([]);
-  const [accountMgrForm, setAccountMgrForm] = useState({
-    name: "",
-    email: "",
-    password: "",
-    role: "area_manager" as "area_manager" | "fc_manager",
-    storeIds: [] as string[],
-  });
-  const [accountMgrMsg, setAccountMgrMsg] = useState("");
-  const [accountMgrWorking, setAccountMgrWorking] = useState(false);
-  const [accountMgrEditUid, setAccountMgrEditUid] = useState<string | null>(null);
-  const [accountMgrEditStoreIds, setAccountMgrEditStoreIds] = useState<string[]>([]);
   const [employeeFormError, setEmployeeFormError] = useState("");
   const [csvImportErrors, setCsvImportErrors] = useState<CsvEmployeeError[]>([]);
   const [csvImportSummary, setCsvImportSummary] = useState("");
@@ -468,16 +463,6 @@ export default function AdminPage() {
   const [wageEmpInput, setWageEmpInput] = useState("");
   const [wageStoreEditId, setWageStoreEditId] = useState("");
   const [wageStoreInput, setWageStoreInput] = useState("");
-  const [permissionModal, setPermissionModal] = useState<{
-    empId: string;
-    role: "manager" | "area_manager" | "fc_manager" | "";
-    storeId: string;
-    storeIds: string[];
-    email: string;
-    password: string;
-  } | null>(null);
-  const [permissionMsg, setPermissionMsg] = useState("");
-  const [permissionWorking, setPermissionWorking] = useState(false);
   const [selectedExportStoreIds, setSelectedExportStoreIds] = useState<string[]>([]);
 
   const isAdmin = !isAuthLoading && profile?.role === "admin";
@@ -602,20 +587,6 @@ export default function AdminPage() {
       console.error("clockLogs fetch failed", error);
       const detail = error instanceof Error ? error.message : String(error);
       setErrorMessage(`打刻データ取得に失敗しました（Firestoreルールを確認してください）: ${detail}`);
-    }
-
-    // ── Phase 3: account managers（admin のみ）───────────────────────────────
-    if (isAdmin) {
-      try {
-        const acctSnap = await getDocs(
-          query(collection(db, "users"), where("role", "in", ["area_manager", "fc_manager"])),
-        );
-        setAccountManagers(
-          acctSnap.docs.map((d) => ({ uid: d.id, ...(d.data() as Omit<AccountManagerRow, "uid">) })),
-        );
-      } catch (error) {
-        console.error("account managers fetch failed", error);
-      }
     }
 
     setIsLoading(false);
@@ -1018,25 +989,15 @@ export default function AdminPage() {
     if (!employeeForm.name.trim()) missing.push("氏名");
     if (!employeeForm.employeeCode.trim()) missing.push("社員コード");
     if (!nextStoreId) missing.push("所属店舗");
-    if (!employeeForm.pin.trim()) missing.push("PIN");
-    else if (!/^\d{4}$/.test(employeeForm.pin.trim())) missing.push("PIN（4桁の数字）");
     if (missing.length > 0) {
       setEmployeeFormError(`未入力または不正なフィールド：${missing.join("、")}`);
       return;
-    }
-    if (managerStoreId && employeeEditingId) {
-      const target = employees.find((employee) => employee.id === employeeEditingId);
-      if (!target || target.storeId !== managerStoreId) {
-        setEmployeeFormError("自店舗以外の従業員は編集できません。");
-        return;
-      }
     }
     setEmployeeFormError("");
     const payload = {
       name: employeeForm.name.trim(),
       nameKana: employeeForm.nameKana.trim(),
       employeeCode: employeeForm.employeeCode.trim(),
-      pin: employeeForm.pin.trim(),
       storeId: nextStoreId,
       baseWage: Number(employeeForm.baseWage) || 0,
       status: employeeForm.status as "active" | "inactive",
@@ -1049,15 +1010,13 @@ export default function AdminPage() {
       clockEnabled: employeeForm.clockEnabled,
     };
     try {
-      if (employeeEditingId) {
-        if (!user) throw new Error("ログインが必要です。");
-        const token=await user.getIdToken(true),response=await fetch(`/api/employees/${employeeEditingId}`,{method:"PATCH",headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},body:JSON.stringify(payload)}),body=await response.json() as {error?:string};
-        if(!response.ok)throw new Error(body.error??"従業員の更新に失敗しました。");
-      } else {
-        await addDoc(collection(db, "employees"), payload);
-      }
-      setEmployeeEditingId("");
+      if (!user) throw new Error("認証情報を取得できません。");
+      const token = await user.getIdToken(true);
+      const response = await fetch("/api/employees", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify(payload) });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "従業員の保存に失敗しました。");
       setEmployeeForm(emptyEmployeeForm());
+      setShowEmployeeCreate(false);
       setEmployeeFormError("");
       setMessage("従業員を保存しました。");
       await load();
@@ -1068,16 +1027,11 @@ export default function AdminPage() {
   };
 
   const editEmployee = (employee: EmployeeRow) => {
-    if (isFullTimeEmployee(employee)) {
-      setEmployeeFormError("正社員はアルバイト画面から編集できません。");
-      return;
-    }
-    setEmployeeEditingId(employee.id);
-    setEmployeeForm({
+    if (isFullTimeEmployee(employee)||employee.isDeleted===true) return;
+    setEmployeeOperationError("");setEmployeeEditor({employee,confirming:false,value:{
       name: employee.name,
       nameKana: employee.nameKana,
       employeeCode: employee.employeeCode,
-      pin: employee.pin ?? "",
       storeId: employee.storeId,
       baseWage: String(getEmployeeBaseWage(employee) || ""),
       status: employee.status === "inactive" ? "inactive" : "active",
@@ -1085,31 +1039,12 @@ export default function AdminPage() {
       transportationType: employee.transportationType ?? "daily",
       payrollEnabled: employee.payrollEnabled !== false,
       clockEnabled: employee.clockEnabled !== false,
-    });
-    setActiveTab("employees");
+      lateNightHourlyWage:String(employee.lateNightHourlyWage??""),effectiveFrom:localDate(),reasonType:"",reasonDetail:"",
+    }});
   };
-
-  const deleteEmployee = async (employee: EmployeeRow) => {
-    if (isFullTimeEmployee(employee)) {
-      setMessage("正社員はアルバイト画面から削除できません。");
-      return;
-    }
-    const confirmed = window.confirm(`${employee.name} を削除しますか？この操作は取り消せません。`);
-    if (!confirmed) return;
-    try {
-      if (!user) throw new Error("ログインが必要です。");
-      const token = await user.getIdToken(true);
-      const response = await fetch(`/api/employees/${employee.id}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
-      const body = await response.json() as { error?: string };
-      if (!response.ok) throw new Error(body.error ?? "従業員の削除に失敗しました。");
-      setMessage("従業員を削除しました。");
-      await load();
-    } catch (error) {
-      console.error("employee delete failed", error);
-      setMessage(error instanceof Error ? error.message : "従業員の削除に失敗しました。");
-    }
-  };
-  const reactivateEmployee=async(employee:EmployeeRow)=>{if(!user)return;const token=await user.getIdToken(true),response=await fetch(`/api/employees/${employee.id}`,{method:"PATCH",headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},body:JSON.stringify({action:"reactivate"})}),body=await response.json() as {error?:string};if(!response.ok){setMessage(body.error??"再有効化に失敗しました。");return;}setMessage(`${employee.name}さんを再有効化しました。`);await load();};
+  const openEmployeeAction=(employee:EmployeeRow,action:Exclude<EmployeeAction,"edit">)=>{setEmployeeOperationError("");setEmployeeActionDialog({employee,action,reasonType:"",reasonDetail:"",effectiveFrom:localDate()});};
+  const submitEmployeeOperation=async(employee:EmployeeRow,payload:Record<string,unknown>)=>{if(!user)return;setEmployeeOperationError("");const token=await user.getIdToken(true),response=await fetch(`/api/employees/${employee.id}`,{method:"PATCH",headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},body:JSON.stringify(payload)}),body=await response.json() as {error?:string};if(!response.ok){setEmployeeOperationError(body.error??"操作に失敗しました。");return;}setEmployeeEditor(null);setEmployeeActionDialog(null);setMessage(`${employee.name}さんの情報を更新しました。`);await load();};
+  const openEmployeeDetail=async(employee:EmployeeRow)=>{setEmployeeDetail({employee,tab:"basic",history:[],loading:true});if(!user)return;const token=await user.getIdToken(true),response=await fetch(`/api/employees/${employee.id}`,{headers:{Authorization:`Bearer ${token}`}}),body=await response.json() as {history?:EmployeeHistoryRow[]};setEmployeeDetail(current=>current&&current.employee.id===employee.id?{...current,history:response.ok?(body.history??[]):[],loading:false}:current);};
 
   const saveStore = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -1200,177 +1135,6 @@ export default function AdminPage() {
     }
   };
 
-  const openPermissionModal = (employee: EmployeeRow) => {
-    setPermissionMsg("");
-    setPermissionModal({
-      empId: employee.id,
-      role: employee.accountRole ?? "",
-      storeId: employee.accountRole === "manager" ? (employee.accountStoreIds?.[0] ?? employee.storeId) : employee.storeId,
-      storeIds: employee.accountStoreIds ?? [],
-      email: "",
-      password: "",
-    });
-  };
-
-  const savePermission = async (employee: EmployeeRow) => {
-    if (!permissionModal) return;
-    const { role, storeId, storeIds, email, password } = permissionModal;
-    if (!role) { setPermissionMsg("権限を選択してください。"); return; }
-    if (!email.trim() || !password.trim()) { setPermissionMsg("メールアドレスとパスワードを入力してください。"); return; }
-    if (role === "manager" && !storeId) { setPermissionMsg("担当店舗を選択してください。"); return; }
-    if ((role === "area_manager" || role === "fc_manager") && storeIds.length === 0) { setPermissionMsg("担当店舗を選択してください。"); return; }
-
-    setPermissionWorking(true);
-    setPermissionMsg("");
-    const secondaryApp = initializeApp(firebaseConfig, `perm-setup-${Date.now()}`);
-    const secondaryAuth = getAuth(secondaryApp);
-    try {
-      const credential = await createUserWithEmailAndPassword(secondaryAuth, email.trim(), password);
-      const uid = credential.user.uid;
-      await setDoc(doc(db, "users", uid), {
-        name: employee.name,
-        email: email.trim(),
-        role,
-        storeId: role === "manager" ? storeId : (storeIds[0] ?? ""),
-        ...(role !== "manager" ? { storeIds } : {}),
-        createdAt: serverTimestamp(),
-      });
-      await updateDoc(doc(db, "employees", employee.id), {
-        hasManagerAccount: true,
-        managerUid: uid,
-        accountRole: role,
-        accountStoreIds: role === "manager" ? [storeId] : storeIds,
-      });
-      setPermissionMsg("アカウントを作成しました。IDとパスワードを本人に渡してください。");
-      await load();
-    } catch (err) {
-      console.error("permission account creation failed", err);
-      const code = (err as { code?: string }).code;
-      setPermissionMsg(
-        code === "auth/email-already-in-use" ? "このメールアドレスはすでに使用されています"
-        : code === "auth/weak-password" ? "パスワードは6文字以上で入力してください"
-        : "アカウント作成に失敗しました",
-      );
-    } finally {
-      await deleteApp(secondaryApp);
-      setPermissionWorking(false);
-    }
-  };
-
-  const createAccountManager = async () => {
-    const { name, email, password, role, storeIds } = accountMgrForm;
-    if (!name.trim() || !email.trim() || !password.trim() || storeIds.length === 0) {
-      setAccountMgrMsg("氏名・メール・パスワード・担当店舗をすべて入力してください。");
-      return;
-    }
-    setAccountMgrWorking(true);
-    setAccountMgrMsg("");
-    const secondaryApp = initializeApp(firebaseConfig, `acct-mgr-${Date.now()}`);
-    const secondaryAuth = getAuth(secondaryApp);
-    try {
-      const credential = await createUserWithEmailAndPassword(secondaryAuth, email.trim(), password);
-      const uid = credential.user.uid;
-      await setDoc(doc(db, "users", uid), {
-        name: name.trim(),
-        email: email.trim(),
-        role,
-        storeId: storeIds[0] ?? "",
-        storeIds,
-        createdAt: serverTimestamp(),
-      });
-      setAccountMgrMsg("アカウントを作成しました。IDとパスワードを本人に渡してください。");
-      setAccountMgrForm({ name: "", email: "", password: "", role: "area_manager", storeIds: [] });
-      await load();
-    } catch (err) {
-      const code = (err as { code?: string }).code;
-      setAccountMgrMsg(
-        code === "auth/email-already-in-use" ? "このメールアドレスはすでに使用されています"
-        : code === "auth/weak-password" ? "パスワードは6文字以上で入力してください"
-        : "アカウント作成に失敗しました",
-      );
-    } finally {
-      await deleteApp(secondaryApp);
-      setAccountMgrWorking(false);
-    }
-  };
-
-  const deleteAccountManager = async (acct: AccountManagerRow) => {
-    if (!window.confirm(`${acct.name ?? acct.email} のアカウントを削除しますか？`)) return;
-    setAccountMgrWorking(true);
-    try {
-      await deleteDoc(doc(db, "users", acct.uid));
-      try {
-        const idToken = await auth.currentUser?.getIdToken();
-        if (idToken) {
-          await fetch("/api/delete-manager", {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
-            body: JSON.stringify({ uid: acct.uid }),
-          });
-        }
-      } catch (err) {
-        console.error("auth delete api call failed", err);
-      }
-      await load();
-    } catch (err) {
-      console.error("account manager deletion failed", err);
-      setAccountMgrMsg("削除に失敗しました。");
-    } finally {
-      setAccountMgrWorking(false);
-    }
-  };
-
-  const saveAccountManagerStores = async (uid: string) => {
-    try {
-      await updateDoc(doc(db, "users", uid), {
-        storeIds: accountMgrEditStoreIds,
-        storeId: accountMgrEditStoreIds[0] ?? "",
-      });
-      setAccountMgrEditUid(null);
-      await load();
-    } catch (err) {
-      console.error("account manager store update failed", err);
-      setAccountMgrMsg("担当店舗の更新に失敗しました。");
-    }
-  };
-
-  const deleteManagerAccount = async (employee: EmployeeRow) => {
-    if (!window.confirm(`${employee.name} のアカウントを削除しますか？`)) return;
-    setPermissionWorking(true);
-    setPermissionMsg("");
-    try {
-      if (employee.managerUid) {
-        await deleteDoc(doc(db, "users", employee.managerUid));
-        try {
-          const idToken = await auth.currentUser?.getIdToken();
-          if (idToken) {
-            const res = await fetch("/api/delete-manager", {
-              method: "POST",
-              headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
-              body: JSON.stringify({ uid: employee.managerUid }),
-            });
-            if (!res.ok) {
-              const data = await res.json() as { error?: string };
-              if (data.error !== "ADMIN_SDK_NOT_CONFIGURED") {
-                console.error("auth delete failed", data.error);
-              }
-            }
-          }
-        } catch (err) {
-          console.error("auth delete api call failed", err);
-        }
-      }
-      await updateDoc(doc(db, "employees", employee.id), { hasManagerAccount: false, managerUid: null, accountRole: null, accountStoreIds: [] });
-      setPermissionMsg("アカウントを削除しました。");
-      setPermissionModal(null);
-      await load();
-    } catch (err) {
-      console.error("manager account deletion failed", err);
-      setPermissionMsg("削除に失敗しました。");
-    } finally {
-      setPermissionWorking(false);
-    }
-  };
 
   const saveCurrentLocation = () => {
     const storeId = managerStoreId || storeForm.id.trim();
@@ -1427,7 +1191,7 @@ export default function AdminPage() {
         setCsvImportErrors([
           {
             rowNumber: 0,
-            message: "2行目に name, nameKana, employeeCode, storeId, baseHourlyWage, pin, status のキー行が必要です。",
+            message: "2行目に name, nameKana, employeeCode, storeId, baseHourlyWage, status のキー行が必要です。",
             values: null,
           },
         ]);
@@ -1447,9 +1211,7 @@ export default function AdminPage() {
         if (!values.name.trim()) rowErrors.push("name は必須です");
         if (!values.employeeCode.trim()) rowErrors.push("employeeCode は必須です");
         if (!values.storeId.trim()) rowErrors.push("storeId は必須です");
-        if (!values.pin.trim()) rowErrors.push("pin は必須です");
         if (!values.status.trim()) rowErrors.push("status は必須です");
-        if (values.pin && !/^\d{4}$/.test(values.pin.trim())) rowErrors.push("pin は4桁数字のみ許可です");
         if (values.status && !["active", "inactive", "pending", "rejected"].includes(values.status.trim())) {
           rowErrors.push("status は active / inactive / pending / rejected のいずれかです");
         }
@@ -1470,20 +1232,25 @@ export default function AdminPage() {
       }
 
       for (const row of validRows) {
-        await addDoc(collection(db, "employees"), {
+        if (!user) throw new Error("認証情報を取得できません。");
+        const token = await user.getIdToken(true);
+        const response = await fetch("/api/employees", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({
           name: row.values.name.trim(),
           nameKana: row.values.nameKana.trim(),
           employeeCode: row.values.employeeCode.trim(),
           storeId: managerStoreId || row.values.storeId.trim(),
           baseWage: Number(row.values.baseHourlyWage) || 0,
-          pin: row.values.pin.trim(),
           status: row.values.status.trim(),
           employeeType: "partTime",
           employmentType: "part_time",
           payrollType: "hourly",
           clockEnabled: true,
           payrollEnabled: true,
-        });
+        }) });
+        if (!response.ok) {
+          const result = await response.json() as { error?: string };
+          errors.push({ rowNumber: row.rowNumber, message: result.error ?? "登録に失敗しました", values: row.values });
+        }
       }
 
       setCsvImportErrors(errors);
@@ -1599,14 +1366,13 @@ export default function AdminPage() {
           </div>
           <nav className="admin-side-nav" style={styles.sideNav}>
             {visibleTabs.map((tab) => (
-              <button
-                key={tab.id}
+              <span key={tab.id} style={{display:"contents"}}><button
                 type="button"
                 onClick={() => setActiveTab(tab.id)}
                 style={activeTab === tab.id ? styles.activeSideNavButton : styles.sideNavButton}
               >
                 {tab.label}
-              </button>
+              </button>{isAdmin&&tab.id==="employees"&&<Link href="/hq/accounts" style={{...styles.sideNavButton,textDecoration:"none"}}>アカウント管理</Link>}</span>
             ))}
           </nav>
         </aside>
@@ -1676,14 +1442,13 @@ export default function AdminPage() {
 
         <nav className="admin-mobile-nav" style={styles.mobileTabs}>
           {visibleTabs.map((tab) => (
-            <button
-              key={tab.id}
+            <span key={tab.id} style={{display:"contents"}}><button
               type="button"
               onClick={() => setActiveTab(tab.id)}
               style={activeTab === tab.id ? styles.activeTab : styles.tab}
             >
               {tab.label}
-            </button>
+            </button>{isAdmin&&tab.id==="employees"&&<Link href="/hq/accounts" style={{...styles.tab,textDecoration:"none"}}>アカウント管理</Link>}</span>
           ))}
         </nav>
 
@@ -1840,29 +1605,15 @@ export default function AdminPage() {
                 <button
                   type="button"
                   onClick={() => {
-                    setEmployeeEditingId("");
                     setEmployeeForm(emptyEmployeeForm());
+                    setShowEmployeeCreate(true);
                   }}
-                  style={styles.secondaryButton}
+                  style={styles.button}
                 >
-                  新規登録
+                  ＋ アルバイトを登録
                 </button>
                 {isAdmin && (
-                  <label style={styles.secondaryButton}>
-                    {csvImporting ? "CSV取込中..." : "CSV一括登録"}
-                    <input
-                      type="file"
-                      accept=".csv,text/csv"
-                      disabled={csvImporting}
-                      style={{ display: "none" }}
-                      onChange={(event) => {
-                        const file = event.target.files?.[0];
-                        if (!file) return;
-                        event.target.value = "";
-                        void importEmployeesFromCsv(file);
-                      }}
-                    />
-                  </label>
+                  <div style={{position:"relative"}}><button type="button" aria-label="アルバイト登録メニュー" onClick={()=>setEmployeeTopMenuOpen(!employeeTopMenuOpen)} style={styles.secondaryButton}>…</button>{employeeTopMenuOpen&&<div style={{position:"absolute",right:0,top:46,zIndex:20,minWidth:220,padding:8,border:"1px solid #CBD5E1",borderRadius:12,background:"white",boxShadow:"0 12px 30px rgba(15,23,42,.15)"}}><label style={{...styles.linkButton,display:"block",marginBottom:6}}>{csvImporting?"CSV取込中...":"CSV一括登録"}<input type="file" accept=".csv,text/csv" disabled={csvImporting} style={{display:"none"}} onChange={event=>{const file=event.target.files?.[0];if(!file)return;event.target.value="";setEmployeeTopMenuOpen(false);void importEmployeesFromCsv(file);}}/></label><button type="button" onClick={()=>{const blob=new Blob(["name,nameKana,employeeCode,storeId,baseHourlyWage,status\n"],{type:"text/csv"}),url=URL.createObjectURL(blob),link=document.createElement("a");link.href=url;link.download="parttime_employee_template.csv";link.click();URL.revokeObjectURL(url);setEmployeeTopMenuOpen(false);}} style={{...styles.linkButton,width:"100%"}}>CSVテンプレートをダウンロード</button></div>}</div>
                 )}
               </div>
             </div>
@@ -1870,7 +1621,7 @@ export default function AdminPage() {
             {csvImportErrors.length > 0 && (
               <section style={styles.tabPanel}>
                 <h3 style={styles.subTitle}>CSVエラー一覧</h3>
-                <DataTable headers={["行", "エラー", "name", "employeeCode", "storeId", "pin", "status"]}>
+                <DataTable headers={["行", "エラー", "name", "employeeCode", "storeId", "status"]}>
                   {csvImportErrors.map((error) => (
                     <tr key={`${error.rowNumber}-${error.message}`}>
                       <td style={styles.td}>{error.rowNumber || "-"}</td>
@@ -1878,18 +1629,16 @@ export default function AdminPage() {
                       <td style={styles.td}>{error.values?.name ?? ""}</td>
                       <td style={styles.td}>{error.values?.employeeCode ?? ""}</td>
                       <td style={styles.td}>{error.values?.storeId ?? ""}</td>
-                      <td style={styles.td}>{error.values?.pin ?? ""}</td>
                       <td style={styles.td}>{error.values?.status ?? ""}</td>
                     </tr>
                   ))}
                 </DataTable>
               </section>
             )}
-            <form onSubmit={saveEmployee} noValidate style={styles.editForm}>
+            {showEmployeeCreate&&<form onSubmit={saveEmployee} noValidate style={styles.editForm} aria-label="アルバイト新規登録フォーム">
               <label style={styles.label}>氏名<input value={employeeForm.name} onChange={(e) => setEmployeeForm({ ...employeeForm, name: e.target.value })} style={styles.input} /></label>
               <label style={styles.label}>ひらがな<input value={employeeForm.nameKana} onChange={(e) => setEmployeeForm({ ...employeeForm, nameKana: e.target.value })} style={styles.input} /></label>
               <label style={styles.label}>社員コード<input value={employeeForm.employeeCode} onChange={(e) => setEmployeeForm({ ...employeeForm, employeeCode: e.target.value })} style={styles.input} /></label>
-              <label style={styles.label}>PIN（4桁）<input inputMode="numeric" maxLength={4} value={employeeForm.pin} onChange={(e) => setEmployeeForm({ ...employeeForm, pin: e.target.value.replace(/\D/g, "").slice(0, 4) })} style={styles.input} /></label>
               <label style={styles.label}>所属店舗
                 <select
                   value={managerStoreId || employeeForm.storeId}
@@ -1904,8 +1653,8 @@ export default function AdminPage() {
               <label style={styles.label}>基本時給<input type="number" value={employeeForm.baseWage} onChange={(e) => setEmployeeForm({ ...employeeForm, baseWage: e.target.value })} style={styles.input} /></label>
               <label style={styles.label}>status
                 <select value={employeeForm.status} onChange={(e) => setEmployeeForm({ ...employeeForm, status: e.target.value })} style={styles.input}>
-                  <option value="active">active</option>
-                  <option value="inactive">inactive</option>
+                  <option value="active">在籍中</option>
+                  <option value="inactive">無効</option>
                 </select>
               </label>
               <label style={styles.label}>交通費（円）<input type="number" value={employeeForm.transportationCost} onChange={(e) => setEmployeeForm({ ...employeeForm, transportationCost: e.target.value })} style={styles.input} /></label>
@@ -1933,168 +1682,22 @@ export default function AdminPage() {
                     {employeeFormError}
                   </p>
                 )}
-                <button type="submit" style={styles.button}>{employeeEditingId ? "更新" : "登録"}</button>
+                <button type="submit" style={styles.button}>登録</button>
+                <button type="button" onClick={()=>setShowEmployeeCreate(false)} style={styles.secondaryButton}>キャンセル</button>
               </div>
-            </form>
-            {isAdmin && (
-              <div style={{ marginTop: 32 }}>
-                <h3 style={styles.subTitle}>アカウント管理（エリア・FCマネージャー）</h3>
-                <p style={styles.helpText}>users コレクションから role が area_manager / fc_manager のアカウントを管理します。</p>
-
-                {accountManagers.length > 0 && (
-                  <DataTable headers={["氏名", "メール", "権限", "担当店舗", "操作"]}>
-                    {accountManagers.map((acct) => {
-                      const isEditing = accountMgrEditUid === acct.uid;
-                      const mgrStores = stores.filter((s) => acct.role === "fc_manager" ? s.isFc === true : true);
-                      return (
-                        <tr key={acct.uid}>
-                          <td style={styles.td}>{acct.name ?? "—"}</td>
-                          <td style={styles.td}>{acct.email ?? "—"}</td>
-                          <td style={styles.td}>
-                            <span style={acct.role === "fc_manager" ? styles.fcBadge : styles.chainBadge}>
-                              {acct.role}
-                            </span>
-                          </td>
-                          <td style={{ ...styles.td, minWidth: 200 }}>
-                            {isEditing ? (
-                              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                                {mgrStores.map((s) => (
-                                  <label key={s.id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer" }}>
-                                    <input
-                                      type="checkbox"
-                                      checked={accountMgrEditStoreIds.includes(s.id)}
-                                      onChange={(e) => {
-                                        const next = e.target.checked
-                                          ? [...accountMgrEditStoreIds, s.id]
-                                          : accountMgrEditStoreIds.filter((id) => id !== s.id);
-                                        setAccountMgrEditStoreIds(next);
-                                      }}
-                                    />
-                                    {getStoreName(s)}{s.isFc ? " (FC)" : ""}
-                                  </label>
-                                ))}
-                                <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
-                                  <button type="button" onClick={() => saveAccountManagerStores(acct.uid)} style={styles.linkButton}>保存</button>
-                                  <button type="button" onClick={() => setAccountMgrEditUid(null)} style={styles.linkButton}>キャンセル</button>
-                                </div>
-                              </div>
-                            ) : (
-                              <span style={{ fontSize: 13 }}>
-                                {(acct.storeIds ?? [acct.storeId ?? ""].filter(Boolean)).map((sid) => storeNameById(sid)).join("、") || "—"}
-                              </span>
-                            )}
-                          </td>
-                          <td style={styles.td}>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setAccountMgrEditUid(acct.uid);
-                                setAccountMgrEditStoreIds(acct.storeIds ?? (acct.storeId ? [acct.storeId] : []));
-                              }}
-                              style={styles.linkButton}
-                            >
-                              店舗変更
-                            </button>
-                            <button
-                              type="button"
-                              disabled={accountMgrWorking}
-                              onClick={() => deleteAccountManager(acct)}
-                              style={{ ...styles.linkButton, color: "#B91C1C", borderColor: "#FCA5A5", background: "#FEF2F2" }}
-                            >
-                              削除
-                            </button>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </DataTable>
-                )}
-                {accountManagers.length === 0 && <p style={styles.empty}>アカウントなし</p>}
-
-                <h4 style={{ margin: "20px 0 8px", fontSize: 14, fontWeight: 700 }}>新規アカウント追加</h4>
-                <div style={{ ...styles.editForm, marginTop: 0 }}>
-                  <label style={styles.label}>氏名<input value={accountMgrForm.name} onChange={(e) => setAccountMgrForm({ ...accountMgrForm, name: e.target.value })} style={styles.input} /></label>
-                  <label style={styles.label}>メールアドレス<input type="email" value={accountMgrForm.email} onChange={(e) => setAccountMgrForm({ ...accountMgrForm, email: e.target.value })} style={styles.input} /></label>
-                  <label style={styles.label}>パスワード（6文字以上）<input type="password" value={accountMgrForm.password} onChange={(e) => setAccountMgrForm({ ...accountMgrForm, password: e.target.value })} style={styles.input} /></label>
-                  <label style={styles.label}>権限
-                    <select value={accountMgrForm.role} onChange={(e) => setAccountMgrForm({ ...accountMgrForm, role: e.target.value as "area_manager" | "fc_manager", storeIds: [] })} style={styles.input}>
-                      <option value="area_manager">エリアマネージャー（area_manager）</option>
-                      <option value="fc_manager">FCマネージャー（fc_manager）</option>
-                    </select>
-                  </label>
-                  <div style={styles.label}>
-                    <span style={styles.labelText}>
-                      担当店舗（複数選択）{accountMgrForm.role === "fc_manager" ? "※FC店舗のみ" : ""}
-                    </span>
-                    <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
-                      {stores
-                        .filter((s) => accountMgrForm.role === "fc_manager" ? s.isFc === true : true)
-                        .map((s) => (
-                          <label key={s.id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer" }}>
-                            <input
-                              type="checkbox"
-                              checked={accountMgrForm.storeIds.includes(s.id)}
-                              onChange={(e) => {
-                                const next = e.target.checked
-                                  ? [...accountMgrForm.storeIds, s.id]
-                                  : accountMgrForm.storeIds.filter((id) => id !== s.id);
-                                setAccountMgrForm({ ...accountMgrForm, storeIds: next });
-                              }}
-                            />
-                            {getStoreName(s)}{s.isFc ? " (FC)" : ""}
-                          </label>
-                        ))}
-                    </div>
-                  </div>
-                  {accountMgrMsg && (
-                    <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: accountMgrMsg.includes("作成") || accountMgrMsg.includes("成功") ? "#047857" : "#B91C1C" }}>
-                      {accountMgrMsg}
-                    </p>
-                  )}
-                  <button type="button" disabled={accountMgrWorking} onClick={createAccountManager} style={styles.button}>
-                    {accountMgrWorking ? "作成中..." : "アカウント作成"}
-                  </button>
-                </div>
-              </div>
-            )}
-            <DataTable headers={["社員コード", "氏名", "ひらがな", "所属店舗", "状態", "基本時給", "交通費", "権限", "操作"]}>
-              {employees.filter((employee)=>!isFullTimeEmployee(employee)).map((employee) => (
-                <tr key={employee.id}>
-                  <td style={styles.td}>{employee.employeeCode}</td>
-                  <td style={styles.td}>{employee.name}</td>
-                  <td style={styles.td}>{employee.nameKana}</td>
-                  <td style={styles.td}>{storeNameById(employee.storeId)}</td>
-                  <td style={styles.td}><span style={employee.status === "active" ? styles.activeBadge : styles.inactiveBadge}>{employee.status === "active" ? "有効" : "無効"}</span></td>
-                  <td style={styles.td}>{getEmployeeBaseWage(employee)}</td>
-                  <td style={styles.td}>{employee.transportationCost ? `${employee.transportationCost}円/${employee.transportationType === "monthly" ? "月" : "日"}` : ""}</td>
-                  <td style={styles.td}>
-                    {employee.hasManagerAccount ? (
-                      <span style={
-                        employee.accountRole === "fc_manager" ? styles.fcBadge
-                        : employee.accountRole === "area_manager" ? styles.chainBadge
-                        : styles.activeBadge
-                      }>
-                        {employee.accountRole ?? "manager"}
-                      </span>
-                    ) : (
-                      <span style={styles.inactiveBadge}>権限なし</span>
-                    )}
-                  </td>
-                  <td style={styles.td}>
-                    {isAdmin && (
-                      <button type="button" onClick={() => openPermissionModal(employee)} style={styles.linkButton}>権限設定</button>
-                    )}
-                    <button type="button" onClick={()=>window.alert(`${employee.employeeCode} ${employee.name}\n所属：${storeNameById(employee.storeId)}\n状態：${employee.isDeleted===true||employee.status==="inactive"?"無効":"有効"}`)} style={styles.linkButton}>詳細</button>
-                    <button type="button" onClick={() => editEmployee(employee)} style={styles.linkButton}>編集</button>
-                    {employee.isDeleted===true||employee.status==="inactive"?<button type="button" onClick={()=>reactivateEmployee(employee)} style={styles.linkButton}>再有効化</button>:(isAdmin || isManager) && <button type="button" onClick={() => deleteEmployee(employee)} style={{...styles.linkButton, color: "#B91C1C", borderColor: "#FCA5A5", background: "#FEF2F2"}}>無効化・論理削除</button>}
-                  </td>
-                </tr>
-              ))}
-            </DataTable>
+            </form>}
+            {(()=>{const partTimers=employees.filter(employee=>!isFullTimeEmployee(employee));const counts={active:partTimers.filter(e=>classifyPartTimeEmployee(e)==="active").length,inactive:partTimers.filter(e=>classifyPartTimeEmployee(e)==="inactive").length,deleted:partTimers.filter(e=>classifyPartTimeEmployee(e)==="deleted").length};return <div style={{display:"flex",gap:6,flexWrap:"wrap",margin:"20px 0 14px"}}>{([['active','在籍中'],['inactive','無効'],['deleted','削除済み']] as const).map(([key,label])=><button key={key} type="button" onClick={()=>setEmployeeFilter(key)} style={{...(employeeFilter===key?styles.button:styles.secondaryButton),padding:"8px 12px",minHeight:40}}>{label} <span style={{fontSize:11,padding:"2px 7px",borderRadius:999,background:employeeFilter===key?"rgba(255,255,255,.25)":"#E2E8F0"}}>{counts[key]}</span></button>)}</div>;})()}
+            <div data-testid="employee-card-list" style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,320px),1fr))",gap:14}}>{employees.filter(employee=>!isFullTimeEmployee(employee)&&(employeeFilter==="all"||classifyPartTimeEmployee(employee)===employeeFilter)).map(employee=>{const state=classifyPartTimeEmployee(employee),menuOpen=employeeMenuId===employee.id;return <article key={employee.id} role="button" tabIndex={0} onClick={()=>openEmployeeDetail(employee)} onKeyDown={e=>{if(e.key==='Enter')void openEmployeeDetail(employee);}} style={{position:"relative",border:"1px solid #E2E8F0",borderRadius:14,padding:16,background:"#fff",cursor:"pointer",minWidth:0}}><div style={{display:"flex",alignItems:"center",gap:8}}><h3 style={{fontSize:17,margin:0,flex:1}}>{employee.name}</h3><span style={state==="active"?styles.activeBadge:{...styles.inactiveBadge,...(state==="deleted"?{background:"#FEE2E2",color:"#991B1B"}:{})}}>{state==="active"?"在籍中":state==="inactive"?"無効":"削除済み"}</span><div style={{position:"relative"}}><button type="button" aria-label={`${employee.name}の操作メニュー`} onClick={e=>{e.stopPropagation();setEmployeeMenuId(menuOpen?null:employee.id);}} style={{...styles.secondaryButton,minWidth:42,padding:"8px 12px"}}>…</button>{menuOpen&&<div onClick={e=>e.stopPropagation()} style={{position:"absolute",right:0,top:44,zIndex:20,minWidth:150,padding:8,border:"1px solid #CBD5E1",borderRadius:12,background:"white",boxShadow:"0 12px 30px rgba(15,23,42,.15)"}}>{state==="active"&&<><button type="button" onClick={()=>openEmployeeAction(employee,"deactivate")} style={{...styles.linkButton,width:"100%",marginBottom:6}}>無効化</button><button type="button" onClick={()=>openEmployeeAction(employee,"delete")} style={{...styles.linkButton,width:"100%",color:"#B91C1C"}}>削除</button></>}{state==="inactive"&&<><button type="button" onClick={()=>openEmployeeAction(employee,"reactivate")} style={{...styles.linkButton,width:"100%",marginBottom:6}}>再有効化</button><button type="button" onClick={()=>openEmployeeAction(employee,"delete")} style={{...styles.linkButton,width:"100%",color:"#B91C1C"}}>削除</button></>}{state==="deleted"&&<button type="button" onClick={()=>openEmployeeAction(employee,"restore")} style={{...styles.linkButton,width:"100%"}}>復元</button>}</div>}</div></div><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,margin:"12px 0",fontSize:14,color:"#475569"}}><span>社員コード {employee.employeeCode}</span><span>{storeNameById(employee.storeId)}</span><span>基本時給 {getEmployeeBaseWage(employee).toLocaleString()}円</span></div>{state!=="deleted"&&<button type="button" onClick={e=>{e.stopPropagation();editEmployee(employee);}} style={{...styles.secondaryButton,width:"100%",minHeight:40}}>編集</button>}</article>;})}</div>
             </>
             )}
           </section>
         )}
+
+        {employeeEditor&&(()=>{const {employee,value,confirming}=employeeEditor;const reasonError=validateEmployeeReason(value.reasonType,value.reasonDetail);const before={name:employee.name,nameKana:employee.nameKana,employeeCode:employee.employeeCode,storeId:employee.storeId,baseWage:String(getEmployeeBaseWage(employee)||""),lateNightHourlyWage:String(employee.lateNightHourlyWage??""),transportationType:employee.transportationType??"daily",transportationCost:String(employee.transportationCost||""),payrollEnabled:employee.payrollEnabled!==false,clockEnabled:employee.clockEnabled!==false,status:employee.status==="inactive"?"inactive":"active"};const changes=Object.entries(before).filter(([key,oldValue])=>String(oldValue)!==String(value[key as keyof EmployeeEditValue])).map(([key,oldValue])=>({key,before:String(oldValue),after:String(value[key as keyof EmployeeEditValue])}));const labels:Record<string,string>={name:"氏名",nameKana:"ふりがな",employeeCode:"社員コード",storeId:"所属店舗",baseWage:"基本時給",lateNightHourlyWage:"深夜時給",transportationType:"交通費区分",transportationCost:"交通費金額",payrollEnabled:"給与対象",clockEnabled:"打刻対象",status:"status"};return <div style={styles.modalOverlay} onClick={()=>setEmployeeEditor(null)}><div style={{...styles.modal,maxWidth:760}} onClick={e=>e.stopPropagation()}><h2>{employee.name}さんを編集</h2>{confirming?<><p>アルバイト情報を変更します。この操作は履歴に記録されます。変更内容を確認してください。</p><dl style={{display:"grid",gridTemplateColumns:"150px 1fr",gap:8}}><dt>氏名</dt><dd>{value.name}</dd><dt>対象店舗</dt><dd>{storeNameById(value.storeId)}</dd><dt>適用開始日</dt><dd>{value.effectiveFrom}</dd><dt>修正理由</dt><dd>{value.reasonType}{value.reasonDetail?`：${value.reasonDetail}`:""}</dd></dl><DataTable headers={["変更項目","変更前","変更後"]}>{changes.map(change=><tr key={change.key}><td style={styles.td}>{labels[change.key]}</td><td style={styles.td}>{change.before}</td><td style={styles.td}>{change.after}</td></tr>)}</DataTable><div style={styles.inlineActions}><button type="button" onClick={()=>setEmployeeEditor({...employeeEditor,confirming:false})} style={styles.secondaryButton}>入力へ戻る</button><button type="button" disabled={Boolean(reasonError)||changes.length===0} onClick={()=>submitEmployeeOperation(employee,{action:"edit",...value})} style={styles.button}>変更を確定</button></div></>:<><div style={styles.editForm}>{([['name','氏名'],['nameKana','ふりがな'],['employeeCode','社員コード'],['baseWage','基本時給'],['lateNightHourlyWage','深夜時給'],['transportationCost','交通費金額']] as const).map(([key,label])=><label key={key} style={styles.label}>{label}<input type={['baseWage','lateNightHourlyWage','transportationCost'].includes(key)?"number":"text"} value={String(value[key])} onChange={e=>setEmployeeEditor({...employeeEditor,value:{...value,[key]:e.target.value}})} style={styles.input}/></label>)}<label style={styles.label}>所属店舗<select value={value.storeId} disabled={isManager} onChange={e=>setEmployeeEditor({...employeeEditor,value:{...value,storeId:e.target.value}})} style={styles.input}>{stores.map(store=><option key={store.id} value={store.id}>{getStoreName(store)}</option>)}</select></label><label style={styles.label}>交通費区分<select value={value.transportationType} onChange={e=>setEmployeeEditor({...employeeEditor,value:{...value,transportationType:e.target.value as "daily"|"monthly"|"none"}})} style={styles.input}><option value="daily">日額</option><option value="monthly">月額</option><option value="none">なし</option></select></label>{([['payrollEnabled','給与対象'],['clockEnabled','打刻対象']] as const).map(([key,label])=><label key={key} style={styles.label}>{label}<select value={value[key]?"yes":"no"} onChange={e=>setEmployeeEditor({...employeeEditor,value:{...value,[key]:e.target.value==='yes'}})} style={styles.input}><option value="yes">対象</option><option value="no">対象外</option></select></label>)}<label style={styles.label}>status<select value={value.status} onChange={e=>setEmployeeEditor({...employeeEditor,value:{...value,status:e.target.value}})} style={styles.input}><option value="active">active</option><option value="inactive">inactive</option></select></label><label style={styles.label}>適用開始日<input type="date" value={value.effectiveFrom} onChange={e=>setEmployeeEditor({...employeeEditor,value:{...value,effectiveFrom:e.target.value}})} style={styles.input}/></label><label style={styles.label}>修正理由<select value={value.reasonType} onChange={e=>setEmployeeEditor({...employeeEditor,value:{...value,reasonType:e.target.value}})} style={styles.input}><option value="">選択してください</option>{EMPLOYEE_REASON_OPTIONS.map(reason=><option key={reason}>{reason}</option>)}</select></label>{value.reasonType==='その他'&&<label style={styles.label}>理由詳細<input value={value.reasonDetail} onChange={e=>setEmployeeEditor({...employeeEditor,value:{...value,reasonDetail:e.target.value}})} style={styles.input}/></label>}</div>{reasonError&&<p style={styles.error}>{reasonError}</p>}{employeeOperationError&&<p style={styles.error}>{employeeOperationError}</p>}<div style={styles.inlineActions}><button type="button" onClick={()=>setEmployeeEditor(null)} style={styles.secondaryButton}>キャンセル</button><button type="button" disabled={Boolean(reasonError)||!value.effectiveFrom} onClick={()=>setEmployeeEditor({...employeeEditor,confirming:true})} style={styles.button}>変更内容を確認</button></div></>}</div></div>;})()}
+
+        {employeeActionDialog&&(()=>{const dialog=employeeActionDialog,reasonError=validateEmployeeReason(dialog.reasonType,dialog.reasonDetail),label={deactivate:"無効化",reactivate:"再有効化",delete:"削除",restore:"復元"}[dialog.action],danger=dialog.action==='deactivate'||dialog.action==='delete';return <div style={styles.modalOverlay} onClick={()=>setEmployeeActionDialog(null)}><div style={styles.modal} onClick={e=>e.stopPropagation()}><h2>{dialog.employee.name}さんを{label}</h2><p style={styles.helpText}>{dialog.action==='delete'?"従業員情報は物理削除せず、論理削除として履歴を保持します。":dialog.action==='restore'?"復元後は無効状態になります。打刻を再開するには別途「再有効化」が必要です。":"この操作は変更履歴へ記録されます。"}</p><label style={styles.label}>適用開始日<input type="date" value={dialog.effectiveFrom} onChange={e=>setEmployeeActionDialog({...dialog,effectiveFrom:e.target.value})} style={styles.input}/></label><label style={styles.label}>理由<select value={dialog.reasonType} onChange={e=>setEmployeeActionDialog({...dialog,reasonType:e.target.value})} style={styles.input}><option value="">選択してください</option>{EMPLOYEE_REASON_OPTIONS.map(reason=><option key={reason}>{reason}</option>)}</select></label>{dialog.reasonType==='その他'&&<label style={styles.label}>理由詳細<input value={dialog.reasonDetail} onChange={e=>setEmployeeActionDialog({...dialog,reasonDetail:e.target.value})} style={styles.input}/></label>}{reasonError&&<p style={styles.error}>{reasonError}</p>}{employeeOperationError&&<p style={styles.error}>{employeeOperationError}</p>}<div style={styles.inlineActions}><button type="button" onClick={()=>setEmployeeActionDialog(null)} style={styles.secondaryButton}>キャンセル</button><button type="button" disabled={Boolean(reasonError)||!dialog.effectiveFrom} onClick={()=>submitEmployeeOperation(dialog.employee,{action:dialog.action,reasonType:dialog.reasonType,reasonDetail:dialog.reasonDetail,effectiveFrom:dialog.effectiveFrom})} style={danger?styles.dangerButton:styles.button}>{label}する</button></div></div></div>;})()}
+
+        {employeeDetail&&(()=>{const employee=employeeDetail.employee,state=classifyPartTimeEmployee(employee),menuOpen=employeeMenuId===`detail-${employee.id}`;return <div style={styles.modalOverlay} onClick={()=>setEmployeeDetail(null)}><div style={{...styles.modal,maxWidth:760}} onClick={e=>e.stopPropagation()}><div style={{display:"flex",alignItems:"center",gap:8}}><h2 style={{flex:1,margin:0}}>{employee.name}さんの詳細</h2>{state!=="deleted"&&<button type="button" onClick={()=>{setEmployeeDetail(null);editEmployee(employee);}} style={styles.button}>編集</button>}<div style={{position:"relative"}}><button type="button" aria-label="詳細操作メニュー" onClick={()=>setEmployeeMenuId(menuOpen?null:`detail-${employee.id}`)} style={styles.secondaryButton}>…</button>{menuOpen&&<div style={{position:"absolute",right:0,top:44,zIndex:20,minWidth:150,padding:8,border:"1px solid #CBD5E1",borderRadius:12,background:"white",boxShadow:"0 12px 30px rgba(15,23,42,.15)"}}>{state==="active"&&<><button type="button" onClick={()=>openEmployeeAction(employee,"deactivate")} style={{...styles.linkButton,width:"100%",marginBottom:6}}>無効化</button><button type="button" onClick={()=>openEmployeeAction(employee,"delete")} style={{...styles.linkButton,width:"100%",color:"#B91C1C"}}>削除</button></>}{state==="inactive"&&<><button type="button" onClick={()=>openEmployeeAction(employee,"reactivate")} style={{...styles.linkButton,width:"100%",marginBottom:6}}>再有効化</button><button type="button" onClick={()=>openEmployeeAction(employee,"delete")} style={{...styles.linkButton,width:"100%",color:"#B91C1C"}}>削除</button></>}{state==="deleted"&&<button type="button" onClick={()=>openEmployeeAction(employee,"restore")} style={{...styles.linkButton,width:"100%"}}>復元</button>}</div>}</div></div><div style={{...styles.inlineActions,marginTop:16}}><button type="button" onClick={()=>setEmployeeDetail({...employeeDetail,tab:"basic"})} style={employeeDetail.tab==='basic'?styles.button:styles.secondaryButton}>基本情報</button><button type="button" onClick={()=>setEmployeeDetail({...employeeDetail,tab:"history"})} style={employeeDetail.tab==='history'?styles.button:styles.secondaryButton}>変更履歴</button></div>{employeeDetail.tab==='basic'?<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:10,margin:"16px 0",fontSize:14}}><p>社員コード：{employee.employeeCode}</p><p>ふりがな：{employee.nameKana}</p><p>所属店舗：{storeNameById(employee.storeId)}</p><p>状態：{state==="active"?"在籍中":state==="inactive"?"無効":"削除済み"}</p><p>基本時給：{getEmployeeBaseWage(employee)}円</p><p>深夜時給：{employee.lateNightHourlyWage??0}円</p><p>交通費：{employee.transportationCost??0}円</p><p>給与対象：{employee.payrollEnabled!==false?"対象":"対象外"}</p><p>打刻対象：{employee.clockEnabled!==false?"対象":"対象外"}</p></div>:employeeDetail.loading?<p>履歴を読み込み中...</p>:employeeDetail.history.length===0?<p style={styles.empty}>変更履歴はありません</p>:<div>{employeeDetail.history.map(row=><article key={row.id} style={{borderBottom:"1px solid #E2E8F0",padding:"12px 0"}}><b>{row.action}</b><p>{new Date(row.performedAt).toLocaleString('ja-JP')}　操作者：{row.performedByName||row.performedBy}（{row.performedByRole}）</p>{row.changes?.map(change=><p key={change.field}>{change.label}：{String(change.before??'')} → {String(change.after??'')}</p>)}<p>適用開始日：{row.effectiveFrom}<br/>理由：{row.reason}<br/>操作者UID：{row.performedBy}</p></article>)}</div>}<button type="button" onClick={()=>setEmployeeDetail(null)} style={styles.secondaryButton}>閉じる</button></div></div>;})()}
 
         {activeTab === "stores" && (
           <section style={styles.tabPanel}>
@@ -2551,7 +2154,7 @@ export default function AdminPage() {
               <label style={styles.label}>勤務日<input type="date" value={manualForm.workDate} onChange={(e) => setManualForm({ ...manualForm, workDate: e.target.value })} style={styles.input} /></label>
               <label style={styles.label}>出勤時刻<input type="datetime-local" value={manualForm.clockIn} onChange={(e) => setManualForm({ ...manualForm, clockIn: e.target.value, workDate: e.target.value.slice(0, 10) })} style={styles.input} /></label>
               <label style={styles.label}>退勤時刻<input type="datetime-local" value={manualForm.clockOut} onChange={(e) => setManualForm({ ...manualForm, clockOut: e.target.value })} style={styles.input} /><small>退勤が出勤より前の場合は翌日として確認します。</small></label>
-              <label style={styles.label}>登録理由<select value={manualForm.creationReason} onChange={(e) => setManualForm({ ...manualForm, creationReason: e.target.value })} style={styles.input}><option value="">選択してください</option>{["端末不具合","PINエラー","打刻忘れ","通信障害","管理者確認済み","その他"].map((r) => <option key={r}>{r}</option>)}</select></label>
+              <label style={styles.label}>登録理由<select value={manualForm.creationReason} onChange={(e) => setManualForm({ ...manualForm, creationReason: e.target.value })} style={styles.input}><option value="">選択してください</option>{["端末不具合","社員コードエラー","打刻忘れ","通信障害","管理者確認済み","その他"].map((r) => <option key={r}>{r}</option>)}</select></label>
               {manualForm.creationReason === "その他" && <label style={styles.label}>理由詳細<input value={manualForm.reasonDetail} onChange={(e) => setManualForm({ ...manualForm, reasonDetail: e.target.value })} style={styles.input} /></label>}
               <label style={{ ...styles.label, gridColumn: "1 / -1" }}>備考（任意）<textarea value={manualForm.note} onChange={(e) => setManualForm({ ...manualForm, note: e.target.value })} style={styles.input} /></label>
               <div style={{ gridColumn: "1 / -1" }}><b>休憩</b>{manualForm.breaks.map((item, index) => <div key={index} style={{ display: "flex", gap: 8, marginTop: 8 }}><input type="datetime-local" value={item.start} onChange={(e) => setManualForm({ ...manualForm, breaks: manualForm.breaks.map((b,i) => i === index ? { ...b, start: e.target.value } : b) })} style={styles.input}/><input type="datetime-local" value={item.end} onChange={(e) => setManualForm({ ...manualForm, breaks: manualForm.breaks.map((b,i) => i === index ? { ...b, end: e.target.value } : b) })} style={styles.input}/><button type="button" onClick={() => setManualForm({ ...manualForm, breaks: manualForm.breaks.filter((_,i) => i !== index) })} style={styles.secondaryButton}>削除</button></div>)}<button type="button" onClick={() => setManualForm({ ...manualForm, breaks: [...manualForm.breaks, { start: "", end: "" }] })} style={{ ...styles.secondaryButton, marginTop: 8 }}>休憩を追加</button></div>
@@ -2564,110 +2167,6 @@ export default function AdminPage() {
         </div>
       )}
 
-      {/* 権限設定モーダル */}
-      {permissionModal && (() => {
-        const emp = employees.find((e) => e.id === permissionModal.empId);
-        if (!emp) return null;
-        const fcStores = permissionModal.role === "fc_manager" ? stores.filter((s) => s.isFc === true) : stores;
-        return (
-          <div style={styles.modalOverlay} onClick={() => setPermissionModal(null)}>
-            <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-                <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800 }}>権限設定：{emp.name}</h3>
-                <button type="button" onClick={() => setPermissionModal(null)} style={{ ...styles.linkButton, fontSize: 14 }}>✕ 閉じる</button>
-              </div>
-
-              {emp.hasManagerAccount && (
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16, padding: "8px 12px", background: "#F0FDF4", borderRadius: 8, border: "1px solid #BBF7D0" }}>
-                  <span style={{ fontSize: 13 }}>現在の権限：<strong>{emp.accountRole ?? "manager"}</strong></span>
-                  <button
-                    type="button"
-                    disabled={permissionWorking}
-                    onClick={() => deleteManagerAccount(emp)}
-                    style={{ ...styles.linkButton, color: "#B91C1C", borderColor: "#FCA5A5", background: "#FEF2F2" }}
-                  >
-                    {permissionWorking ? "処理中..." : "アカウント削除"}
-                  </button>
-                </div>
-              )}
-
-              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                <label style={styles.label}>権限
-                  <select
-                    value={permissionModal.role}
-                    onChange={(e) => setPermissionModal({ ...permissionModal, role: e.target.value as "manager" | "area_manager" | "fc_manager" | "", storeIds: [] })}
-                    style={styles.input}
-                  >
-                    <option value="">選択してください</option>
-                    <option value="manager">manager（1店舗・勤怠/従業員/打刻修正）</option>
-                    <option value="area_manager">area_manager（複数店舗・勤怠/従業員/打刻修正/Excel）</option>
-                    <option value="fc_manager">fc_manager（FC店舗・全タブ）</option>
-                  </select>
-                </label>
-
-                {permissionModal.role === "manager" && (
-                  <label style={styles.label}>担当店舗
-                    <select
-                      value={permissionModal.storeId}
-                      onChange={(e) => setPermissionModal({ ...permissionModal, storeId: e.target.value })}
-                      style={styles.input}
-                    >
-                      <option value="">選択してください</option>
-                      {stores.map((s) => <option key={s.id} value={s.id}>{getStoreName(s)}</option>)}
-                    </select>
-                  </label>
-                )}
-
-                {(permissionModal.role === "area_manager" || permissionModal.role === "fc_manager") && (
-                  <div style={styles.label}>
-                    <span style={styles.labelText}>担当店舗（複数選択可）{permissionModal.role === "fc_manager" ? "※FC店舗のみ" : ""}</span>
-                    <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
-                      {fcStores.map((s) => (
-                        <label key={s.id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer" }}>
-                          <input
-                            type="checkbox"
-                            checked={permissionModal.storeIds.includes(s.id)}
-                            onChange={(e) => {
-                              const next = e.target.checked
-                                ? [...permissionModal.storeIds, s.id]
-                                : permissionModal.storeIds.filter((id) => id !== s.id);
-                              setPermissionModal({ ...permissionModal, storeIds: next });
-                            }}
-                          />
-                          {getStoreName(s)}{s.isFc ? " (FC)" : ""}
-                        </label>
-                      ))}
-                      {fcStores.length === 0 && <p style={{ margin: 0, fontSize: 12, color: "#B91C1C" }}>FC店舗が登録されていません。先に店舗管理でFC店舗を登録してください。</p>}
-                    </div>
-                  </div>
-                )}
-
-                <label style={styles.label}>メールアドレス
-                  <input type="email" value={permissionModal.email} onChange={(e) => setPermissionModal({ ...permissionModal, email: e.target.value })} style={styles.input} />
-                </label>
-                <label style={styles.label}>パスワード（6文字以上）
-                  <input type="password" value={permissionModal.password} onChange={(e) => setPermissionModal({ ...permissionModal, password: e.target.value })} style={styles.input} />
-                </label>
-
-                {permissionMsg && (
-                  <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: permissionMsg.includes("作成") || permissionMsg.includes("削除") ? "#047857" : "#B91C1C" }}>
-                    {permissionMsg}
-                  </p>
-                )}
-
-                <button
-                  type="button"
-                  disabled={permissionWorking || !permissionModal.role}
-                  onClick={() => savePermission(emp)}
-                  style={styles.button}
-                >
-                  {permissionWorking ? "作成中..." : "アカウント作成"}
-                </button>
-              </div>
-            </div>
-          </div>
-        );
-      })()}
     </main>
   );
 }
@@ -2861,6 +2360,15 @@ const styles = {
     padding: "0 14px",
     background: "#ffffff",
     color: "#53C1ED",
+    fontWeight: 800,
+  },
+  dangerButton: {
+    minHeight: 42,
+    border: "1px solid #FCA5A5",
+    borderRadius: 12,
+    padding: "0 14px",
+    background: "#DC2626",
+    color: "#ffffff",
     fontWeight: 800,
   },
   summaryGrid: {

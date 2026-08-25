@@ -236,7 +236,7 @@ test("本部管理者の従業員管理に正社員・アルバイトの統合�
   assert.match(adminPage, /アルバイト管理/);
   assert.match(adminPage, /正社員マスター/);
   assert.match(adminPage, /isAdmin && employeeManagementTab === "fulltime"/);
-  assert.match(adminPage, /employees\.filter\(\(employee\)=>!isFullTimeEmployee\(employee\)\)/);
+  assert.match(adminPage, /employees\.filter\(\(?employee\)?=>!isFullTimeEmployee\(employee\)/);
   assert.match(hqEmployeesPage, /正社員マスター/);
   assert.doesNotMatch(adminPage, /当月調整入力|月次調整を反映|臨時出勤回数/);
   // 給与業務フロー順の5セクション（Section②に当月調整）
@@ -309,9 +309,8 @@ test("store-payslipsはpartTimeのみ・fulltime-payslipsはfullTimeのみを対
 });
 
 test("HQ従業員ページは正社員の新規と編集・状態変更を分離する", () => {
-  // 社員コード重複チェック
-  assert.match(hqEmployeesPage, /where\("employeeCode", "==", employeeCode\)/);
-  assert.match(hqEmployeesPage, /同じ社員コードの従業員が既に登録されています/);
+  // アルバイト登録は社員コード重複を拒否する認証済みAPIを使う
+  assert.match(hqEmployeesPage, /fetch\("\/api\/employees"/);
   assert.match(hqEmployeesPage, /mode:"create"[\s\S]*\/api\/fulltime-employees/);
   assert.match(hqEmployeesPage, /mode:"edit"[\s\S]*employeeId/);
   assert.match(hqEmployeesPage, /詳細/);
