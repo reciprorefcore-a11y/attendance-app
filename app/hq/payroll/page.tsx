@@ -16,7 +16,7 @@ type PayrollRun = {
 type ConfirmedRunSummary = { id: string; targetMonth: string; paymentMonth: string; paymentDate: string; employeeCount: number };
 type SlipRun = { id: string; targetMonth: string; paymentDate: string; status: string; results: PayrollResult[] };
 type GeneratedFile = { name: string; blob: Blob };
-type FixedMaster = { employeeId: string; employeeCode: string; employeeName: string; storeName: string; fixedBaseSalary: number; holidayAllowanceBaseSalary: number | null; holidayAllowanceCalculationBasis: number | null; directorCompensation: number; positionAllowance: number; businessAllowance: number; fixedOvertimeAllowance: number; healthInsurance: number | null; childSupportContribution: number | null; careInsurance: number | null; employeePension: number | null; employmentInsurance: number | null; incomeTax: number | null; residentTax: number | null; transportationType: "daily" | "monthly" | "none" };
+type FixedMaster = { employeeId: string; employeeCode: string; employeeName: string; storeName: string; fixedBaseSalary: number; holidayAllowanceBaseSalary: number | null; holidayAllowanceCalculationBasis: number | null; directorCompensation: number; positionAllowance: number; skillAllowance:number; businessAllowance: number; fixedOvertimeAllowance: number; fixedOvertimeSupplement:number; fixedOvertimeHours:number|null; otherFixedAllowance:number; otherFixedAllowanceName:string; healthInsurance: number | null; childSupportContribution: number | null; careInsurance: number | null; employeePension: number | null; employmentInsurance: number | null; incomeTax: number | null; residentTax: number | null; transportationType: "daily" | "monthly" | "none" };
 type AppliedDiffSnapshot = { grossTotal: number; deductionsTotal: number; payrollNetPay: number; expenseReimbursement: number; netPay: number };
 
 function tokyoYM() {
@@ -182,7 +182,9 @@ export default function PayrollPage() {
       const master = fixedMasters.find((item) => item.employeeId === result.employeeId);
       const validationReason = adjustmentDisabledReason({ selected: true, adjustment, holidayBasis: resolveHolidayAllowanceBasis(master ?? {}), manualHolidayOverride: manualHolidayOverrides[result.employeeId] === true, busy: false });
       if (validationReason) { setMessage(`${result.employeeCode} ${result.employeeName}：${validationReason}`); return; }
-      const automatic = Math.round((Number(adjustment.overtimeMinutes) || 0) * (result.earnings.baseSalary / 160) * 1.25 / 60);
+      const fixedMinutes = master?.fixedOvertimeHours == null ? null : Math.round(master.fixedOvertimeHours * 60);
+      const excessMinutes = fixedMinutes == null ? (Number(adjustment.overtimeMinutes) || 0) : Math.max(0, (Number(adjustment.overtimeMinutes) || 0) - fixedMinutes);
+      const automatic = Math.round(excessMinutes * (result.earnings.baseSalary / 160) * 1.25 / 60);
       if (adjustment.overtimeAllowanceOverride != null && adjustment.overtimeAllowanceOverride !== automatic && !adjustment.overtimeReason?.trim()) {
         setMessage(`${result.employeeCode} ${result.employeeName}：残業手当を修正する理由を入力してください。`); return;
       }
@@ -359,7 +361,12 @@ export default function PayrollPage() {
                   const result = selectedAdjustmentResult;
                   if (!result) return <p style={s.hint}>正社員を選択してください。</p>;
                   const value = selectedAdjustment;
-                  const automatic = Math.floor((Number(value.overtimeMinutes) || 0) * (result.earnings.baseSalary / 160) * 1.25 / 60);
+                  const master = fixedMasters.find((item)=>item.employeeId===result.employeeId);
+                  const ordinaryOvertimeMinutes = Math.max(0, Number(value.overtimeMinutes) || 0);
+                  const fixedOvertimeMinutes = master?.fixedOvertimeHours == null ? null : Math.round(master.fixedOvertimeHours * 60);
+                  const overtimeWithinFixedMinutes = fixedOvertimeMinutes == null ? 0 : Math.min(ordinaryOvertimeMinutes, fixedOvertimeMinutes);
+                  const excessOvertimeMinutes = fixedOvertimeMinutes == null ? ordinaryOvertimeMinutes : Math.max(0, ordinaryOvertimeMinutes-fixedOvertimeMinutes);
+                  const automatic = Math.round(excessOvertimeMinutes * (result.earnings.baseSalary / 160) * 1.25 / 60);
                   const appliedDiff = appliedDiffs.find((d) => d.employeeId === result.employeeId);
                   const expenseInput = Number(value.expenseReimbursement ?? 0);
                   const expenseIsPending = reimbursementPending(expenseInput, result.reimbursements.expenseReimbursement);
@@ -398,6 +405,19 @@ export default function PayrollPage() {
                             <label style={s.lbl}>修正理由<input value={value.overrideReason ?? ""} onChange={(e) => updateAdjustment(result.employeeId, { overrideReason: e.target.value })} style={s.input} /></label>
                           </div>
                         )}
+                      </section>
+                      <section style={s.holidaySection}>
+                        <h3 style={s.h3}>固定残業</h3>
+                        <div style={s.holidayGrid}>
+                          <div style={s.moneyCard}><span>固定残業時間</span><b>{master?.fixedOvertimeHours==null?"未設定":`${master.fixedOvertimeHours}時間`}</b></div>
+                          <div style={s.moneyCard}><span>当月の普通残業時間</span><b>{ordinaryOvertimeMinutes/60}時間</b></div>
+                          <div style={s.moneyCard}><span>固定残業時間内</span><b>{overtimeWithinFixedMinutes/60}時間</b></div>
+                          <div style={s.moneyCard}><span>固定残業超過時間</span><b>{excessOvertimeMinutes/60}時間</b></div>
+                          <div style={s.moneyCard}><span>業務手当（固定残業）</span><b>{yen(result.earnings.fixedOvertimeAllowance)}</b></div>
+                          <div style={s.moneyCard}><span>固定残業手当（別枠）</span><b>{yen(result.earnings.fixedOvertimeSupplement)}</b></div>
+                          <div style={s.moneyCard}><span>超過残業手当</span><b>{yen(automatic)}</b></div>
+                        </div>
+                        {(result.earnings.fixedOvertimeAllowance>0||result.earnings.fixedOvertimeSupplement>0)&&master?.fixedOvertimeHours==null&&<p style={s.warningText}>固定残業時間・対象区分は未設定です。金額から時間数や割増区分を推測していません。</p>}
                       </section>
                       <div style={s.adjustGrid}>
                         <label style={s.lbl}>残業時間（時間）<input type="number" min="0" step="0.25" value={value.overtimeMinutes == null ? "" : value.overtimeMinutes / 60} onChange={(e) => updateAdjustment(result.employeeId, { overtimeMinutes: Number(e.target.value) * 60 })} style={s.input} /></label>

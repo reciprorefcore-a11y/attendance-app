@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import XLSX from "xlsx";
-import { applyFixedPayrollAdjustment, calculatePayroll, calculatePayrollEmployee, calculateWithholdingTax2026, isPayrollMonthClosed, summarizePayroll, validatePayrollInput, type PayrollAttendanceDay, type PayrollEmployee } from "../lib/payroll.ts";
+import { applyFixedPayrollAdjustment, calculatePayroll, calculatePayrollEmployee, calculatePremiumBasis, calculateProposedPremiumBasis, calculateWithholdingTax2026, isPayrollMonthClosed, summarizePayroll, validatePayrollInput, type PayrollAttendanceDay, type PayrollEmployee } from "../lib/payroll.ts";
 import { createPayrollWorkbook, createPayslipPdf, createPayslipZip, createTransferWorkbook, createUnifiedPayrollWorkbook, payrollTransferWarnings, selectFullTimePayslipResults, selectPayrollExportResults, selectStorePayslipResults } from "../lib/payroll-export.ts";
 import { sortPayrollResults, sortPayrollResultsForExcel } from "../lib/payroll-order.ts";
 import { resolveResidentTaxForMonth } from "../lib/payroll-server.ts";
@@ -70,6 +70,45 @@ test("固定給の自動残業手当も給与項目ごとに四捨五入する",
   const adjusted = applyFixedPayrollAdjustment(fixed, { overtimeMinutes: 60 });
   assert.equal(adjusted.fixedAdjustment?.automaticOvertimeAllowance, 8, "7.8125円は8円へ四捨五入");
   assert.equal(adjusted.earnings.overtimePremium, 8);
+});
+
+test("固定残業時間内は追加0円、超過分だけ追加支給する",()=>{
+  const base=calculatePayrollEmployee(employee("fixed-ot",{payrollType:"fixed",fixedBaseSalary:200000,fixedOvertimeAllowance:30000,fixedOvertimeHours:20}),[]);
+  const within=applyFixedPayrollAdjustment(base,{overtimeMinutes:15*60});
+  assert.equal(within.earnings.fixedOvertimeAllowance,30000);assert.equal(within.earnings.overtimePremium,0);assert.equal(within.fixedAdjustment?.overtimeWithinFixedMinutes,900);assert.equal(within.fixedAdjustment?.excessOvertimeMinutes,0);
+  const excess=applyFixedPayrollAdjustment(base,{overtimeMinutes:22*60});
+  assert.equal(excess.earnings.fixedOvertimeAllowance,30000);assert.equal(excess.earnings.overtimePremium,3125);assert.equal(excess.fixedAdjustment?.excessOvertimeMinutes,120);
+});
+
+test("固定残業時間未設定は警告し金額から時間を推測しない",()=>{
+  const base=calculatePayrollEmployee(employee("fixed-ot-missing",{payrollType:"fixed",fixedBaseSalary:200000,fixedOvertimeAllowance:30000}),[]);
+  const result=applyFixedPayrollAdjustment(base,{overtimeMinutes:60});
+  assert.equal(result.fixedOvertimeHoursSnapshot,null);assert.equal(result.earnings.overtimePremium,1563);assert.ok(result.issues.some(issue=>issue.code==="fixed_overtime_hours_missing"));
+});
+
+test("役職・職能を別管理し旧業務手当と固定手当を二重計上しない",()=>{
+  const result=calculatePayrollEmployee(employee("breakdown",{payrollType:"fixed",fixedBaseSalary:200000,positionAllowance:10000,skillAllowance:5000,fixedOvertimeAllowance:30000,fixedOvertimeSupplement:2000}),[]);
+  assert.equal(result.earnings.positionAllowance,10000);assert.equal(result.earnings.skillAllowance,5000);assert.equal(result.earnings.fixedOvertimeAllowance,30000);assert.equal(result.earnings.fixedOvertimeSupplement,2000);assert.equal(result.earnings.otherFixedAllowance,0);assert.equal(result.earnings.businessAllowance,0);assert.equal(result.earnings.grossTotal,247000);
+});
+
+test("既存正社員5名の固定給与総額は互換移行で変わらない",()=>{
+  const fixtures=[
+    {id:"0002",fixedBaseSalary:0,directorCompensation:150000,positionAllowance:0,businessAllowance:0,fixedOvertimeAllowance:0},
+    {id:"0003",fixedBaseSalary:185000,directorCompensation:0,positionAllowance:9000,businessAllowance:110000,fixedOvertimeAllowance:0},
+    {id:"0017",fixedBaseSalary:200000,directorCompensation:0,positionAllowance:6000,businessAllowance:0,fixedOvertimeAllowance:0},
+    {id:"0064",fixedBaseSalary:183000,directorCompensation:0,positionAllowance:8000,businessAllowance:56417,fixedOvertimeAllowance:27678},
+    {id:"0083",fixedBaseSalary:175000,directorCompensation:0,positionAllowance:34000,businessAllowance:100000,fixedOvertimeAllowance:0},
+  ];
+  for(const item of fixtures){const oldTotal=item.fixedBaseSalary+item.directorCompensation+item.positionAllowance+item.businessAllowance+item.fixedOvertimeAllowance;const result=calculatePayrollEmployee(employee(item.id,{payrollType:"fixed",...item}),[]);assert.equal(result.earnings.grossTotal,oldTotal,item.id);}
+  const kobayashi=calculatePayrollEmployee(employee("0064",{payrollType:"fixed",fixedBaseSalary:183000,positionAllowance:8000,businessAllowance:56417,fixedOvertimeAllowance:27678}),[]);assert.equal(kobayashi.earnings.skillAllowance,8000);assert.equal(kobayashi.earnings.positionAllowance,0);assert.equal(kobayashi.earnings.fixedOvertimeAllowance,56417);assert.equal(kobayashi.earnings.fixedOvertimeSupplement,27678);assert.equal(kobayashi.earnings.otherFixedAllowance,0);
+});
+
+test("休日・時間外算定基礎は基本給のみで固定手当と通勤費を含めない",()=>{
+  const value={fixedBaseSalary:200000,positionAllowance:10000,skillAllowance:5000,fixedOvertimeAllowance:30000,otherFixedAllowance:2000,monthlyTransportation:15000,dailyTransportation:0};
+  assert.equal(calculatePremiumBasis(value),200000);
+  const result=calculatePayrollEmployee(employee("basis",{payrollType:"fixed",...value,transportationType:"monthly"}),[]);
+  assert.equal(result.holidayAllowanceBaseSalarySnapshot,200000);
+  assert.equal(calculateProposedPremiumBasis(value),217000,"改定案は基本給・職能・役職・通常固定手当を算入する");
 });
 
 test("店舗間ヘルプを同一employeeIdの1明細へ合算する", () => {
@@ -402,6 +441,13 @@ test("給与Excelと振込Excelの人数・合計が一致する", () => {
   const payroll = XLSX.read(createPayrollWorkbook(results, "2026-08")); const transfer = XLSX.read(createTransferWorkbook(results, "2026-08"));
   assert.equal(payroll.SheetNames[0], "FUBLEVG㈱"); const sheet = transfer.Sheets[transfer.SheetNames[0]], rows = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as unknown[][];
   assert.equal(rows.length, 5); assert.deepEqual(rows[1], ["No.", "社員コード", "氏名", "振込金額"]); assert.deepEqual(rows[2]?.slice(0, 4), [1, "1001", "従業員1001", 1000]); assert.equal(rows.at(-1)?.[0], "振込合計（2名）"); assert.equal(sheet.D5.f, "SUM(D3:D4)");
+});
+
+test("給与Excelは職能・業務手当・別枠固定残業を既存行へ一度だけ表示する",()=>{
+  const result=calculatePayrollEmployee(employee("excel-breakdown",{payrollType:"fixed",fixedBaseSalary:200000,positionAllowance:10000,skillAllowance:5000,fixedOvertimeAllowance:30000,fixedOvertimeSupplement:2000}),[]);
+  const book=XLSX.read(createPayrollWorkbook([result],"2026-08",true));const sheet=book.Sheets[book.SheetNames[0]];
+  assert.equal(sheet.A7.v,"職能手当");assert.equal(sheet.A8.v,"固定残業手当（別枠）");assert.equal(sheet.A10.v,"業務手当（固定残業）");
+  assert.equal(sheet.C7.v,5000);assert.equal(sheet.C8.v,2000);assert.equal(sheet.C10.v,30000);assert.equal(sheet.C32.v,10000);assert.equal(sheet.C18.v,247000);
 });
 
 test("統合給与Excelは横型帳票の9名だけを1ブック5シートへ出力する",()=>{

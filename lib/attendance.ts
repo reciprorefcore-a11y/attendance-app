@@ -66,9 +66,14 @@ export type Employee = {
   fixedBaseSalary?: number;
   directorCompensation?: number;
   positionAllowance?: number;
+  skillAllowance?: number;
   businessAllowance?: number;
   holidayAllowance?: number;
   fixedOvertimeAllowance?: number;
+  fixedOvertimeSupplement?: number;
+  fixedOvertimeHours?: number | null;
+  otherFixedAllowance?: number;
+  otherFixedAllowanceName?: string;
   otherAllowance?: number;
   otherDeduction?: number;
   /** @deprecated 旧Firestoreフィールド。負値は expenseReimbursement へ移行済み。 */

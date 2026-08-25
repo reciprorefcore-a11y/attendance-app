@@ -8,6 +8,23 @@ export function calculateHolidayUnitPay(baseSalary: number): number {
   return Math.round(baseSalary / HOLIDAY_MONTHLY_HOURS * HOLIDAY_DAILY_HOURS * HOLIDAY_RATE);
 }
 
+/** 会社の現行規程に合わせた休日・時間外手当算定基礎。手当や通勤費は根拠確認前に含めない。 */
+export const PREMIUM_CALCULATION_BASIS_POLICY = {
+  fixedBaseSalary: true,
+  positionAllowance: false,
+  skillAllowance: false,
+  fixedOvertimeAllowance: false,
+  otherFixedAllowance: false,
+  transportation: false,
+} as const;
+export function calculatePremiumBasis(employee: Pick<PayrollEmployee,"fixedBaseSalary"|"positionAllowance"|"skillAllowance"|"fixedOvertimeAllowance"|"otherFixedAllowance"|"monthlyTransportation"|"dailyTransportation">) {
+  return yen(employee.fixedBaseSalary);
+}
+/** 確定した分類に基づく改定案。給与へはまだ適用せず差額試算にのみ使用する。 */
+export function calculateProposedPremiumBasis(employee: Pick<PayrollEmployee,"fixedBaseSalary"|"positionAllowance"|"skillAllowance"|"otherFixedAllowance">) {
+  return yen(employee.fixedBaseSalary)+yen(employee.positionAllowance)+yen(employee.skillAllowance)+yen(employee.otherFixedAllowance);
+}
+
 export type PayrollType = "hourly" | "fixed";
 export type TaxTableType = "kou" | "otsu";
 export type PaymentMethod = "bank" | "cash";
@@ -52,9 +69,14 @@ export type PayrollEmployee = {
   holidayAllowanceBaseSalary?: number;
   directorCompensation?: number;
   positionAllowance?: number;
+  skillAllowance?: number;
   businessAllowance?: number;
   holidayAllowance?: number;
   fixedOvertimeAllowance?: number;
+  fixedOvertimeSupplement?: number;
+  fixedOvertimeHours?: number | null;
+  otherFixedAllowance?: number;
+  otherFixedAllowanceName?: string;
   otherAllowance?: number;
   otherNonTaxableAllowance?: number;
   otherDeduction?: number;
@@ -151,9 +173,13 @@ export type PayrollResult = {
     baseSalary: number;
     directorCompensation: number;
     positionAllowance: number;
+    skillAllowance: number;
     fixedOvertimeAllowance: number;
+    fixedOvertimeSupplement: number;
     holidayAllowance: number;
     businessAllowance: number;
+    otherFixedAllowance: number;
+    otherFixedAllowanceName: string;
     overtimePremium: number;
     nightPremium: number;
     otherTaxable: number;
@@ -192,9 +218,10 @@ export type PayrollResult = {
   dependentCountSnapshot: number;
   residentTaxEffectiveMonthSnapshot: string | null;
   holidayAllowanceBaseSalarySnapshot: number;
+  fixedOvertimeHoursSnapshot: number | null;
   issues: PayrollIssue[];
   attendanceDaysDetail: PayrollAttendanceDay[];
-  fixedAdjustment?: FixedPayrollAdjustment & { automaticOvertimeAllowance: number };
+  fixedAdjustment?: FixedPayrollAdjustment & { automaticOvertimeAllowance: number; overtimeWithinFixedMinutes: number; excessOvertimeMinutes: number };
 };
 
 const yen = (value: unknown) => Math.max(0, Math.trunc(Number(value) || 0));
@@ -296,6 +323,16 @@ export function calculatePayrollEmployee(employee: PayrollEmployee, allAttendanc
   const payrollType = resolvePayrollType(employee);
   const hourlyWage = yen(employee.hourlyWage ?? employee.baseWage);
   const baseSalary = payrollType === "hourly" ? Math.round(totals.work * hourlyWage / 60) : yen(employee.fixedBaseSalary);
+  // 旧businessAllowanceは業務手当（固定残業）、旧fixedOvertimeAllowanceは別枠固定残業手当。
+  const legacyBusinessAllowance = yen(employee.businessAllowance);
+  const legacyFixedOvertimeAllowance = yen(employee.fixedOvertimeAllowance);
+  const isNewBreakdown = employee.skillAllowance != null || employee.fixedOvertimeSupplement != null;
+  const explicitOtherFixedAllowance = yen(employee.otherFixedAllowance);
+  const fixedOvertimeAllowance = legacyBusinessAllowance > 0 ? legacyBusinessAllowance : legacyFixedOvertimeAllowance;
+  const fixedOvertimeSupplement = isNewBreakdown ? yen(employee.fixedOvertimeSupplement) : (legacyBusinessAllowance > 0 ? legacyFixedOvertimeAllowance : 0);
+  const otherFixedAllowance = explicitOtherFixedAllowance;
+  const positionAllowance = isNewBreakdown ? yen(employee.positionAllowance) : 0;
+  const skillAllowance = isNewBreakdown ? yen(employee.skillAllowance) : yen(employee.positionAllowance);
   const overtimePremium = payrollType === "hourly" ? Math.round(totals.overtime * hourlyWage * 0.25 / 60) : 0;
   const nightPremium = payrollType === "hourly" ? Math.round(totals.night * hourlyWage * 0.25 / 60) : 0;
   const transportationType = employee.transportationType ?? "none";
@@ -316,7 +353,7 @@ export function calculatePayrollEmployee(employee: PayrollEmployee, allAttendanc
   });
   const absenceDeduction = yen(employee.absenceDeduction);
   const lateEarlyDeduction = yen(employee.lateEarlyDeduction);
-  const taxableTotal = baseSalary + yen(employee.directorCompensation) + yen(employee.positionAllowance) + yen(employee.fixedOvertimeAllowance) + yen(employee.businessAllowance) + overtimePremium + nightPremium + yen(employee.otherAllowance) - absenceDeduction - lateEarlyDeduction;
+  const taxableTotal = baseSalary + yen(employee.directorCompensation) + positionAllowance + skillAllowance + fixedOvertimeAllowance + fixedOvertimeSupplement + otherFixedAllowance + overtimePremium + nightPremium + yen(employee.otherAllowance) - absenceDeduction - lateEarlyDeduction;
   const nonTaxableTotal = transportation + yen(employee.otherNonTaxableAllowance);
   const grossTotal = taxableTotal + nonTaxableTotal;
   const automatic = calculateAutomaticStatutoryDeductions({ taxableEarnings: taxableTotal, socialInsuranceEnrolled: employee.socialInsuranceEnrolled, standardMonthlyRemuneration: employee.standardMonthlyRemuneration, careInsuranceApplicable: employee.careInsuranceApplicable, employmentInsuranceEnrolled: employee.employmentInsuranceEnrolled });
@@ -345,13 +382,14 @@ export function calculatePayrollEmployee(employee: PayrollEmployee, allAttendanc
     storeId: payrollType === "fixed" ? "" : (employee.storeId ?? ""), storeName: payrollType === "fixed" ? "所属なし" : (employee.storeName ?? employee.storeId ?? ""), employeeType: payrollType === "fixed" ? "fullTime" : "partTime", payrollType, paymentMethod,
     payrollTransferOrder: employee.payrollTransferOrder ?? null,
     attendance: { workingDays: yen(employee.workingDays), attendanceDays, absenceDays: yen(employee.absenceDays), paidLeaveDays: yen(employee.paidLeaveDays), workMinutes: totals.work, overtimeMinutes: totals.overtime, nightMinutes: totals.night, holidayMinutes: 0, breakMinutes: totals.break, helpMinutes: totals.help },
-    earnings: { baseSalary, directorCompensation: yen(employee.directorCompensation), positionAllowance: yen(employee.positionAllowance), fixedOvertimeAllowance: yen(employee.fixedOvertimeAllowance), holidayAllowance: 0, businessAllowance: yen(employee.businessAllowance), overtimePremium, nightPremium, otherTaxable: yen(employee.otherAllowance), absenceDeduction, lateEarlyDeduction, taxableTotal, transportation, otherNonTaxable: yen(employee.otherNonTaxableAllowance), nonTaxableTotal, grossTotal },
+    earnings: { baseSalary, directorCompensation: yen(employee.directorCompensation), positionAllowance, skillAllowance, fixedOvertimeAllowance, fixedOvertimeSupplement, holidayAllowance: 0, businessAllowance: 0, otherFixedAllowance, otherFixedAllowanceName: String(employee.otherFixedAllowanceName ?? ""), overtimePremium, nightPremium, otherTaxable: yen(employee.otherAllowance), absenceDeduction, lateEarlyDeduction, taxableTotal, transportation, otherNonTaxable: yen(employee.otherNonTaxableAllowance), nonTaxableTotal, grossTotal },
     deductions: { healthInsurance, childSupportContribution, careInsurance, employeePension, employmentInsurance, socialInsuranceTotal, taxableIncome, incomeTax, residentTax: yen(employee.residentTax), yearEndAdjustment: yen(employee.yearEndAdjustment), otherDeduction: yen(employee.otherDeduction), total: deductionTotal },
     reimbursements, payrollNetPay, netPay, bankTransfer: paymentMethod === "bank" ? netPay : 0, cashPayment: paymentMethod === "cash" ? netPay : 0,
     bankAccountRegisteredSnapshot: employee.bankAccountRegistered == null ? null : employee.bankAccountRegistered === true,
     hourlyWageSnapshot: payrollType === "hourly" ? hourlyWage : null, taxTableTypeSnapshot: taxTableType, dependentCountSnapshot: dependentCount,
     residentTaxEffectiveMonthSnapshot: employee.residentTaxEffectiveMonth ?? null,
-    holidayAllowanceBaseSalarySnapshot: payrollType === "fixed" ? yen(employee.fixedBaseSalary) : 0,
+    holidayAllowanceBaseSalarySnapshot: payrollType === "fixed" ? calculatePremiumBasis(employee) : 0,
+    fixedOvertimeHoursSnapshot: payrollType === "fixed" && employee.fixedOvertimeHours != null && Number.isFinite(employee.fixedOvertimeHours) ? Math.max(0, Number(employee.fixedOvertimeHours)) : null,
     issues, attendanceDaysDetail,
   };
 }
@@ -364,7 +402,10 @@ export function calculatePayroll(employees: PayrollEmployee[], attendance: Payro
 export function applyFixedPayrollAdjustment(result: PayrollResult, adjustment: FixedPayrollAdjustment): PayrollResult {
   if (result.payrollType !== "fixed") return result;
   const overtimeMinutes = Math.max(0, Math.trunc(Number(adjustment.overtimeMinutes) || 0));
-  const automaticOvertimeAllowance = Math.round(overtimeMinutes * (result.earnings.baseSalary / 160) * 1.25 / 60);
+  const fixedOvertimeMinutes = result.fixedOvertimeHoursSnapshot == null ? null : Math.round(result.fixedOvertimeHoursSnapshot * 60);
+  const overtimeWithinFixedMinutes = fixedOvertimeMinutes == null ? 0 : Math.min(overtimeMinutes, fixedOvertimeMinutes);
+  const excessOvertimeMinutes = fixedOvertimeMinutes == null ? overtimeMinutes : Math.max(0, overtimeMinutes - fixedOvertimeMinutes);
+  const automaticOvertimeAllowance = Math.round(excessOvertimeMinutes * (result.earnings.baseSalary / 160) * 1.25 / 60);
   const overtimePremium = adjustment.overtimeAllowanceOverride == null ? automaticOvertimeAllowance : yen(adjustment.overtimeAllowanceOverride);
   const transportation = adjustment.transportation != null ? yen(adjustment.transportation) : result.earnings.transportation;
   const otherTaxable = yen(adjustment.otherTemporaryPayment);
@@ -378,6 +419,9 @@ export function applyFixedPayrollAdjustment(result: PayrollResult, adjustment: F
   // 立替経費精算：正数で入力、控除に含めず payrollNetPay に加算して最終支給額を増やす
   // 新フィールド expenseReimbursement が明示されている場合は必ず優先し、旧フィールド advanceExpense を無視する
   const additionalIssues: PayrollIssue[] = [];
+  if (result.earnings.fixedOvertimeAllowance > 0 && result.fixedOvertimeHoursSnapshot == null) {
+    additionalIssues.push({ severity: "warning", code: "fixed_overtime_hours_missing", employeeId: result.employeeId, message: `${result.employeeName}：固定残業時間未設定のため、当月の普通残業時間をすべて超過分として計算します` });
+  }
   if (holidayAllowance !== automaticHolidayAllowance && !adjustment.overrideReason?.trim()) {
     additionalIssues.push({ severity: "error", code: "holiday_allowance_override_reason_required", employeeId: result.employeeId, message: `${result.employeeName}：休日手当修正額が自動計算額と異なるため修正理由を入力してください` });
   }
@@ -400,7 +444,7 @@ export function applyFixedPayrollAdjustment(result: PayrollResult, adjustment: F
     }
   }
   const earnings = { ...result.earnings, overtimePremium, transportation, otherTaxable, holidayAllowance };
-  earnings.taxableTotal = earnings.baseSalary + earnings.directorCompensation + earnings.positionAllowance + earnings.fixedOvertimeAllowance + earnings.holidayAllowance + earnings.businessAllowance + earnings.overtimePremium + earnings.nightPremium + earnings.otherTaxable - earnings.absenceDeduction - earnings.lateEarlyDeduction;
+  earnings.taxableTotal = earnings.baseSalary + earnings.directorCompensation + earnings.positionAllowance + earnings.skillAllowance + earnings.fixedOvertimeAllowance + earnings.fixedOvertimeSupplement + earnings.otherFixedAllowance + earnings.holidayAllowance + earnings.overtimePremium + earnings.nightPremium + earnings.otherTaxable - earnings.absenceDeduction - earnings.lateEarlyDeduction;
   earnings.nonTaxableTotal = earnings.transportation + earnings.otherNonTaxable;
   earnings.grossTotal = earnings.taxableTotal + earnings.nonTaxableTotal;
   const deductions = { ...result.deductions, otherDeduction };
@@ -420,7 +464,7 @@ export function applyFixedPayrollAdjustment(result: PayrollResult, adjustment: F
     netPay,
     bankTransfer: result.paymentMethod === "bank" ? netPay : 0,
     cashPayment: result.paymentMethod === "cash" ? netPay : 0,
-    fixedAdjustment: { ...adjustment, overtimeMinutes, temporaryAttendanceCount, holidayAllowanceOverride: adjustment.holidayAllowanceOverride ?? null, overrideReason: adjustment.overrideReason?.trim() ?? "", automaticOvertimeAllowance },
+    fixedAdjustment: { ...adjustment, overtimeMinutes, temporaryAttendanceCount, holidayAllowanceOverride: adjustment.holidayAllowanceOverride ?? null, overrideReason: adjustment.overrideReason?.trim() ?? "", automaticOvertimeAllowance, overtimeWithinFixedMinutes, excessOvertimeMinutes },
     issues: additionalIssues.length > 0 ? [...result.issues, ...additionalIssues] : result.issues,
   };
 }

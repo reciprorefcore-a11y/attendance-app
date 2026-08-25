@@ -3,6 +3,7 @@ import type { FirestoreRest } from "./firebase-rest.ts";
 import { buildAttendanceRows, type CalculationClockLog } from "./attendance-calculation.ts";
 import { applyFixedPayrollAdjustment, calculatePayroll, isPayrollMonthClosed, resolvePayrollType, summarizePayroll, validatePayrollInput, type FixedPayrollAdjustment, type PayrollAttendanceDay, type PayrollEmployee, type PayrollResult, type ResidentTaxHistoryEntry } from "./payroll.ts";
 import { sortPayrollResults } from "./payroll-order.ts";
+import { resolveEffectiveHistory } from "./fulltime-master.ts";
 
 const FIXED_PAYROLL_TEMPLATE: Record<string, Partial<PayrollEmployee>> = {
   "0002": { directorCompensation: 150000, healthInsurance: 7440, childSupportContribution: 172, careInsurance: 1215, employeePension: 13725, employmentInsurance: 0, residentTax: 12600, paymentMethod: "cash" as const },
@@ -57,8 +58,13 @@ export async function loadPayrollSource(db: FirestoreRest, targetMonth: string) 
       emp.fixedBaseSalary = prev.earnings.baseSalary;
       emp.directorCompensation = prev.earnings.directorCompensation;
       emp.positionAllowance = prev.earnings.positionAllowance;
+      emp.skillAllowance = prev.earnings.skillAllowance ?? 0;
       emp.fixedOvertimeAllowance = prev.earnings.fixedOvertimeAllowance;
+      emp.fixedOvertimeSupplement = prev.earnings.fixedOvertimeSupplement ?? 0;
       emp.businessAllowance = prev.earnings.businessAllowance;
+      emp.otherFixedAllowance = prev.earnings.otherFixedAllowance ?? 0;
+      emp.otherFixedAllowanceName = prev.earnings.otherFixedAllowanceName ?? "";
+      emp.fixedOvertimeHours = prev.fixedOvertimeHoursSnapshot ?? null;
       emp.monthlyTransportation = prev.earnings.transportation;
       emp.healthInsurance = prev.deductions.healthInsurance;
       emp.childSupportContribution = prev.deductions.childSupportContribution;
@@ -75,7 +81,11 @@ export async function loadPayrollSource(db: FirestoreRest, targetMonth: string) 
   // 明示保存された固定給与マスターは、前月引継ぎ値より優先する。
   for (const emp of employees) {
     const savedSettings = payrollSettings.get(emp.id);
-    if (savedSettings && resolvePayrollType(emp) === "fixed") Object.assign(emp, savedSettings);
+    if (savedSettings && resolvePayrollType(emp) === "fixed") {
+      Object.assign(emp, savedSettings);
+      const salary = resolveEffectiveHistory(savedSettings.fixedSalaryHistory, targetMonth) as Record<string,unknown>|null;
+      if (salary) Object.assign(emp, { fixedBaseSalary:salary.baseSalary, directorCompensation:salary.directorCompensation, positionAllowance:salary.positionAllowance, skillAllowance:salary.skillAllowance, fixedOvertimeAllowance:salary.fixedOvertimeAllowance, fixedOvertimeSupplement:salary.fixedOvertimeSupplement, fixedOvertimeHours:salary.fixedOvertimeHours, otherFixedAllowance:salary.otherFixedAllowance, otherFixedAllowanceName:salary.otherFixedAllowanceName, businessAllowance:0 });
+    }
   }
   for (let index = 0; index < employees.length; index += 1) employees[index] = resolveResidentTaxForMonth(employees[index], targetMonth);
   const employeeIds = new Set(employees.map((item) => item.id));
@@ -147,12 +157,17 @@ export async function confirmPayrollRun(db: FirestoreRest, uid: string, draft: A
  */
 export function normalizePayrollResult(raw: Record<string, unknown>): PayrollResult {
   const typed = raw as Partial<PayrollResult>;
+  const oldEarnings = typed.earnings as PayrollResult["earnings"] | undefined;
+  const legacyBusiness = Number(oldEarnings?.businessAllowance) || 0;
+  const legacyFixed = Number(oldEarnings?.fixedOvertimeAllowance) || 0;
+  const isNewBreakdown=oldEarnings?.skillAllowance!=null||oldEarnings?.fixedOvertimeSupplement!=null;
+  const earnings = oldEarnings ? { ...oldEarnings, positionAllowance:isNewBreakdown?(oldEarnings.positionAllowance??0):0, skillAllowance: isNewBreakdown?(oldEarnings.skillAllowance??0):(oldEarnings.positionAllowance??0), fixedOvertimeAllowance: legacyBusiness > 0 ? legacyBusiness : legacyFixed, fixedOvertimeSupplement:isNewBreakdown?(oldEarnings.fixedOvertimeSupplement??0):(legacyBusiness>0?legacyFixed:0), businessAllowance: 0, otherFixedAllowance: oldEarnings.otherFixedAllowance ?? 0, otherFixedAllowanceName: oldEarnings.otherFixedAllowanceName ?? "" } : oldEarnings;
   const reimbursements = typed.reimbursements ?? { expenseReimbursement: 0, total: 0 };
   const netPay = Number(typed.netPay) || 0;
   const payrollNetPay = typed.payrollNetPay ?? netPay;
   const employeeType = typed.employeeType ?? (typed.payrollType === "fixed" ? "fullTime" : "partTime");
   const base = employeeType === "fullTime" ? { storeId: "", storeName: "所属なし" } : {};
-  return { ...typed, ...base, employeeType, reimbursements, payrollNetPay, netPay } as PayrollResult;
+  return { ...typed, ...base, employeeType, earnings, reimbursements, payrollNetPay, netPay, fixedOvertimeHoursSnapshot: typed.fixedOvertimeHoursSnapshot ?? null } as PayrollResult;
 }
 
 export async function loadPayrollRun(db: FirestoreRest, runId: string) {
@@ -176,8 +191,9 @@ export async function loadPayrollWorkspace(db: FirestoreRest, targetMonth: strin
     holidayAllowanceBaseSalary: null,
     holidayAllowanceCalculationBasis: (Number(employee.fixedBaseSalary) || 0) > 0 ? Number(employee.fixedBaseSalary) : null,
     directorCompensation: employee.directorCompensation ?? 0,
-    positionAllowance: employee.positionAllowance ?? 0, businessAllowance: employee.businessAllowance ?? 0,
-    fixedOvertimeAllowance: employee.fixedOvertimeAllowance ?? 0,
+    positionAllowance: employee.positionAllowance ?? 0, skillAllowance: employee.skillAllowance ?? 0, businessAllowance: employee.businessAllowance ?? 0,
+    fixedOvertimeAllowance: employee.fixedOvertimeAllowance ?? 0, fixedOvertimeSupplement: employee.fixedOvertimeSupplement ?? 0,
+    fixedOvertimeHours: employee.fixedOvertimeHours ?? null, otherFixedAllowance: employee.otherFixedAllowance ?? 0, otherFixedAllowanceName: employee.otherFixedAllowanceName ?? "",
     healthInsurance: employee.healthInsurance ?? null, childSupportContribution: employee.childSupportContribution ?? null,
     careInsurance: employee.careInsurance ?? null, employeePension: employee.employeePension ?? null,
     employmentInsurance: employee.employmentInsurance ?? null, incomeTax: employee.incomeTax ?? null,
@@ -191,7 +207,7 @@ export async function saveFixedPayrollMaster(db: FirestoreRest, employeeId: stri
   if (!employee.exists) throw new Error("employee_not_found");
   const data = employee.data();
   if (resolvePayrollType({ id: employee.id, ...data } as PayrollEmployee) !== "fixed") throw new Error("not_fixed_employee");
-  const numericFields = ["fixedBaseSalary", "directorCompensation", "positionAllowance", "businessAllowance", "fixedOvertimeAllowance", "healthInsurance", "childSupportContribution", "careInsurance", "employeePension", "employmentInsurance", "incomeTax", "residentTax"];
+  const numericFields = ["fixedBaseSalary", "directorCompensation", "positionAllowance", "skillAllowance", "businessAllowance", "fixedOvertimeAllowance", "fixedOvertimeSupplement", "otherFixedAllowance", "healthInsurance", "childSupportContribution", "careInsurance", "employeePension", "employmentInsurance", "incomeTax", "residentTax"];
   const saved = Object.fromEntries(numericFields.map((field) => [field, Math.max(0, Math.trunc(Number(values[field]) || 0))]));
   const transportationType = ["daily", "monthly", "none"].includes(String(values.transportationType)) ? values.transportationType : "none";
   const batch = db.batch();
