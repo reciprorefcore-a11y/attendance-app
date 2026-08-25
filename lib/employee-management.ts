@@ -1,7 +1,7 @@
 import { isFullTimeEmployee, type EmployeeClassificationFields } from "./employee-classification.ts";
 
 export const EMPLOYEE_REASON_OPTIONS = ["退職","長期休職","登録誤り","所属店舗変更","時給改定","交通費変更","本人申告","管理者確認","その他"] as const;
-export type EmployeeAction = "edit"|"deactivate"|"reactivate"|"delete"|"restore";
+export type EmployeeAction = "edit"|"deactivate"|"reactivate"|"delete";
 export type EmployeeActor = {role?:unknown;storeId?:unknown;storeIds?:unknown;name?:unknown};
 export type ManagedEmployee = EmployeeClassificationFields & {storeId?:string|null;status?:string|null;isActive?:boolean|null;[key:string]:unknown};
 export type EmployeeChange = {field:string;label:string;before:unknown;after:unknown};
@@ -28,8 +28,7 @@ export function buildEmployeeChanges(before:ManagedEmployee,after:Record<string,
 export function employeeActionUpdate(action:Exclude<EmployeeAction,"edit">,actorUid:string,reason:string,now:Date){
   if(action==="deactivate")return {status:"inactive",isActive:false,deactivatedAt:now,deactivatedBy:actorUid,deactivationReason:reason};
   if(action==="reactivate")return {status:"active",isActive:true,isDeleted:false,reactivatedAt:now,reactivatedBy:actorUid,reactivationReason:reason,employeeType:"partTime",employmentType:"part_time",payrollType:"hourly"};
-  if(action==="delete")return {isDeleted:true,status:"inactive",isActive:false,deletedAt:now,deletedBy:actorUid,deletionReason:reason};
-  return {isDeleted:false,status:"inactive",isActive:false,restoredAt:now,restoredBy:actorUid,restorationReason:reason,employeeType:"partTime",employmentType:"part_time",payrollType:"hourly"};
+  return {isDeleted:true,status:"deleted",isActive:false,payrollEnabled:false,clockEnabled:false,pin:null,deletedAt:now,deletedBy:actorUid,deletionReason:reason,personalDataPurgedAt:now};
 }
 export function classifyPartTimeEmployee(employee:ManagedEmployee){
   if(employee.isDeleted===true)return "deleted" as const;

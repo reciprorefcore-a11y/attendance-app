@@ -21,6 +21,10 @@ export async function POST(request: NextRequest) {
   if (!name || !email || password.length < 6 || !reason || !ACCOUNT_ROLES.includes(role)) return NextResponse.json({ error: "氏名、メールアドレス、6文字以上の初期パスワード、権限、登録理由を確認してください。" }, { status: 400 });
   if (role === "manager" && storeIds.length !== 1) return NextResponse.json({ error: "店舗マネージャーは担当店舗を1店舗指定してください。" }, { status: 400 });
   if ((role === "area_manager" || role === "fc_manager") && storeIds.length === 0) return NextResponse.json({ error: "担当店舗を指定してください。" }, { status: 400 });
+  if (role === "fc_manager") {
+    const selectedStores = await Promise.all(storeIds.map(storeId => authenticated.db.collection("stores").doc(storeId).get()));
+    if (selectedStores.some(store => !store.exists || store.data().isFc !== true)) return NextResponse.json({ error: "FCマネージャーにはFC対象店舗だけを指定してください。" }, { status: 400 });
+  }
   const adminAuth = getAdminAuth();
   if (!adminAuth) return NextResponse.json({ error: "アカウント作成機能を利用できません。" }, { status: 503 });
   const created = await adminAuth.createUser({ email, password, displayName: name, disabled: false });

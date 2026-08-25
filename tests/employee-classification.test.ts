@@ -46,7 +46,8 @@ test("admin削除処理はサーバーAPIを使用して正社員を拒否する
   assert.match(operationBlock, /\/api\/employees\/\$\{employee\.id\}/);
   assert.doesNotMatch(operationBlock, /updateDoc|deleteDoc/);
   assert.match(source, /!isFullTimeEmployee\(employee\)/);
-  assert.match(source, /state==="deleted"[\s\S]*復元/);
+  assert.match(source, /employee\.isDeleted!==true/);
+  assert.doesNotMatch(source, /openEmployeeAction\(employee,"restore"\)/);
 });
 
 test("旧形式のアルバイトを編集・再有効化すると雇用区分を補完する", () => {
