@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyUserToken } from "@/lib/firebase-rest";
 import { getAdminAuth, getAdminDb } from "@/lib/firebase-admin";
+import { getAdminInitializationErrorCode } from "@/lib/firebase-admin";
 import { ACCOUNT_ROLES, accountChanges, isHeadquartersAdmin, type AccountRole } from "@/lib/account-management";
+import { AccountDeleteError, deleteAdministratorAccount } from "@/lib/account-deletion";
 
 export const runtime = "nodejs";
 
@@ -50,15 +52,28 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ u
 }
 
 export async function DELETE(request:NextRequest,context:{params:Promise<{uid:string}>}){
-  const authenticated=await authorize(request);if(!authenticated)return NextResponse.json({error:"本部管理者権限が必要です。"},{status:403});
-  const {uid}=await context.params,body=await request.json().catch(()=>null) as Record<string,unknown>|null,reason=String(body?.reason??"").trim(),emailConfirmation=String(body?.emailConfirmation??"").trim();
-  if(!uid||uid===authenticated.uid)return NextResponse.json({error:"現在ログイン中の自分自身は削除できません。"},{status:409});
-  const ref=authenticated.db.collection("users").doc(uid),snapshot=await ref.get();if(!snapshot.exists)return NextResponse.json({error:"対象UIDを確認できません。"},{status:404});
-  const account=snapshot.data(),email=String(account.email??"");if(!reason||!email||emailConfirmation!==email)return NextResponse.json({error:"修正理由と削除対象メールアドレスを確認してください。"},{status:400});
-  if(account.role==="admin"){const admins=await authenticated.db.collection("users").where("role","==","admin").get(),activeAdmins=admins.docs.filter(doc=>{const data=doc.data();return data.status!=="inactive"&&data.isActive!==false;});if(activeAdmins.length<=1)return NextResponse.json({error:"最後の本部管理者は削除できません。"},{status:409});}
-  const adminAuth=getAdminAuth(),adminDb=getAdminDb();if(!adminAuth||!adminDb)return NextResponse.json({error:"完全削除機能を利用できません。"},{status:503});
-  try{await adminAuth.updateUser(uid,{disabled:true});await adminAuth.revokeRefreshTokens(uid);}catch{return NextResponse.json({error:"認証アカウントとセッションを無効化できなかったため、削除を開始していません。"},{status:502});}
-  try{await adminDb.runTransaction(async transaction=>{transaction.set(adminDb.collection("auditLogs").doc(),{targetType:"managementAccount",targetUid:uid,action:"完全削除",accountSnapshot:{name:String(account.name??""),email,role:String(account.role??""),storeId:String(account.storeId??""),storeIds:Array.isArray(account.storeIds)?account.storeIds:[]},reason,performedBy:authenticated.uid,performedByName:String(authenticated.profile.name??""),performedAt:new Date()});transaction.delete(adminDb.collection("users").doc(uid));});}catch{await adminAuth.updateUser(uid,{disabled:false}).catch(()=>undefined);return NextResponse.json({error:"管理データを削除できなかったため、認証アカウントを再有効化しました。再度実行してください。"},{status:500});}
-  try{await adminAuth.deleteUser(uid);}catch{return NextResponse.json({error:"管理データは削除済みですが認証アカウントは無効状態で残っています。対象UIDを指定して認証アカウント削除を再実行してください。"},{status:500});}
-  return NextResponse.json({ok:true,uid});
+  const authenticated=await verifyUserToken(request.headers.get("authorization"));
+  if(!authenticated)return NextResponse.json({error:"認証が必要です",code:"AUTH_REQUIRED"},{status:401});
+  if(!isHeadquartersAdmin(authenticated.profile))return NextResponse.json({error:"本部管理者のみ削除できます",code:"HQ_ADMIN_REQUIRED"},{status:403});
+  const {uid}=await context.params,body=await request.json().catch(()=>null) as Record<string,unknown>|null;
+  const adminAuth=getAdminAuth(),adminDb=getAdminDb();
+  if(!adminAuth||!adminDb){const code=getAdminInitializationErrorCode()??"ADMIN_SDK_UNAVAILABLE";console.error(JSON.stringify({event:"account_delete_failed",errorCode:code,targetUid:uid,performedBy:authenticated.uid}));return NextResponse.json({error:"削除機能のサーバー設定を確認してください",code},{status:503});}
+  try{
+    const result=await deleteAdministratorAccount({targetUid:uid,confirmationEmail:String(body?.confirmationEmail??""),reason:String(body?.reason??""),performedBy:authenticated.uid},{
+      now:()=>new Date(),
+      getAccount:async targetUid=>{const snapshot=await adminDb.collection("users").doc(targetUid).get();if(!snapshot.exists)return null;const data=snapshot.data()!;return{uid:targetUid,name:String(data.name??""),email:String(data.email??""),role:String(data.role??""),storeIds:Array.isArray(data.storeIds)?data.storeIds.map(String):data.storeId?[String(data.storeId)]:[],status:String(data.status??""),isActive:data.isActive!==false,deletionStatus:String(data.deletionStatus??"")};},
+      countActiveHqAdmins:async()=>{const admins=await adminDb.collection("users").where("role","in",["admin","hq_admin"]).get();return admins.docs.filter(doc=>{const data=doc.data();return data.status!=="inactive"&&data.isActive!==false;}).length;},
+      getAuthEmail:async targetUid=>{try{return(await adminAuth.getUser(targetUid)).email??null;}catch(error){if((error as {code?:string}).code==="auth/user-not-found")return null;throw error;}},
+      createAudit:async record=>{const ref=adminDb.collection("auditLogs").doc();await ref.create(record);return ref.id;},
+      updateAudit:async(auditId,patch)=>{await adminDb.collection("auditLogs").doc(auditId).update(patch);},
+      deleteAuthUser:targetUid=>adminAuth.deleteUser(targetUid),
+      deleteUserRecord:async targetUid=>{await adminDb.collection("users").doc(targetUid).delete();},
+      markUserPending:async(targetUid,patch)=>{await adminDb.collection("users").doc(targetUid).set(patch,{merge:true});},
+    });
+    return NextResponse.json(result);
+  }catch(error){
+    const known=error instanceof AccountDeleteError,errorCode=known?error.code:"ACCOUNT_DELETE_UNEXPECTED",status=known?error.status:500,message=known?error.publicMessage:"削除に失敗しました。再度お試しください";
+    console.error(JSON.stringify({event:"account_delete_failed",errorCode,targetUid:uid,performedBy:authenticated.uid}));
+    return NextResponse.json({error:message,code:errorCode},{status});
+  }
 }

@@ -7,6 +7,7 @@ const read=(path:string)=>readFileSync(new URL(path,import.meta.url),"utf8");
 
 test("本部管理者だけがアカウント管理を利用できる",()=>{
   assert.equal(isHeadquartersAdmin({role:"admin"}),true);
+  assert.equal(isHeadquartersAdmin({role:"hq_admin"}),true);
   for(const role of ["manager","area_manager","fc_manager","staff"])assert.equal(isHeadquartersAdmin({role}),false);
   const admin=read("../app/admin/page.tsx"),page=read("../app/hq/accounts/page.tsx"),api=read("../app/api/accounts/route.ts"),update=read("../app/api/accounts/[uid]/route.ts");
   assert.match(admin,/isAdmin&&tab\.id==="employees"&&<Link href="\/hq\/accounts"/);
@@ -40,12 +41,11 @@ test("アカウントAPIはemployeesを変更せず、完全削除は監査ロ�
   assert.doesNotMatch(sources,/collection\("employees"\)/);
   assert.match(sources,/changeHistory/);
   assert.match(sources,/collection\("auditLogs"\)/);
-  assert.match(sources,/uid===authenticated\.uid/);
-  assert.match(sources,/activeAdmins\.length<=1/);
-  assert.match(sources,/adminAuth\.updateUser\(uid,\{disabled:true\}\)/);
-  assert.match(sources,/adminAuth\.revokeRefreshTokens\(uid\)/);
-  assert.match(sources,/transaction\.delete\(adminDb\.collection\("users"\)\.doc\(uid\)\)/);
-  assert.match(sources,/adminAuth\.deleteUser\(uid\)/);
+  assert.match(sources,/targetUid:uid[\s\S]*performedBy:authenticated\.uid/);
+  assert.match(sources,/countActiveHqAdmins/);
+  assert.match(sources,/deleteAdministratorAccount/);
+  assert.match(sources,/deleteAuthUser:targetUid=>adminAuth\.deleteUser\(targetUid\)/);
+  assert.match(sources,/deleteUserRecord:async targetUid=>\{await adminDb\.collection\("users"\)\.doc\(targetUid\)\.delete\(\)/);
 });
 
 test("編集時のパスワード上書きはAdmin SDKだけを使い秘密値を履歴へ残さない",()=>{

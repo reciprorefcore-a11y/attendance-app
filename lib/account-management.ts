@@ -10,7 +10,7 @@ export const ACCOUNT_ROLE_LABELS: Record<AccountRole | "staff", string> = {
 };
 
 export function isHeadquartersAdmin(profile: { role?: unknown } | null | undefined) {
-  return profile?.role === "admin";
+  return profile?.role === "admin" || profile?.role === "hq_admin";
 }
 
 export function sanitizeAccountRecord(uid: string, data: Record<string, unknown>) {
