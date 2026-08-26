@@ -17,31 +17,31 @@ export type AccountDeletionDeps={
   createAudit:(record:Record<string,unknown>)=>Promise<string>;
   updateAudit:(auditId:string,patch:Record<string,unknown>)=>Promise<void>;
   deleteAuthUser:(uid:string)=>Promise<void>;
-  deleteUserRecord:(uid:string)=>Promise<void>;
+  completeFirestoreDeletion:(uid:string,auditId:string,patch:Record<string,unknown>)=>Promise<void>;
   markUserPending:(uid:string,patch:Record<string,unknown>)=>Promise<void>;
 };
 
 export async function deleteAdministratorAccount(input:{targetUid:string;confirmationEmail:string;reason:string;performedBy:string},deps:AccountDeletionDeps){
   const reason=input.reason.trim();
-  if(!reason)throw new AccountDeleteError("REASON_REQUIRED",400,"削除理由を入力してください");
+  if(reason.length<2)throw new AccountDeleteError("REASON_REQUIRED",400,"削除理由は2文字以上で入力してください");
   if(input.targetUid===input.performedBy)throw new AccountDeleteError("SELF_DELETE_FORBIDDEN",409,"現在ログイン中のアカウントは削除できません");
   const account=await deps.getAccount(input.targetUid);
   if(!account)throw new AccountDeleteError("ACCOUNT_NOT_FOUND",404,"対象アカウントが見つかりません");
-  if(account.role==="admin"||account.role==="hq_admin"){
+  if((account.role==="admin"||account.role==="hq_admin")&&account.status!=="inactive"&&account.isActive!==false){
     if(await deps.countActiveHqAdmins()<=1)throw new AccountDeleteError("LAST_HQ_ADMIN_FORBIDDEN",409,"最後の本部管理者は削除できません");
   }
   const authAlreadyDeleted=account.deletionStatus==="auth_deleted_firestore_pending";
   const authEmail=authAlreadyDeleted?account.email:await deps.getAuthEmail(input.targetUid);
   if(!authEmail)throw new AccountDeleteError("AUTH_ACCOUNT_NOT_FOUND",404,"認証アカウントが見つかりません");
   if(input.confirmationEmail!==authEmail)throw new AccountDeleteError("CONFIRMATION_EMAIL_MISMATCH",400,"確認用メールアドレスが一致しません");
-  const plannedAt=deps.now(),auditRecord={action:"account_deleted",status:"planned",targetUid:account.uid,targetName:account.name,targetEmail:account.email,previousRole:account.role,previousStoreIds:account.storeIds,reason,performedBy:input.performedBy,performedAt:plannedAt};
+  const plannedAt=deps.now(),auditRecord={action:"deletion_started",status:"started",targetUid:account.uid,targetName:account.name,targetEmail:account.email,previousRole:account.role,previousStoreIds:account.storeIds,reason,performedBy:input.performedBy,performedAt:plannedAt};
   let auditId:string;
   try{auditId=await deps.createAudit(auditRecord);}catch{throw new AccountDeleteError("AUDIT_CREATE_FAILED",500,"削除に失敗しました。再度お試しください");}
   if(!authAlreadyDeleted){
     try{await deps.deleteAuthUser(input.targetUid);await deps.updateAudit(auditId,{status:"auth_deleted",authDeletedAt:deps.now()});}
     catch{await deps.updateAudit(auditId,{status:"auth_delete_failed",errorCode:"AUTH_DELETE_FAILED",failedAt:deps.now()}).catch(()=>undefined);throw new AccountDeleteError("AUTH_DELETE_FAILED",502,"削除に失敗しました。再度お試しください");}
   }
-  try{await deps.deleteUserRecord(input.targetUid);await deps.updateAudit(auditId,{status:"completed",completedAt:deps.now()});}
+  try{await deps.completeFirestoreDeletion(input.targetUid,auditId,{action:"account_deleted",status:"completed",completedAt:deps.now()});}
   catch{
     await deps.markUserPending(input.targetUid,{deletionStatus:"auth_deleted_firestore_pending",isActive:false,status:"inactive",deletionAuditId:auditId,updatedAt:deps.now()}).catch(()=>undefined);
     await deps.updateAudit(auditId,{status:"firestore_pending",errorCode:"FIRESTORE_DELETE_PENDING",failedAt:deps.now()}).catch(()=>undefined);

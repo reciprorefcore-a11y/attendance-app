@@ -45,7 +45,7 @@ test("アカウントAPIはemployeesを変更せず、完全削除は監査ロ�
   assert.match(sources,/countActiveHqAdmins/);
   assert.match(sources,/deleteAdministratorAccount/);
   assert.match(sources,/deleteAuthUser:targetUid=>adminAuth\.deleteUser\(targetUid\)/);
-  assert.match(sources,/deleteUserRecord:async targetUid=>\{await adminDb\.collection\("users"\)\.doc\(targetUid\)\.delete\(\)/);
+  assert.match(sources,/completeFirestoreDeletion:[\s\S]*transaction\.delete\(adminDb\.collection\("users"\)\.doc\(targetUid\)\)/);
 });
 
 test("編集時のパスワード上書きはAdmin SDKだけを使い秘密値を履歴へ残さない",()=>{

@@ -67,7 +67,7 @@ export async function DELETE(request:NextRequest,context:{params:Promise<{uid:st
       createAudit:async record=>{const ref=adminDb.collection("auditLogs").doc();await ref.create(record);return ref.id;},
       updateAudit:async(auditId,patch)=>{await adminDb.collection("auditLogs").doc(auditId).update(patch);},
       deleteAuthUser:targetUid=>adminAuth.deleteUser(targetUid),
-      deleteUserRecord:async targetUid=>{await adminDb.collection("users").doc(targetUid).delete();},
+      completeFirestoreDeletion:async(targetUid,auditId,patch)=>{await adminDb.runTransaction(async transaction=>{transaction.delete(adminDb.collection("users").doc(targetUid));transaction.update(adminDb.collection("auditLogs").doc(auditId),patch);});},
       markUserPending:async(targetUid,patch)=>{await adminDb.collection("users").doc(targetUid).set(patch,{merge:true});},
     });
     return NextResponse.json(result);
