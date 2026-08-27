@@ -6,7 +6,7 @@ import {
   assertSucceeds,
   initializeTestEnvironment,
 } from "@firebase/rules-unit-testing";
-import { doc, getDoc, serverTimestamp, setDoc, writeBatch } from "firebase/firestore";
+import { deleteDoc, doc, getDoc, serverTimestamp, setDoc, updateDoc, writeBatch } from "firebase/firestore";
 
 let environment;
 
@@ -129,6 +129,50 @@ test("clock page can read clock logs even while signed in", async () => {
   });
   const firestore = environment.authenticatedContext("staff-user").firestore();
   await assertSucceeds(getDoc(doc(firestore, "clockLogs", "punch-1")));
+});
+
+test("clockLogs physical delete is denied for staff, manager, and admin", async () => {
+  await environment.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(context.firestore(), "clockLogs", "delete-target"), {
+      employeeId: "employee-1", storeId: "store-a", type: "clock_in", isCancelled: true,
+    });
+  });
+  for (const uid of ["staff-user", "manager-user", "admin-user"]) {
+    const firestore = environment.authenticatedContext(uid).firestore();
+    await assertFails(deleteDoc(doc(firestore, "clockLogs", "delete-target")));
+  }
+  await environment.withSecurityRulesDisabled(async (context) => {
+    assert.equal((await getDoc(doc(context.firestore(), "clockLogs", "delete-target"))).exists(), true);
+  });
+});
+
+test("normal clock punch create remains allowed", async () => {
+  const firestore = environment.unauthenticatedContext().firestore();
+  await assertSucceeds(setDoc(doc(firestore, "clockLogs", "normal-punch"), {
+    employeeId: "employee-1", storeId: "store-a", type: "clock_in", timestamp: serverTimestamp(),
+  }));
+});
+
+test("manager can logically cancel own-store clockLogs", async () => {
+  await environment.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(context.firestore(), "clockLogs", "cancel-target"), {
+      employeeId: "employee-1", storeId: "store-a", type: "clock_out", isCancelled: false,
+    });
+  });
+  const firestore = environment.authenticatedContext("manager-user").firestore();
+  await assertSucceeds(updateDoc(doc(firestore, "clockLogs", "cancel-target"), {
+    isCancelled: true, cancellationReason: "fixture取消", cancelledBy: "manager-user", cancelledAt: serverTimestamp(),
+  }));
+});
+
+test("manager cannot update another store clockLogs", async () => {
+  await environment.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(context.firestore(), "clockLogs", "other-store-target"), {
+      employeeId: "employee-2", storeId: "store-b", type: "clock_in",
+    });
+  });
+  const firestore = environment.authenticatedContext("manager-user").firestore();
+  await assertFails(updateDoc(doc(firestore, "clockLogs", "other-store-target"), { isCancelled: true }));
 });
 
 test("clock state accepts valid atomic state and rejects malformed state", async () => {

@@ -9,6 +9,7 @@ const menus = [
   { href: "/hq/stores", label: "店舗管理" },
   { href: "/hq/wages", label: "時給管理" },
   { href: "/hq/payroll", label: "給与管理" },
+  { href: "/hq/attendance-backups", label: "打刻バックアップ" },
   { href: "/hq/employees/import", label: "CSVスタッフ取込" },
 ];
 

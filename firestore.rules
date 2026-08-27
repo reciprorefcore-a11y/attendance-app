@@ -88,7 +88,9 @@ service cloud.firestore {
     // 作成：誰でも可（未認証の QR 打刻）。storeId が文字列であることを最低限検証。
     // 読み取り：打刻ページはログイン状態にかかわらず直前打刻を取得するため許可。
     // 更新（打刻修正・論理削除）：admin・fc_manager・area_manager（担当店舗）、manager（自店舗のみ）
-    // 物理削除：admin のみ
+    // 物理削除：全クライアントで禁止。取消は isCancelled を設定する update だけを使う。
+    // Firebase Admin SDK は Rules を迂回するため、将来のCloud Run復元もサーバー側で
+    // 書込み先を clockLogs/{documentId} に固定し、任意パスを受け取らないこと。
     match /clockLogs/{logId} {
       allow create: if request.resource.data.storeId is string
                     && request.resource.data.storeId.size() > 0;
@@ -97,7 +99,7 @@ service cloud.firestore {
                     || (isFcManager() && resource.data.storeId in myStoreIds())
                     || (isAreaManager() && resource.data.storeId in myStoreIds())
                     || (isManager() && resource.data.storeId == myStoreId());
-      allow delete: if isAdmin();
+      allow delete: if false;
     }
 
     // 打刻ページの原子的な状態遷移にだけ使用する。個人情報は保持しない。
