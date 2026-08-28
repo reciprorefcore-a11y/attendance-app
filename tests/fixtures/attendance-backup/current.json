@@ -1,0 +1,7 @@
+{
+  "documents": [
+    {"id":"changed","data":{"employeeId":"fixture-e1","storeId":"fixture-s1","type":"clock_out","timestamp":{"seconds":1785542400,"nanoseconds":0},"note":"new"}},
+    {"id":"same","data":{"employeeId":"fixture-e2","storeId":"fixture-s1","type":"clock_in","timestamp":{"seconds":1785596400,"nanoseconds":0},"isCancelled":true}},
+    {"id":"current-only","data":{"employeeId":"fixture-e3","storeId":"fixture-s1","type":"clock_in","timestamp":{"seconds":1785682800,"nanoseconds":0}}}
+  ]
+}

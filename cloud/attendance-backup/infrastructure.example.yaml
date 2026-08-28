@@ -1,0 +1,26 @@
+projectId: fublev-attendance
+region: asia-northeast1
+bucket:
+  name: SET_AT_PROVISIONING_TIME_ONLY
+  location: asia-northeast1
+  storageClass: STANDARD
+  uniformBucketLevelAccess: true
+  publicAccessPrevention: enforced
+  lifecycle:
+    - action: Delete
+      condition: { age: 35, matchesPrefix: ["attendance-backups/"] }
+    - action: Delete
+      condition: { age: 2, matchesPrefix: ["attendance-backups/.tmp/", "attendance-backups/.locks/"] }
+cloudRunJob:
+  tasks: 1
+  parallelism: 1
+  maxRetries: 0
+  serviceAccount: attendance-backup-job@fublev-attendance.iam.gserviceaccount.com
+  environment:
+    ATTENDANCE_BACKUP_BUCKET: SET_AT_PROVISIONING_TIME_ONLY
+scheduler:
+  schedule: "0 1 * * *"
+  timezone: Asia/Tokyo
+  authentication: OAuth
+  target: Cloud Run Jobs v2 run API
+  serviceAccount: attendance-backup-scheduler@fublev-attendance.iam.gserviceaccount.com
