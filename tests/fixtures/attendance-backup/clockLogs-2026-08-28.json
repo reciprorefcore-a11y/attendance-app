@@ -12,5 +12,6 @@
     {"id":"missing","data":{"employeeId":"fixture-e1","storeId":"fixture-s1","type":"clock_in","timestamp":{"__type":"firestore_timestamp","seconds":1785510000,"nanoseconds":0}}},
     {"id":"changed","data":{"employeeId":"fixture-e1","storeId":"fixture-s1","type":"clock_out","timestamp":{"__type":"firestore_timestamp","seconds":1785542400,"nanoseconds":0},"note":"old"}},
     {"id":"same","data":{"employeeId":"fixture-e2","storeId":"fixture-s1","type":"clock_in","timestamp":{"__type":"firestore_timestamp","seconds":1785596400,"nanoseconds":0},"isCancelled":true}}
-  ]
+  ],
+  "payloadSha256": "391d9ed77573d4099eed49a70a4b3c9019629ea32c1896092f3bdf9a058f2514"
 }

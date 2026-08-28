@@ -16,5 +16,6 @@ console.log(JSON.stringify({...summary,mode:apply?"apply":"dry-run",payrollRecal
 const decode=(value:unknown):unknown=>{if(Array.isArray(value))return value.map(decode);if(value&&typeof value==="object"){const item=value as Partial<SerializedTimestamp>;if(item.__type==="firestore_timestamp"&&typeof item.seconds==="number"&&typeof item.nanoseconds==="number")return new Timestamp(item.seconds,item.nanoseconds);return Object.fromEntries(Object.entries(value as Record<string,unknown>).map(([key,nested])=>[key,decode(nested)]));}return value;};
 const writes=buildRestoreWrites(diff,selectedIds,apply);
 if(writes.length&&!db)throw new Error("FIRESTORE_NOT_INITIALIZED");
-for(let offset=0;offset<writes.length;offset+=400){const batch=db!.batch();for(const write of writes.slice(offset,offset+400)){const id=write.path.slice("clockLogs/".length);batch.set(db!.collection("clockLogs").doc(id),decode(write.data) as Record<string,unknown>);}await batch.commit();}
+if(writes.length>400)throw new Error("RESTORE_SELECTION_TOO_LARGE");
+if(writes.length){const batch=db!.batch();for(const write of writes){const id=write.path.slice("clockLogs/".length);batch.create(db!.collection("clockLogs").doc(id),decode(write.data) as Record<string,unknown>);}await batch.commit();}
 if(apply)console.log(JSON.stringify({status:"completed",writeCount:writes.length,payrollRecalculation:false}));

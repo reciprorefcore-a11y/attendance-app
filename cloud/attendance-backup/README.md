@@ -4,7 +4,7 @@ Cloud Run Jobとして1タスク・parallelism 1で実行する。公開HTTPエ�
 
 - cron: `0 1 * * *`
 - timezone: `Asia/Tokyo`
-- Firestore: `clockLogs` の当月分をread onlyで取得
+- Firestore: `clockLogs` の前月全体と当月1日から実行時点までをread onlyで取得し、月別のJSONとして独立保存
 - Storage: 専用非公開bucketの `attendance-backups/` prefixだけを利用
 - lifecycle: `age: 35` のDelete。`.tmp` と `.locks` は短期削除ルールを追加する
 - bucket: public access prevention `enforced`、uniform bucket-level access `true`
