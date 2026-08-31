@@ -26,6 +26,9 @@ before(async () => {
       role: "staff",
     });
     await setDoc(doc(context.firestore(), "users", "manager-user"), { role: "manager", storeId: "store-a" });
+    await setDoc(doc(context.firestore(), "employees", "history-admin"), { name: "fixture-admin", storeId: "store-b", employeeType: "partTime", status: "active" });
+    await setDoc(doc(context.firestore(), "employees", "history-manager"), { name: "fixture-manager", storeId: "store-a", employeeType: "partTime", status: "active" });
+    await setDoc(doc(context.firestore(), "employees", "history-other-store"), { name: "fixture-other", storeId: "store-b", employeeType: "partTime", status: "active" });
     await setDoc(
       doc(
         context.firestore(),
@@ -117,6 +120,32 @@ test("staff users cannot write wageHistory", async () => {
       hourlyWage: 9999,
     }),
   );
+});
+
+const historyData=(employeeId,storeId)=>({employeeId,storeId,action:"論理削除",effectiveFrom:"2026-08-31",reason:"その他：fixture",performedBy:"fixture-user",performedAt:serverTimestamp()});
+
+test("admin can atomically logically delete an employee and create changeHistory",async()=>{
+  const firestore=environment.authenticatedContext("admin-user").firestore(),batch=writeBatch(firestore);
+  batch.update(doc(firestore,"employees","history-admin"),{isDeleted:true,status:"deleted",isActive:false});
+  batch.set(doc(firestore,"employees","history-admin","changeHistory","history-1"),historyData("history-admin","store-b"));
+  await assertSucceeds(batch.commit());
+});
+
+test("manager can create deletion history only for an employee in own store",async()=>{
+  const firestore=environment.authenticatedContext("manager-user").firestore(),own=writeBatch(firestore);
+  own.update(doc(firestore,"employees","history-manager"),{isDeleted:true,status:"deleted",isActive:false});
+  own.set(doc(firestore,"employees","history-manager","changeHistory","history-1"),historyData("history-manager","store-a"));
+  await assertSucceeds(own.commit());
+  const other=writeBatch(firestore);
+  other.update(doc(firestore,"employees","history-other-store"),{isDeleted:true,status:"deleted",isActive:false});
+  other.set(doc(firestore,"employees","history-other-store","changeHistory","history-1"),historyData("history-other-store","store-b"));
+  await assertFails(other.commit());
+});
+
+test("employee changeHistory cannot be updated or physically deleted",async()=>{
+  const firestore=environment.authenticatedContext("admin-user").firestore(),ref=doc(firestore,"employees","history-admin","changeHistory","history-1");
+  await assertFails(updateDoc(ref,{reason:"改ざん"}));
+  await assertFails(deleteDoc(ref));
 });
 
 test("clock page can read clock logs even while signed in", async () => {

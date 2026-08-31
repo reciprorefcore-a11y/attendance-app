@@ -79,6 +79,22 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
+    // 従業員の編集・状態変更・論理削除と同じ transaction で作成する監査履歴。
+    // 親従業員の店舗と一致する履歴だけを許可し、更新・物理削除は許可しない。
+    match /employees/{employeeId}/changeHistory/{historyId} {
+      allow read: if isAdmin()
+                  || (isFcManager() && get(/databases/$(database)/documents/employees/$(employeeId)).data.storeId in myStoreIds())
+                  || (isAreaManager() && get(/databases/$(database)/documents/employees/$(employeeId)).data.storeId in myStoreIds())
+                  || (isManager() && get(/databases/$(database)/documents/employees/$(employeeId)).data.storeId == myStoreId());
+      allow create: if request.resource.data.employeeId == employeeId
+                    && request.resource.data.storeId == get(/databases/$(database)/documents/employees/$(employeeId)).data.storeId
+                    && (isAdmin()
+                        || (isFcManager() && request.resource.data.storeId in myStoreIds())
+                        || (isAreaManager() && request.resource.data.storeId in myStoreIds())
+                        || (isManager() && request.resource.data.storeId == myStoreId()));
+      allow update, delete: if false;
+    }
+
     // 現行 /admin の勤務日時点の概算人件費計算に使用する。
     match /employees/{employeeId}/wageHistory/{wageId} {
       allow read, write: if isAdmin();

@@ -19,6 +19,18 @@ export function validateEmployeeReason(reasonType:unknown,reasonDetail:unknown){
   if(reasonType==="その他"&&!String(reasonDetail??"").trim())return "その他の理由詳細を入力してください。";
   return null;
 }
+export function validateEmployeeEffectiveFrom(effectiveFrom:unknown){
+  const value=String(effectiveFrom??"");
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(value))return "適用開始日を正しく入力してください。";
+  const date=new Date(`${value}T00:00:00Z`);
+  if(Number.isNaN(date.getTime())||date.toISOString().slice(0,10)!==value)return "適用開始日を正しく入力してください。";
+  return null;
+}
+export function employeeOperationError(error:unknown){
+  const message=error instanceof Error?error.message:String(error);
+  if(/Firestore HTTP 403|permission-denied|insufficient permissions/i.test(message))return {status:500,code:"EMPLOYEE_HISTORY_PERMISSION_DENIED",error:"従業員の変更履歴を保存できません。管理者へFirestore権限の確認を依頼してください。"};
+  return {status:500,code:"EMPLOYEE_OPERATION_FAILED",error:"従業員情報の更新に失敗しました。再度お試しください。"};
+}
 export const formatEmployeeReason=(reasonType:unknown,reasonDetail:unknown)=>reasonType==="その他"?`その他：${String(reasonDetail).trim()}`:String(reasonType);
 
 const labels:Record<string,string>={name:"氏名",nameKana:"ふりがな",employeeCode:"社員コード",storeId:"所属店舗",baseWage:"基本時給",lateNightHourlyWage:"深夜時給",transportationType:"交通費区分",transportationCost:"交通費金額",payrollEnabled:"給与対象",clockEnabled:"打刻対象",status:"status"};
