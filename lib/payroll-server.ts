@@ -102,8 +102,8 @@ export async function loadPayrollSource(db: FirestoreRest, targetMonth: string) 
   const attendance: PayrollAttendanceDay[] = rows.map((row) => ({
     employeeId: row.employeeKey, date: row.date, workMinutes: row.workMinutes, overtimeMinutes: row.overtimeMinutes,
     nightMinutes: row.nightMinutes, helpMinutes: row.helpMinutes, breakMinutes: row.breakMinutes,
-    confirmed: !row.isMissingClockOut && row.diagnostics.length === 0,
-    warnings: [...row.diagnostics.map((item) => item.message), ...(row.isMissingClockOut ? ["退勤が打刻されていません"] : [])], kind: "daily",
+    confirmed: row.diagnostics.length === 0,
+    warnings: [...new Set(row.diagnostics.map((item) => item.message))], kind: "daily",
     dailyTransportationUnit: Math.max(0, ...row.logs.map((log) => Number(log.dailyTransportationAtWork ?? log.dailyTransportationSnapshot) || 0), Number(employeeById.get(row.employeeKey)?.dailyTransportation ?? (employeeById.get(row.employeeKey)?.transportationType === "daily" ? employeeById.get(row.employeeKey)?.transportationCost : 0)) || 0),
     dailyTransportationAmount: Math.max(0, ...row.logs.map((log) => Number(log.dailyTransportationAtWork ?? log.dailyTransportationSnapshot) || 0), Number(employeeById.get(row.employeeKey)?.dailyTransportation ?? (employeeById.get(row.employeeKey)?.transportationType === "daily" ? employeeById.get(row.employeeKey)?.transportationCost : 0)) || 0),
     clockIn: row.clockIn?.toISOString() ?? null,

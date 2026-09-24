@@ -298,9 +298,18 @@ export function validatePayrollInput(employees: PayrollEmployee[], attendance: P
       if (!employee.transportationType) issues.push({ severity: "warning", code: "missing_transportation_setting", employeeId: employee.id, message: `${employeeLabel(employee)}：交通費区分が未設定です` });
     }
   }
+  const employeeById = new Map(employees.map((employee) => [employee.id, employee]));
   for (const day of attendance.filter((item) => item.date.startsWith(targetMonth) && item.kind !== "total")) {
-    if (day.confirmed !== true) issues.push({ severity: "error", code: "attendance_unconfirmed", employeeId: day.employeeId, message: `${day.date}の勤怠が未確定です` });
-    for (const warning of day.warnings ?? []) issues.push({ severity: "error", code: "attendance_invalid", employeeId: day.employeeId, message: `${day.date}: ${warning}` });
+    const employee = employeeById.get(day.employeeId);
+    const label = employee ? employeeLabel(employee) : `社員コード不明 氏名不明（ID: ${day.employeeId}）`;
+    const stores = [...new Set((day.storeNames ?? []).filter(Boolean))];
+    const context = `${label}：${day.date}：${stores.length ? stores.join("、") : "店舗不明"}`;
+    const warnings = [...new Set((day.warnings ?? []).map((warning) => warning.trim()).filter(Boolean))];
+    if (warnings.length > 0) {
+      for (const warning of warnings) issues.push({ severity: "error", code: "attendance_invalid", employeeId: day.employeeId, message: `${context}：${warning}` });
+    } else if (day.confirmed !== true) {
+      issues.push({ severity: "error", code: "attendance_unconfirmed", employeeId: day.employeeId, message: `${context}：勤怠が未確定です` });
+    }
   }
   return issues;
 }

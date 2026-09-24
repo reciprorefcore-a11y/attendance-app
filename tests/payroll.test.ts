@@ -49,6 +49,27 @@ test("24時間未満の労働・深夜・出勤日数を倍にしない", () => 
   assert.deepEqual([result.attendance.workMinutes, result.attendance.nightMinutes, result.attendance.attendanceDays], [720, 120, 1]);
 });
 
+test("勤怠エラーは従業員・社員コード・日付・店舗を含み同一原因を重複しない", () => {
+  const target = employee("1001", { name: "テスト太郎", storeName: "所属店" });
+  const issues = validatePayrollInput([target], [day("1001", "2026-08-22", 0, {
+    confirmed: false,
+    warnings: ["応援店の退勤が打刻されていません", "応援店の退勤が打刻されていません"],
+    storeNames: ["応援店"],
+  })], "2026-08").filter((issue) => issue.code.startsWith("attendance_"));
+  assert.equal(issues.length, 1);
+  assert.equal(issues[0].code, "attendance_invalid");
+  for (const value of ["テスト太郎", "1001", "2026-08-22", "応援店"]) assert.match(issues[0].message, new RegExp(value));
+  assert.doesNotMatch(issues[0].message, /勤怠が未確定/);
+});
+
+test("警告のない未確定だけは従来どおり具体的な対象付きで拒否する", () => {
+  const target = employee("1002", { name: "テスト花子", storeName: "店舗C" });
+  const issues = validatePayrollInput([target], [day("1002", "2026-08-23", 0, { confirmed: false, warnings: [], storeNames: ["店舗C"] })], "2026-08");
+  const issue = issues.find((item) => item.code === "attendance_unconfirmed");
+  assert.ok(issue);
+  assert.match(issue.message, /1002 テスト花子：2026-08-23：店舗C：勤怠が未確定です/);
+});
+
 test("分数から1円未満四捨五入で時給・残業・深夜0.25割増を計算する", () => {
   const result = calculatePayrollEmployee(employee("1", { hourlyWage: 1225 }), [day("1", "2026-07-01", 61, { overtimeMinutes: 31, nightMinutes: 17 })]);
   assert.equal(result.earnings.baseSalary, 1245); assert.equal(result.earnings.overtimePremium, 158); assert.equal(result.earnings.nightPremium, 87);

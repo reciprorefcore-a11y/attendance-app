@@ -439,3 +439,64 @@ test("a completed multi-store day is one home-store row with help time and no tr
   assert.equal(row.nightMinutes, 0);
   assert.equal(row.sessions.length, 2);
 });
+
+test("same-day employees are isolated and their minutes never combine", () => {
+  const rows = buildAttendanceRows([
+    log("a-in", "clock_in", "2026-08-22T09:00:00", { employeeId: "a", employeeCode: "0001", employeeName: "従業員A" }),
+    log("a-out", "clock_out", "2026-08-22T17:00:00", { employeeId: "a", employeeCode: "0001", employeeName: "従業員A" }),
+    log("b-in", "clock_in", "2026-08-22T08:00:00", { employeeId: "b", employeeCode: "0002", employeeName: "従業員B" }),
+    log("b-out", "clock_out", "2026-08-22T18:00:00", { employeeId: "b", employeeCode: "0002", employeeName: "従業員B" }),
+  ]);
+  assert.deepEqual(rows.map((row) => [row.employeeKey, row.workMinutes]), [["a", 480], ["b", 600]]);
+  assert.ok(rows.every((row) => !row.diagnostics.some((item) => item.code === "work_at_least_24_hours")));
+});
+
+test("one employee's missing clock-out does not propagate to another employee or store", () => {
+  const rows = buildAttendanceRows([
+    log("a-in", "clock_in", "2026-08-22T09:00:00", { employeeId: "a", employeeCode: "0001", employeeName: "従業員A", storeId: "store-a", workStoreName: "店舗A" }),
+    log("b-in", "clock_in", "2026-08-22T10:00:00", { employeeId: "b", employeeCode: "0002", employeeName: "従業員B", storeId: "store-b", workStoreName: "店舗B" }),
+    log("b-out", "clock_out", "2026-08-22T19:00:00", { employeeId: "b", employeeCode: "0002", employeeName: "従業員B", storeId: "store-b", workStoreName: "店舗B" }),
+  ]);
+  const a = rows.find((row) => row.employeeKey === "a")!;
+  const b = rows.find((row) => row.employeeKey === "b")!;
+  assert.equal(a.diagnostics.filter((item) => item.code === "missing_clock_out").length, 1);
+  assert.equal(a.diagnostics[0].message, "店舗Aの退勤が打刻されていません");
+  assert.equal(b.diagnostics.length, 0);
+  assert.equal(b.workMinutes, 540);
+});
+
+test("multiple completed sessions for one employee remain independent and aggregate once", () => {
+  const rows = buildAttendanceRows([
+    log("first-in", "clock_in", "2026-08-22T09:00:00"),
+    log("first-out", "clock_out", "2026-08-22T12:00:00"),
+    log("second-in", "clock_in", "2026-08-22T13:00:00"),
+    log("second-out", "clock_out", "2026-08-22T18:00:00"),
+  ]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].sessions.length, 2);
+  assert.equal(rows[0].workMinutes, 480);
+  assert.equal(rows[0].diagnostics.length, 0);
+});
+
+test("a stale clock-in is not paired with a later day's orphan clock-out", () => {
+  const sessions = pairWorkSessions([
+    log("stale-in", "clock_in", "2026-08-08T09:00:00"),
+    log("later-out", "clock_out", "2026-08-10T18:00:00"),
+  ]);
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].clockOut, null);
+  assert.equal(sessions[0].workMinutes, 0);
+  const rows = buildAttendanceRows([
+    log("stale-in", "clock_in", "2026-08-08T09:00:00"),
+    log("later-out", "clock_out", "2026-08-10T18:00:00"),
+  ]);
+  assert.ok(!rows[0].diagnostics.some((item) => item.code === "work_at_least_24_hours"));
+});
+
+test("an actual 24-hour session still triggers the safety diagnostic", () => {
+  const rows = buildAttendanceRows([
+    log("in", "clock_in", "2026-08-08T09:00:00"),
+    log("out", "clock_out", "2026-08-09T09:00:00"),
+  ]);
+  assert.ok(rows[0].diagnostics.some((item) => item.code === "work_at_least_24_hours"));
+});

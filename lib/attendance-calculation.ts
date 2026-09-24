@@ -250,6 +250,12 @@ export function pairWorkSessions(logs: CalculationClockLog[]) {
 
     for (const log of sorted) {
       const type = normalizedType(log.type);
+      // A later day's orphan punch must not close a stale session. Legitimate
+      // overnight work is retained, including an exact 24-hour session so the
+      // payroll safety diagnostic can still reject it.
+      if (active && log.timestamp.getTime() - active.clockIn.timestamp.getTime() > 24 * 60 * 60 * 1000) {
+        finish(null);
+      }
       if (type === "clock_in") {
         finish(null);
         active = { clockIn: log, logs: [log] };
