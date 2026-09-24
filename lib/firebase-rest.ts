@@ -4,6 +4,8 @@
  * Uses NEXT_PUBLIC_FIREBASE_API_KEY and NEXT_PUBLIC_FIREBASE_PROJECT_ID.
  */
 
+import { collectFirestorePages } from "./firestore-pagination";
+
 const PROJ = () => process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID ?? "";
 const APIKEY = () => process.env.NEXT_PUBLIC_FIREBASE_API_KEY ?? "";
 const FSBASE = () =>
@@ -192,12 +194,23 @@ export class RestCollectionRef {
 
   async get(): Promise<RestQuerySnapshot> {
     if (this._filters.length === 0 && !this._limitVal) {
-      // Simple list — GET endpoint
-      const url = `${FSBASE()}/${this._colPath}?pageSize=5000`;
-      const raw = await fsRequest(this._token, url).catch((e: Error) => { throw new Error(`${e.message} [list ${this._colPath}]`); }) as Record<string, unknown>;
-      const documents = (raw.documents as unknown[] | undefined) ?? [];
-      const docs = documents.map((d) => {
-        const doc = d as Record<string, unknown>;
+      // Firestore can cap listDocuments below the requested pageSize. Always
+      // follow nextPageToken or a payroll calculation may see a clock-in while
+      // silently missing its clock-out from a later page.
+      const documents = await collectFirestorePages<Record<string, unknown>>(async (pageToken) => {
+        const params = new URLSearchParams({ pageSize: "5000" });
+        if (pageToken) params.set("pageToken", pageToken);
+        const url = `${FSBASE()}/${this._colPath}?${params.toString()}`;
+        const raw = await fsRequest(this._token, url).catch((e: Error) => { throw new Error(`${e.message} [list ${this._colPath}]`); }) as Record<string, unknown>;
+        return {
+          items: ((raw.documents as Record<string, unknown>[] | undefined) ?? []),
+          nextPageToken: raw.nextPageToken,
+        };
+      }).catch((error: Error) => {
+        if (error.message === "Firestore pagination token repeated") throw new Error(`${error.message} [list ${this._colPath}]`);
+        throw error;
+      });
+      const docs = documents.map((doc) => {
         const name = doc.name as string;
         return new RestDocSnapshot(doc, name.split("/").pop()!);
       });

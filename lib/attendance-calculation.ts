@@ -206,9 +206,7 @@ export function pairWorkSessions(logs: CalculationClockLog[]) {
   const byEmployee = new Map<string, CalculationClockLog[]>();
   for (const log of logs) {
     const employeeKey = log.employeeId || log.employeeCode || log.employeeName || "unknown";
-    // A clock-out at another store must never close this store's active session.
-    const pairingKey = `${employeeKey}:${log.storeId}`;
-    byEmployee.set(pairingKey, [...(byEmployee.get(pairingKey) ?? []), log]);
+    byEmployee.set(employeeKey, [...(byEmployee.get(employeeKey) ?? []), log]);
   }
 
   const sessions: WorkSession[] = [];
@@ -218,9 +216,11 @@ export function pairWorkSessions(logs: CalculationClockLog[]) {
     const sorted = employeeLogs
       .slice()
       .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
-    let active: { clockIn: CalculationClockLog; logs: CalculationClockLog[] } | null = null;
+    type ActiveSession = { clockIn: CalculationClockLog; logs: CalculationClockLog[] };
+    const activeByStore = new Map<string, ActiveSession>();
 
-    const finish = (clockOut: CalculationClockLog | null) => {
+    const finish = (storeKey: string, clockOut: CalculationClockLog | null) => {
+      const active = activeByStore.get(storeKey);
       if (!active) return;
       const clockIn = truncateToMinute(active.clockIn.timestamp);
       const end = clockOut ? truncateToMinute(clockOut.timestamp) : null;
@@ -245,7 +245,7 @@ export function pairWorkSessions(logs: CalculationClockLog[]) {
         wageDiagnostics: [],
         logs: sessionLogs,
       });
-      active = null;
+      activeByStore.delete(storeKey);
     };
 
     for (const log of sorted) {
@@ -253,19 +253,31 @@ export function pairWorkSessions(logs: CalculationClockLog[]) {
       // A later day's orphan punch must not close a stale session. Legitimate
       // overnight work is retained, including an exact 24-hour session so the
       // payroll safety diagnostic can still reject it.
-      if (active && log.timestamp.getTime() - active.clockIn.timestamp.getTime() > 24 * 60 * 60 * 1000) {
-        finish(null);
+      for (const [storeKey, active] of activeByStore) {
+        if (log.timestamp.getTime() - active.clockIn.timestamp.getTime() > 24 * 60 * 60 * 1000) {
+          finish(storeKey, null);
+        }
       }
       if (type === "clock_in") {
-        finish(null);
-        active = { clockIn: log, logs: [log] };
-      } else if (type === "clock_out" && active) {
-        finish(log);
-      } else if (active) {
-        active.logs.push(log);
+        if (activeByStore.has(log.storeId)) finish(log.storeId, null);
+        activeByStore.set(log.storeId, { clockIn: log, logs: [log] });
+      } else if (type === "clock_out") {
+        // Prefer the matching work store. A corrected/imported clock-out may
+        // carry a different store ID; it can safely close the only active
+        // session for this employee, but never guess between overlapping ones.
+        const storeKey = activeByStore.has(log.storeId)
+          ? log.storeId
+          : activeByStore.size === 1
+            ? activeByStore.keys().next().value as string
+            : null;
+        if (storeKey) finish(storeKey, log);
+      } else {
+        const active = activeByStore.get(log.storeId) ??
+          (activeByStore.size === 1 ? activeByStore.values().next().value as ActiveSession : undefined);
+        active?.logs.push(log);
       }
     }
-    finish(null);
+    for (const storeKey of [...activeByStore.keys()]) finish(storeKey, null);
   }
 
   return sessions.sort((a, b) => a.clockIn.getTime() - b.clockIn.getTime());

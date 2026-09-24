@@ -478,6 +478,54 @@ test("multiple completed sessions for one employee remain independent and aggreg
   assert.equal(rows[0].diagnostics.length, 0);
 });
 
+test("a support shift pairs a clock-out carrying a different store when it is the only active session", () => {
+  const [session] = pairWorkSessions([
+    log("help-in", "clock_in", "2026-08-22T15:00:00", { storeId: "support", workStoreName: "応援先" }),
+    log("home-out", "clock_out", "2026-08-22T20:00:00", { storeId: "home", workStoreName: "所属店" }),
+  ]);
+  assert.equal(session.clockOut?.getTime(), date("2026-08-22T20:00:00").getTime());
+  assert.equal(session.storeId, "support");
+  assert.equal(session.workMinutes, 300);
+});
+
+test("legacy and canonical punch types form the same session", () => {
+  const sessions = pairWorkSessions([
+    log("legacy-in", "start", "2026-08-22T15:00:00"),
+    log("canonical-out", "clock_out", "2026-08-22T20:00:00"),
+    log("canonical-in", "clock_in", "2026-08-23T15:00:00"),
+    log("legacy-out", "end", "2026-08-23T20:00:00"),
+  ]);
+  assert.deepEqual(sessions.map((session) => session.workMinutes), [300, 300]);
+  assert.ok(sessions.every((session) => session.clockOut));
+});
+
+test("UTC dates may differ while the JST clock-in work date remains authoritative", () => {
+  const [row] = buildAttendanceRows([
+    log("in", "clock_in", "2026-08-22T00:30:00"),
+    log("out", "clock_out", "2026-08-22T04:30:00"),
+  ]);
+  assert.equal(row.clockIn.toISOString().slice(0, 10), "2026-08-21");
+  assert.equal(row.date, "2026-08-22");
+  assert.equal(row.workMinutes, 240);
+});
+
+test("1065 Inoue on 2026-08-22 forms the Excel-confirmed 15:36 to 20:00 session", () => {
+  const [row] = buildAttendanceRows([
+    log("WN7dC2xNeRQl7xChcAZc_clock_in_59579352", "clock_in", "2026-08-22T15:36:00", {
+      employeeId: "WN7dC2xNeRQl7xChcAZc", employeeCode: "1065", employeeName: "井上 美咲",
+      storeId: "1", workStoreName: "灯武蔵小杉店",
+    }),
+    log("correction_WN7dC2xNeRQl7xChcAZc_clock_in_59579352_missing-out_clock_out", "clock_out", "2026-08-22T20:00:00", {
+      employeeId: "WN7dC2xNeRQl7xChcAZc", employeeCode: "1065", employeeName: "井上 美咲",
+      storeId: "1", workStoreName: "灯武蔵小杉店",
+    }),
+  ]);
+  assert.equal(row.workMinutes, 264);
+  assert.equal(row.clockOut?.getHours(), 20);
+  assert.equal(row.isMissingClockOut, false);
+  assert.equal(row.diagnostics.length, 0);
+});
+
 test("a stale clock-in is not paired with a later day's orphan clock-out", () => {
   const sessions = pairWorkSessions([
     log("stale-in", "clock_in", "2026-08-08T09:00:00"),
