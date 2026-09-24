@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { FirestoreRest } from "./firebase-rest.ts";
-import { buildAttendanceRows, type CalculationClockLog } from "./attendance-calculation.ts";
+import { buildAttendanceRows, getApplicableWage, type CalculationClockLog, type CalculationWage } from "./attendance-calculation.ts";
 import { applyFixedPayrollAdjustment, calculatePayroll, isPayrollMonthClosed, resolvePayrollType, summarizePayroll, validatePayrollInput, type FixedPayrollAdjustment, type PayrollAttendanceDay, type PayrollEmployee, type PayrollResult, type ResidentTaxHistoryEntry } from "./payroll.ts";
 import { sortPayrollResults } from "./payroll-order.ts";
 import { resolveEffectiveHistory } from "./fulltime-master.ts";
@@ -26,6 +26,26 @@ export function resolveResidentTaxForMonth(employee: PayrollEmployee, targetMont
     .sort((a, b) => b.effectiveMonth.localeCompare(a.effectiveMonth))[0];
   if (applicable) return { ...employee, residentTax: applicable.amount, residentTaxFallbackUsed: false, residentTaxEffectiveMonth: applicable.effectiveMonth };
   return { ...employee, residentTaxFallbackUsed: true, residentTaxEffectiveMonth: null };
+}
+
+export function resolveTransportationForMonth(employee: PayrollEmployee, targetMonth: string): PayrollEmployee {
+  const history = Array.isArray((employee as PayrollEmployee & { transportationHistory?: unknown[] }).transportationHistory)
+    ? (employee as PayrollEmployee & { transportationHistory: { effectiveMonth?: unknown; type?: unknown; amount?: unknown }[] }).transportationHistory
+    : [];
+  const applicable = history
+    .filter((entry) => /^\d{4}-\d{2}$/.test(String(entry?.effectiveMonth ?? "")) && String(entry.effectiveMonth) <= targetMonth)
+    .sort((a, b) => String(b.effectiveMonth).localeCompare(String(a.effectiveMonth)))[0];
+  if (!applicable) return employee;
+  const type = ["daily", "monthly", "none"].includes(String(applicable.type)) ? applicable.type as "daily" | "monthly" | "none" : "none";
+  const amount = Math.max(0, Math.trunc(Number(applicable.amount) || 0));
+  return { ...employee, transportationType: type, dailyTransportation: type === "daily" ? amount : 0, monthlyTransportation: type === "monthly" ? amount : 0 };
+}
+
+export function resolveDailyTransportationForDate(employee: PayrollEmployee | undefined, wages: CalculationWage[], workDate: string, logs: CalculationClockLog[] = []) {
+  if (!employee || employee.transportationType !== "daily") return 0;
+  const historyAmount = getApplicableWage(wages, workDate)?.dailyTransportation;
+  const snapshotAmount = logs.map((log) => Number(log.dailyTransportationAtWork ?? log.dailyTransportationSnapshot) || 0).find((amount) => amount > 0);
+  return Math.max(0, Math.trunc(Number(historyAmount ?? snapshotAmount ?? employee.dailyTransportation ?? employee.transportationCost) || 0));
 }
 
 export async function loadPayrollSource(db: FirestoreRest, targetMonth: string) {
@@ -88,8 +108,14 @@ export async function loadPayrollSource(db: FirestoreRest, targetMonth: string) 
     }
   }
   for (let index = 0; index < employees.length; index += 1) employees[index] = resolveResidentTaxForMonth(employees[index], targetMonth);
+  for (let index = 0; index < employees.length; index += 1) employees[index] = resolveTransportationForMonth(employees[index], targetMonth);
   const employeeIds = new Set(employees.map((item) => item.id));
   const employeeById = new Map(employees.map((item) => [item.id, item]));
+  const wageHistoryEntries = await Promise.all(employees.map(async (employee) => {
+    const snapshot = await db.collection("employees").doc(employee.id).collection("wageHistory").get();
+    return [employee.id, snapshot.docs.map((item) => item.data() as CalculationWage)] as const;
+  }));
+  const wagesByEmployee = Object.fromEntries(wageHistoryEntries) as Record<string, CalculationWage[]>;
   const logs: CalculationClockLog[] = logSnapshot.docs.flatMap((item) => {
     const data = item.data();
     const employeeId = data.employeeId as string | undefined;
@@ -98,14 +124,14 @@ export async function loadPayrollSource(db: FirestoreRest, targetMonth: string) 
   });
   const homeStores = Object.fromEntries(employees.filter((employee) => employee.employeeType === "partTime").map((employee) => [employee.id, { storeId: employee.storeId ?? "", storeName: employee.storeName ?? employee.storeId ?? "" }]));
   const baseWages = Object.fromEntries(employees.map((employee) => [employee.id, Number(employee.hourlyWage ?? employee.baseWage) || 0]));
-  const rows = buildAttendanceRows(logs, {}, {}, baseWages, homeStores).filter((row) => row.date.startsWith(targetMonth));
+  const rows = buildAttendanceRows(logs, wagesByEmployee, {}, baseWages, homeStores).filter((row) => row.date.startsWith(targetMonth));
   const attendance: PayrollAttendanceDay[] = rows.map((row) => ({
     employeeId: row.employeeKey, date: row.date, workMinutes: row.workMinutes, overtimeMinutes: row.overtimeMinutes,
     nightMinutes: row.nightMinutes, helpMinutes: row.helpMinutes, breakMinutes: row.breakMinutes,
     confirmed: row.diagnostics.length === 0,
     warnings: [...new Set(row.diagnostics.map((item) => item.message))], kind: "daily",
-    dailyTransportationUnit: Math.max(0, ...row.logs.map((log) => Number(log.dailyTransportationAtWork ?? log.dailyTransportationSnapshot) || 0), Number(employeeById.get(row.employeeKey)?.dailyTransportation ?? (employeeById.get(row.employeeKey)?.transportationType === "daily" ? employeeById.get(row.employeeKey)?.transportationCost : 0)) || 0),
-    dailyTransportationAmount: Math.max(0, ...row.logs.map((log) => Number(log.dailyTransportationAtWork ?? log.dailyTransportationSnapshot) || 0), Number(employeeById.get(row.employeeKey)?.dailyTransportation ?? (employeeById.get(row.employeeKey)?.transportationType === "daily" ? employeeById.get(row.employeeKey)?.transportationCost : 0)) || 0),
+    dailyTransportationUnit: resolveDailyTransportationForDate(employeeById.get(row.employeeKey), wagesByEmployee[row.employeeKey] ?? [], row.date, row.logs),
+    dailyTransportationAmount: resolveDailyTransportationForDate(employeeById.get(row.employeeKey), wagesByEmployee[row.employeeKey] ?? [], row.date, row.logs),
     clockIn: row.clockIn?.toISOString() ?? null,
     clockOut: row.clockOut?.toISOString() ?? null,
     breakPeriods: row.sessions.flatMap((session) => session.breaks.map((item) => ({ start: item.start?.toISOString() ?? null, end: item.end?.toISOString() ?? null }))),

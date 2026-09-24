@@ -344,19 +344,20 @@ export function calculatePayrollEmployee(employee: PayrollEmployee, allAttendanc
   const skillAllowance = isNewBreakdown ? yen(employee.skillAllowance) : yen(employee.positionAllowance);
   const overtimePremium = payrollType === "hourly" ? Math.round(totals.overtime * hourlyWage * 0.25 / 60) : 0;
   const nightPremium = payrollType === "hourly" ? Math.round(totals.night * hourlyWage * 0.25 / 60) : 0;
-  const transportationType = employee.transportationType ?? "none";
+  const transportationType = employee.transportationType
+    ?? (yen(employee.monthlyTransportation) > 0 ? "monthly" : yen(employee.dailyTransportation) > 0 ? "daily" : "none");
   const configuredDailyUnit = yen(employee.dailyTransportation ?? (transportationType === "daily" ? employee.transportationCost : 0));
   const dailyTransportationByDate = new Map<string, number>();
   for (const day of days.filter((item) => item.workMinutes > 0)) {
     const amount = yen(day.dailyTransportationAmount ?? day.dailyTransportationUnit ?? configuredDailyUnit);
     dailyTransportationByDate.set(day.date, Math.max(dailyTransportationByDate.get(day.date) ?? 0, amount));
   }
-  const dailyTransportation = [...dailyTransportationByDate.values()].reduce((sum, amount) => sum + amount, 0);
+  const dailyTransportation = transportationType === "daily" ? [...dailyTransportationByDate.values()].reduce((sum, amount) => sum + amount, 0) : 0;
   const monthlyTransportation = yen(employee.monthlyTransportation ?? (transportationType === "monthly" ? employee.transportationCost : 0));
-  const transportation = dailyTransportation + monthlyTransportation;
+  const transportation = transportationType === "daily" ? dailyTransportation : transportationType === "monthly" ? monthlyTransportation : 0;
   const transportationAccountedDates = new Set<string>();
   const attendanceDaysDetail = days.map((day) => {
-    const shouldAccount = day.workMinutes > 0 && !transportationAccountedDates.has(day.date);
+    const shouldAccount = transportationType === "daily" && day.workMinutes > 0 && !transportationAccountedDates.has(day.date);
     if (shouldAccount) transportationAccountedDates.add(day.date);
     return { ...day, dailyTransportationUnit: yen(day.dailyTransportationUnit ?? configuredDailyUnit), dailyTransportationAmount: shouldAccount ? (dailyTransportationByDate.get(day.date) ?? 0) : 0 };
   });

@@ -432,6 +432,7 @@ export default function PayrollPage() {
                       </div>
                       {!selectedHasUnappliedInput && <div style={s.adjustResult}>
                         <span>残業手当 <b>{yen(result.earnings.overtimePremium)}</b></span>
+                        <span>非課税交通費 <b>{yen(result.earnings.transportation)}</b></span>
                         <span>給与支給合計 <b>{yen(result.earnings.grossTotal)}</b></span>
                         <span>控除合計 <b>{yen(result.deductions.total)}</b></span>
                         <span>給与差引額 <b>{yen(result.payrollNetPay)}</b></span>

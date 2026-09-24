@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import XLSX from "xlsx";
 import { applyFixedPayrollAdjustment, calculatePayroll, calculatePayrollEmployee, calculatePremiumBasis, calculateProposedPremiumBasis, calculateWithholdingTax2026, isPayrollMonthClosed, summarizePayroll, validatePayrollInput, type PayrollAttendanceDay, type PayrollEmployee } from "../lib/payroll.ts";
 import { createPayrollWorkbook, createPayslipPdf, createPayslipZip, createTransferWorkbook, createUnifiedPayrollWorkbook, payrollTransferWarnings, selectFullTimePayslipResults, selectPayrollExportResults, selectStorePayslipResults } from "../lib/payroll-export.ts";
 import { sortPayrollResults, sortPayrollResultsForExcel } from "../lib/payroll-order.ts";
-import { resolveResidentTaxForMonth } from "../lib/payroll-server.ts";
+import { resolveDailyTransportationForDate, resolveResidentTaxForMonth, resolveTransportationForMonth } from "../lib/payroll-server.ts";
 
 const employee = (id: string, patch: Partial<PayrollEmployee> = {}): PayrollEmployee => ({ id, employeeCode: id, name: `従業員${id}`, storeId: "hq", storeName: "本部", payrollEnabled: true, payrollType: "hourly", hourlyWage: 1225, transportationType: "none", paymentMethod: "bank", bankAccountRegistered: true, taxTableType: "kou", dependentCount: 0, healthInsurance: 0, childSupportContribution: 0, careInsurance: 0, employeePension: 0, employmentInsurance: 0, residentTax: 0, ...patch });
 const day = (employeeId: string, date: string, workMinutes: number, patch: Partial<PayrollAttendanceDay> = {}): PayrollAttendanceDay => ({ employeeId, date, workMinutes, overtimeMinutes: 0, nightMinutes: 0, helpMinutes: 0, breakMinutes: 0, confirmed: true, kind: "daily", ...patch });
@@ -42,6 +43,24 @@ test("給与明細ZIPは従来型PDFを1名1ファイルで格納する", async 
   assert.equal(zip.readUInt32LE(0), 0x04034b50);
   assert.match(zip.toString("utf8"), /1076_松本るぴな_2026年08月給与明細\.pdf/);
   assert.match(zip.toString("latin1"), /%PDF-/);
+});
+
+test("交通費は画面・確定結果・給与Excel・給与明細PDFで同じ非課税額を使う", async () => {
+  const result = calculatePayrollEmployee(employee("transport-output", { name: "交通費確認", transportationType: "daily", dailyTransportation: 500 }), [day("transport-output", "2026-08-01", 480, { dailyTransportationAmount: 500 })]);
+  assert.equal(result.earnings.transportation, 500);
+  assert.equal(result.earnings.nonTaxableTotal, 500);
+  assert.equal(result.earnings.grossTotal, result.earnings.taxableTotal + 500);
+  const workbook = XLSX.read(createUnifiedPayrollWorkbook([result], "2026-09", true), { type: "buffer" });
+  const rows = XLSX.utils.sheet_to_json(workbook.Sheets["アルバイト"], { header: 1 }) as unknown[][];
+  const transportationColumn = rows[1].indexOf("非課税交通費");
+  assert.ok(transportationColumn >= 0);
+  assert.equal(rows[2][transportationColumn], 500);
+  const pdf = await createPayslipPdf(result, "2026-08", "2026-09-25", true);
+  assert.ok(pdf.length > 1000);
+  const exportSource = readFileSync(new URL("../lib/payroll-export.ts", import.meta.url), "utf8");
+  const pageSource = readFileSync(new URL("../app/hq/payroll/page.tsx", import.meta.url), "utf8");
+  assert.match(exportSource, /\["非課税通勤費", yenText\(result\.earnings\.transportation\)\]/);
+  assert.match(pageSource, /非課税交通費 <b>\{yen\(result\.earnings\.transportation\)\}/);
 });
 
 test("24時間未満の労働・深夜・出勤日数を倍にしない", () => {
@@ -143,7 +162,7 @@ test("日額交通費は重複しない出勤日数、月額交通費は固定�
   assert.equal(daily.earnings.transportation, 600); assert.equal(monthly.earnings.transportation, 9000);
 });
 
-test("同日複数打刻・ヘルプでも日交通費は1回、日交通費と定期代を合算する", () => {
+test("同日複数打刻・ヘルプでも日交通費は1回で定期代を重複加算しない", () => {
   const result = calculatePayrollEmployee(employee("1", { transportationType: "daily", dailyTransportation: 300, monthlyTransportation: 5000 }), [
     day("1", "2026-08-01", 60, { dailyTransportationUnit: 300, dailyTransportationAmount: 300 }),
     day("1", "2026-08-01", 120, { helpMinutes: 120, dailyTransportationUnit: 300, dailyTransportationAmount: 300 }),
@@ -151,8 +170,61 @@ test("同日複数打刻・ヘルプでも日交通費は1回、日交通費と�
     day("1", "2026-08-03", 60, { dailyTransportationUnit: 400, dailyTransportationAmount: 400 }),
   ]);
   assert.equal(result.attendance.attendanceDays, 2);
-  assert.equal(result.earnings.transportation, 5700);
+  assert.equal(result.earnings.transportation, 700);
   assert.deepEqual(result.attendanceDaysDetail.map((item) => item.dailyTransportationAmount), [300,0,0,400]);
+});
+
+test("日額500円の交通費対象勤務10日は5000円で勤務なし日は0円", () => {
+  const days = Array.from({ length: 10 }, (_, index) => day("daily-500", `2026-08-${String(index + 1).padStart(2, "0")}`, 480, { dailyTransportationUnit: 500, dailyTransportationAmount: 500 }));
+  days.push(day("daily-500", "2026-08-11", 0, { dailyTransportationUnit: 500, dailyTransportationAmount: 500 }));
+  const result = calculatePayrollEmployee(employee("daily-500", { transportationType: "daily", dailyTransportation: 500 }), days);
+  assert.equal(result.earnings.transportation, 5000);
+  assert.equal(result.attendanceDaysDetail.at(-1)?.dailyTransportationAmount, 0);
+});
+
+test("月途中の日額改定は勤務日ごとの適用額を合計する", () => {
+  const result = calculatePayrollEmployee(employee("history", { transportationType: "daily", dailyTransportation: 500 }), [
+    day("history", "2026-08-14", 480, { dailyTransportationUnit: 300, dailyTransportationAmount: 300 }),
+    day("history", "2026-08-15", 480, { dailyTransportationUnit: 500, dailyTransportationAmount: 500 }),
+  ]);
+  assert.equal(result.earnings.transportation, 800);
+});
+
+test("月額交通費は勤務日額を排除し月額だけを支給する", () => {
+  const result = calculatePayrollEmployee(employee("monthly", { transportationType: "monthly", monthlyTransportation: 9000, dailyTransportation: 500 }), [day("monthly", "2026-08-01", 480, { dailyTransportationAmount: 500 })]);
+  assert.equal(result.earnings.transportation, 9000);
+  assert.equal(result.attendanceDaysDetail[0].dailyTransportationAmount, 0);
+});
+
+test("交通費未設定者は勤務があっても0円", () => {
+  const result = calculatePayrollEmployee(employee("none", { transportationType: "none", dailyTransportation: 500, monthlyTransportation: 9000 }), [day("none", "2026-08-01", 480, { dailyTransportationAmount: 500 })]);
+  assert.equal(result.earnings.transportation, 0);
+});
+
+test("同姓同名でもemployeeIdごとに交通費を分離する", () => {
+  const employees = [employee("same-a", { name: "同姓同名", transportationType: "daily", dailyTransportation: 300 }), employee("same-b", { name: "同姓同名", transportationType: "daily", dailyTransportation: 500 })];
+  const results = calculatePayroll(employees, [day("same-a", "2026-08-01", 480, { dailyTransportationAmount: 300 }), day("same-b", "2026-08-01", 480, { dailyTransportationAmount: 500 })]);
+  assert.deepEqual(results.map((result) => [result.employeeId, result.earnings.transportation]), [["same-a", 300], ["same-b", 500]]);
+});
+
+test("正社員交通費履歴は対象月で解決し日額と月額を排他にする", () => {
+  const value = employee("fixed-history", { transportationType: "monthly", monthlyTransportation: 10000 });
+  const withHistory = { ...value, transportationHistory: [{ effectiveMonth: "2026-07", type: "daily", amount: 400 }, { effectiveMonth: "2026-08", type: "monthly", amount: 12000 }] } as PayrollEmployee;
+  const july = resolveTransportationForMonth(withHistory, "2026-07");
+  const august = resolveTransportationForMonth(withHistory, "2026-08");
+  assert.deepEqual([july.transportationType, july.dailyTransportation, july.monthlyTransportation], ["daily", 400, 0]);
+  assert.deepEqual([august.transportationType, august.dailyTransportation, august.monthlyTransportation], ["monthly", 0, 12000]);
+});
+
+test("アルバイトの日交通費履歴は勤務日の適用開始日で解決する", () => {
+  const target = employee("part-history", { transportationType: "daily", transportationCost: 200 });
+  const history = [
+    { effectiveFrom: "2026-08-01", effectiveTo: "2026-08-14", dailyTransportation: 300 },
+    { effectiveFrom: "2026-08-15", effectiveTo: null, dailyTransportation: 500 },
+  ];
+  assert.equal(resolveDailyTransportationForDate(target, history, "2026-08-14"), 300);
+  assert.equal(resolveDailyTransportationForDate(target, history, "2026-08-15"), 500);
+  assert.equal(resolveDailyTransportationForDate({ ...target, transportationType: "monthly" }, history, "2026-08-15"), 0);
 });
 
 test("社員コードが重複してもemployeeIdごとに別人として計算する", () => {
@@ -238,7 +310,7 @@ test("2026年8月fixture：中村は根拠のない190,000円を使わず、小�
   const residentEntry = (amount: number) => [{ amount, effectiveMonth: "2026-08", updatedAt: "fixture", updatedBy: "fixture-admin" }];
   const nakamuraEmployee = resolveResidentTaxForMonth(employee("hvjU14BKDB0pCdDrUZF1", {
     employeeCode: "0003", name: "中村鏡太郎", payrollType: "fixed", fixedBaseSalary: 185000,
-    positionAllowance: 9000, businessAllowance: 110000, monthlyTransportation: 15670,
+    positionAllowance: 9000, businessAllowance: 110000, transportationType: "monthly", monthlyTransportation: 15670,
     healthInsurance: 15872, childSupportContribution: 368, careInsurance: 2592, employeePension: 29280, employmentInsurance: 1651,
     incomeTax: 6650, residentTax: 10000, residentTaxHistory: residentEntry(14100),
   }), "2026-08");
@@ -251,7 +323,7 @@ test("2026年8月fixture：中村は根拠のない190,000円を使わず、小�
 
   const kobayashiEmployee = resolveResidentTaxForMonth(employee("c6ADSFHwyHecwScuZ6g8", {
     employeeCode: "0064", name: "小林彗太", payrollType: "fixed", fixedBaseSalary: 183000,
-    positionAllowance: 8000, fixedOvertimeAllowance: 27678, businessAllowance: 56417, monthlyTransportation: 10110,
+    positionAllowance: 8000, fixedOvertimeAllowance: 27678, businessAllowance: 56417, transportationType: "monthly", monthlyTransportation: 10110,
     healthInsurance: 13888, childSupportContribution: 322, careInsurance: 0, employeePension: 25620, employmentInsurance: 1580,
     incomeTax: 6650, residentTax: 10000, residentTaxHistory: residentEntry(12200),
   }), "2026-08");
@@ -494,7 +566,7 @@ test("小林彗太へその他臨時支給800,000円を設定すると所得税�
   // 2026-08 ドラフト想定。健康保険・厚生年金・雇用保険・住民税を含む実態に近いマスターデータを使う。
   const kobayashi = employee("kobayashi", {
     employeeCode: "0064", name: "小林彗太", payrollType: "fixed", fixedBaseSalary: 183000, hourlyWage: 0,
-    monthlyTransportation: 10110,
+    transportationType: "monthly", monthlyTransportation: 10110,
     healthInsurance: 13888, childSupportContribution: 322, employeePension: 25620, employmentInsurance: 1580,
     residentTax: 10000,
   });
@@ -581,7 +653,7 @@ test("小林彗太へその他臨時支給800,000円を設定すると所得税�
 test("立替経費精算は正数で本人へ加算し課税・社保・控除へ影響させない", async () => {
   const kobayashi = employee("kobayashi", {
     employeeCode: "0064", name: "小林彗太", payrollType: "fixed", fixedBaseSalary: 183000, hourlyWage: 0,
-    monthlyTransportation: 10110,
+    transportationType: "monthly", monthlyTransportation: 10110,
     healthInsurance: 13888, childSupportContribution: 322, employeePension: 25620, employmentInsurance: 1580,
     residentTax: 10000,
   });

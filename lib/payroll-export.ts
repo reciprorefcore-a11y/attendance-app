@@ -89,7 +89,7 @@ export function createTransferWorkbook(results: PayrollResult[], paymentMonth: s
   return XLSX.write(workbook, { type: "buffer", bookType: "xlsx" }) as Buffer;
 }
 
-const unifiedHeaders = ["employeeId","社員コード","氏名","雇用区分","所属店舗","課税支給","非課税支給","支給合計","控除合計","立替経費精算","最終支給額","支給方法"];
+const unifiedHeaders = ["employeeId","社員コード","氏名","雇用区分","所属店舗","課税支給","非課税交通費","その他非課税支給","非課税支給","支給合計","控除合計","立替経費精算","最終支給額","支給方法"];
 function hasMonthlyAdjustment(result: PayrollResult) {
   const adjustment = result.fixedAdjustment;
   return adjustment != null && Object.entries(adjustment).some(([key, value]) =>
@@ -113,7 +113,7 @@ export function payrollTransferWarnings(results: PayrollResult[]) {
     .map((result) => `${result.employeeCode} ${result.employeeName}：${result.bankAccountRegisteredSnapshot === false ? "口座情報が未登録です" : "口座情報の登録状態を確認できません"}`);
 }
 
-function unifiedRows(results: PayrollResult[]) { return sortPayrollResultsForExcel(results).map(item=>[item.employeeId,item.employeeCode,item.employeeName,item.employeeType==="fullTime"?"正社員":"アルバイト",item.storeName,item.earnings.taxableTotal,item.earnings.nonTaxableTotal,item.earnings.grossTotal,item.deductions.total,item.reimbursements.expenseReimbursement,item.netPay,item.paymentMethod==="bank"?"振込":"現金"]); }
+function unifiedRows(results: PayrollResult[]) { return sortPayrollResultsForExcel(results).map(item=>[item.employeeId,item.employeeCode,item.employeeName,item.employeeType==="fullTime"?"正社員":"アルバイト",item.storeName,item.earnings.taxableTotal,item.earnings.transportation,item.earnings.otherNonTaxable,item.earnings.nonTaxableTotal,item.earnings.grossTotal,item.deductions.total,item.reimbursements.expenseReimbursement,item.netPay,item.paymentMethod==="bank"?"振込":"現金"]); }
 export function createUnifiedPayrollWorkbook(results:PayrollResult[],paymentMonth:string,draft=false){
   const included = selectPayrollExportResults(results, !draft);
   const payrollWorkbook = XLSX.read(createPayrollWorkbook(included, paymentMonth, draft), { type: "buffer", cellStyles: true, cellFormula: true });
