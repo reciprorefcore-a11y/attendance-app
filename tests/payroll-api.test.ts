@@ -211,3 +211,23 @@ test("一律休憩設定保存時に既存確定月の非機密索引を初期�
   const lockWrites = [...source.matchAll(/collection\("payrollPeriodLocks"\)[^\n]+/g)].map((match) => match[0]).join("\n");
   assert.doesNotMatch(lockWrites, /earnings|deductions|results|employeeId|runId|updatedBy/);
 });
+
+test("確定済みrunのExcel GETはloadPayrollRunだけで配布しcreatePayrollDraftを呼ばない", () => {
+  const route = readFileSync("app/api/payroll/export/[kind]/route.ts", "utf8");
+  const get = route.slice(route.indexOf("export async function GET"));
+  assert.match(get, /loadPayrollRun\(admin\.db, runId\)/);
+  assert.doesNotMatch(get, /createPayrollDraft/);
+  // payroll/transfer/unified ともGET経路で分岐すること
+  assert.match(get, /kind === "payroll" \|\| kind === "transfer" \|\| kind === "unified"/);
+});
+
+test("hq/payroll UIは確定済みなら統合ExcelをGET、未確定ならPOSTで取得する", () => {
+  const page = readFileSync("app/hq/payroll/page.tsx", "utf8");
+  const fn = page.slice(page.indexOf("const generatePayrollExcel"), page.indexOf("const updateAdjustment"));
+  // 確定済み分岐: runId クエリ付きGET
+  assert.match(fn, /run\.status === "confirmed" && run\.id/);
+  assert.match(fn, /\/api\/payroll\/export\/unified\?runId=\$\{encodeURIComponent\(run\.id\)\}/);
+  // 未確定分岐: POST + sourceAttendanceVersion
+  assert.match(fn, /method:\s*"POST"/);
+  assert.match(fn, /sourceAttendanceVersion/);
+});

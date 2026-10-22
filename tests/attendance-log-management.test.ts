@@ -128,6 +128,31 @@ test("既存auditLogsと旧理由フィールドを正規化し理由なしは�
   assert.equal(rows[0].performedBy, "管理者");
 });
 
+test("admin勤務セット削除は選択打刻IDだけをサーバーへ送信する", () => {
+  const admin = readFileSync("app/admin/page.tsx", "utf8");
+  // 旧の一括送信（prompt→workSet全打刻）が残っていない
+  assert.doesNotMatch(admin, /const deleteWorkSet\s*=/);
+  // モーダル state と確定関数が存在する
+  assert.match(admin, /deletePunchDialog/);
+  assert.match(admin, /openDeletePunchDialog/);
+  // confirmDeletePunches が selectedIds だけを filter してから送信する
+  const fn = admin.slice(admin.indexOf("const confirmDeletePunches"), admin.indexOf("const restoreDeletedGroup"));
+  assert.match(fn, /new Set\(deletePunchDialog\.selectedIds\)/);
+  assert.match(fn, /timecards\.filter\(\(item\) => selected\.has\(item\.id\)\)/);
+  // 理由必須 + 1件以上
+  assert.match(fn, /削除理由を入力してください/);
+  assert.match(fn, /削除する打刻を1件以上選択してください/);
+  // モーダルUIが出勤・退勤・休憩開始・休憩終了を個別チェックで提示する
+  const modalStart = admin.indexOf("{deletePunchDialog && (() =>");
+  assert.ok(modalStart > 0, "deletePunchDialogモーダルブロックが存在する");
+  const modal = admin.slice(modalStart, modalStart + 4000);
+  assert.match(modal, /clockInLog/);
+  assert.match(modal, /clockOutLog/);
+  assert.match(modal, /startLog/);
+  assert.match(modal, /endLog/);
+  assert.match(modal, /type="checkbox"/);
+});
+
 test("旧形式の修正履歴も打刻ごとの前後時刻へ正規化する", () => {
   const audit = { id: "audit-legacy", data: { targetLogIds: ["in", "out"], actions: [{ targetLogId: "in", type: "clock_in" }, { targetLogId: "out", type: "clock_out" }], before: { clockIn: "2026-11-10T00:00:00Z", clockOut: "2026-11-10T08:00:00Z" }, after: { clockIn: "2026-11-10T00:15:00Z", clockOut: "2026-11-10T08:15:00Z" }, correctionReason: "打刻訂正" } };
   const clockIn = normalizeAttendanceHistory("in", { type: "clock_in" }, [audit]);

@@ -169,7 +169,9 @@ export default function PayrollPage() {
     if (!run || !user) return; setBusy(true); setMessage("");
     try {
       const token = await user.getIdToken(true);
-      const file = await generateFile("/api/payroll/export/unified", token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ targetMonth: run.targetMonth, paymentMonth: run.paymentMonth, paymentDate: run.paymentDate, sourceAttendanceVersion: run.sourceAttendanceVersion, adjustmentsSnapshot: run.adjustmentsSnapshot ?? savedAdjustments }) });
+      const file = run.status === "confirmed" && run.id
+        ? await generateFile(`/api/payroll/export/unified?runId=${encodeURIComponent(run.id)}`, token)
+        : await generateFile("/api/payroll/export/unified", token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ targetMonth: run.targetMonth, paymentMonth: run.paymentMonth, paymentDate: run.paymentDate, sourceAttendanceVersion: run.sourceAttendanceVersion, adjustmentsSnapshot: run.adjustmentsSnapshot ?? savedAdjustments }) });
       setPayrollFile(file); setTransferFile(null); setMessage("給与・振込統合Excelを生成しました。下のボタンからダウンロードできます。");
     } catch (e) { setMessage(e instanceof Error ? e.message : "給与Excelの生成に失敗しました"); }
     finally { setBusy(false); }

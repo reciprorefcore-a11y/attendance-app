@@ -427,6 +427,7 @@ export default function AdminPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState("");
   const [editWorkSet, setEditWorkSet] = useState<CorrectionWorkSet | null>(null);
+  const [deletePunchDialog, setDeletePunchDialog] = useState<{ workSet: CorrectionWorkSet; selectedIds: string[]; reason: string } | null>(null);
   const [editForm, setEditForm] = useState<CorrectionEditor | null>(null);
   const [isSavingCorrection, setIsSavingCorrection] = useState(false);
   const [correctionError, setCorrectionError] = useState("");
@@ -836,7 +837,7 @@ export default function AdminPage() {
   const operationChanges = (logs: Array<TimecardRow | CalculationClockLog>) => logs.map((row) => ({ id: row.id, operation: "update" as const, type: normalizeClockType(row as TimecardRow) as "clock_in" | "clock_out" | "break_start" | "break_end" }));
 
   const submitAttendanceLogAction = async (action: "delete" | "restore", workDate: string, employeeId: string, storeId: string, logs: TimecardRow[], reason: string) => {
-    if (!user || !reason.trim()) return;
+    if (!user || !reason.trim() || logs.length === 0) return false;
     setIsSavingCorrection(true); setCorrectionError("");
     try {
       const token = await user.getIdToken();
@@ -845,16 +846,25 @@ export default function AdminPage() {
       if (!response.ok) throw new Error(result.error ?? "打刻操作に失敗しました");
       setMessage(action === "delete" ? "勤務セットを論理削除しました。打刻履歴は保持されています。" : "勤務セットの削除を取り消しました。");
       await load();
-    } catch (error) { setCorrectionError(error instanceof Error ? error.message : "打刻操作に失敗しました"); }
+      return true;
+    } catch (error) { setCorrectionError(error instanceof Error ? error.message : "打刻操作に失敗しました"); return false; }
     finally { setIsSavingCorrection(false); }
   };
 
-  const deleteWorkSet = async (workSet: CorrectionWorkSet) => {
-    const reason = window.prompt("削除理由を入力してください。空欄では削除できません。");
-    if (!reason?.trim()) { if (reason !== null) setCorrectionError("削除理由を入力してください"); return; }
-    const ids = new Set([workSet.clockInLog?.id, workSet.clockOutLog?.id, ...workSet.breaks.flatMap((item) => [item.startLog?.id, item.endLog?.id])].filter(Boolean));
-    const logs = timecards.filter((item) => ids.has(item.id));
-    await submitAttendanceLogAction("delete", workSet.workDate, workSet.employeeId, workSet.storeId, logs, reason);
+  const openDeletePunchDialog = (workSet: CorrectionWorkSet) => {
+    setCorrectionError("");
+    setDeletePunchDialog({ workSet, selectedIds: [], reason: "" });
+  };
+
+  const confirmDeletePunches = async () => {
+    if (!deletePunchDialog) return;
+    const reason = deletePunchDialog.reason.trim();
+    if (!reason) { setCorrectionError("削除理由を入力してください"); return; }
+    if (deletePunchDialog.selectedIds.length === 0) { setCorrectionError("削除する打刻を1件以上選択してください"); return; }
+    const selected = new Set(deletePunchDialog.selectedIds);
+    const logs = timecards.filter((item) => selected.has(item.id));
+    const ok = await submitAttendanceLogAction("delete", deletePunchDialog.workSet.workDate, deletePunchDialog.workSet.employeeId, deletePunchDialog.workSet.storeId, logs, reason);
+    if (ok) setDeletePunchDialog(null);
   };
 
   const restoreDeletedGroup = async (group: { logs: TimecardRow[]; source: TimecardRow; workDate: Date }) => {
@@ -1967,7 +1977,7 @@ export default function AdminPage() {
                   <td style={styles.td}>
                     <button type="button" onClick={() => startEdit(workSet)} style={styles.linkButton}>修正</button>
                     <button type="button" onClick={() => openAttendanceHistory(`${workSet.employeeName} ${workSet.workDate}`, [workSet.clockInLog, workSet.clockOutLog, ...workSet.breaks.flatMap((item) => [item.startLog, item.endLog])].filter((item): item is CalculationClockLog => Boolean(item)))} style={{ ...styles.linkButton, marginLeft: 8 }}>履歴</button>
-                    {isAdmin && <button type="button" disabled={isSavingCorrection} onClick={() => void deleteWorkSet(workSet)} style={{ ...styles.linkButton, marginLeft: 8, color: "#B91C1C" }}>削除</button>}
+                    {isAdmin && <button type="button" disabled={isSavingCorrection} onClick={() => openDeletePunchDialog(workSet)} style={{ ...styles.linkButton, marginLeft: 8, color: "#B91C1C" }}>削除</button>}
                     {(() => { const source = timecards.find((item) => item.id === workSet.clockInLog?.id || item.id === workSet.clockOutLog?.id); return source?.manuallyCreated && source.manualRequestId ? <button type="button" onClick={() => cancelManualAttendance(source.manualRequestId!, workSet.employeeName)} style={{ ...styles.linkButton, marginLeft: 8, color: "#B91C1C" }}>手動登録を取消</button> : null; })()}
                   </td>
                 </tr>
@@ -2158,6 +2168,36 @@ export default function AdminPage() {
       )}
 
       {attendanceHistoryDialog && <div style={styles.modalOverlay} onClick={() => setAttendanceHistoryDialog(null)}><div style={{ ...styles.modal, maxWidth: 760, maxHeight: "90vh", overflowY: "auto" }} onClick={(event) => event.stopPropagation()}><h2>{attendanceHistoryDialog.title}の修正履歴</h2>{attendanceAuditError && <p style={styles.error}>{attendanceAuditError}</p>}{attendanceHistoryDialog.rows.length === 0 && !attendanceAuditError ? <p style={styles.empty}>修正履歴はありません</p> : attendanceHistoryDialog.rows.map((row) => <article key={row.id} style={{ borderBottom: "1px solid #E2E8F0", padding: "12px 0" }}><b>{{ attendance_corrected: "修正", attendance_deleted: "削除", attendance_delete_restored: "削除取消", attendance_cancelled: "取消", attendance_created: "手動登録" }[row.action] ?? row.action}　{({ clock_in: "出勤", clock_out: "退勤", break_start: "休憩開始", break_end: "休憩終了" } as Record<string, string>)[row.punchType] ?? row.punchType}</b><p>打刻ID：{row.logId}<br/>修正前：{row.beforeTime ? new Date(row.beforeTime).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" }) : "記録なし"}<br/>修正後：{row.afterTime ? new Date(row.afterTime).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" }) : "記録なし"}</p><p>修正者：{row.performedBy}<br/>修正日時：{row.performedAt ? new Date(row.performedAt).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" }) : "記録なし"}<br/>理由：{row.reason || "理由未記録"}</p></article>)}<button type="button" onClick={() => setAttendanceHistoryDialog(null)} style={styles.secondaryButton}>閉じる</button></div></div>}
+      {deletePunchDialog && (() => {
+        const dialog = deletePunchDialog;
+        const punches = [
+          dialog.workSet.clockInLog ? { id: dialog.workSet.clockInLog.id, label: "出勤", log: dialog.workSet.clockInLog } : null,
+          dialog.workSet.clockOutLog ? { id: dialog.workSet.clockOutLog.id, label: "退勤", log: dialog.workSet.clockOutLog } : null,
+          ...dialog.workSet.breaks.flatMap((item) => [
+            item.startLog ? { id: item.startLog.id, label: "休憩開始", log: item.startLog } : null,
+            item.endLog ? { id: item.endLog.id, label: "休憩終了", log: item.endLog } : null,
+          ]),
+        ].filter((item): item is { id: string; label: string; log: CalculationClockLog } => Boolean(item));
+        return <div style={styles.modalOverlay} onClick={() => { if (!isSavingCorrection) setDeletePunchDialog(null); }}>
+          <div style={{ ...styles.modal, maxWidth: 560 }} onClick={(event) => event.stopPropagation()}>
+            <h2>削除する打刻を選択</h2>
+            <p style={styles.helpText}>{dialog.workSet.employeeName}・{dialog.workSet.workDate}・{dialog.workSet.storeName || storeNameById(dialog.workSet.storeId)}</p>
+            <div style={{ display: "grid", gap: 8, margin: "14px 0" }}>
+              {punches.map((punch) => {
+                const checked = dialog.selectedIds.includes(punch.id);
+                const timestamp = punch.log.timestamp instanceof Date ? punch.log.timestamp : new Date(String(punch.log.timestamp ?? ""));
+                return <label key={punch.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: 10, border: "1px solid #E2E8F0", borderRadius: 8 }}>
+                  <input type="checkbox" checked={checked} onChange={() => setDeletePunchDialog({ ...dialog, selectedIds: checked ? dialog.selectedIds.filter((id) => id !== punch.id) : [...dialog.selectedIds, punch.id] })} />
+                  <span>{punch.label} {Number.isNaN(timestamp.getTime()) ? "" : timestamp.toLocaleTimeString("ja-JP", { timeZone: "Asia/Tokyo", hour: "2-digit", minute: "2-digit" })}</span>
+                </label>;
+              })}
+            </div>
+            <label style={styles.label}>削除理由<textarea value={dialog.reason} onChange={(event) => setDeletePunchDialog({ ...dialog, reason: event.target.value })} style={{ ...styles.input, minHeight: 80, resize: "vertical" }} rows={3} placeholder="削除理由を入力してください" /></label>
+            {correctionError && <p style={styles.error}>{correctionError}</p>}
+            <div style={styles.inlineActions}><button type="button" disabled={isSavingCorrection} onClick={() => setDeletePunchDialog(null)} style={styles.secondaryButton}>キャンセル</button><button type="button" disabled={isSavingCorrection || !dialog.reason.trim() || dialog.selectedIds.length === 0} onClick={() => void confirmDeletePunches()} style={styles.dangerButton}>{isSavingCorrection ? "処理中..." : "選択した打刻を削除"}</button></div>
+          </div>
+        </div>;
+      })()}
 
       {manualForm && (
         <div style={{ ...styles.modalOverlay, padding: 24 }} onClick={() => { if (!isSavingManual) setManualForm(null); }}>
