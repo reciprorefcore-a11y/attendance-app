@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { FirestoreRest } from "./firebase-rest.ts";
 import { buildAttendanceRows, getApplicableWage, type CalculationClockLog, type CalculationWage } from "./attendance-calculation.ts";
-import { applyFixedPayrollAdjustment, applyPayrollBreakPolicy, calculatePayroll, isPayrollMonthClosed, resolvePayrollType, summarizePayroll, validatePayrollBreakPolicy, validatePayrollInput, type FixedPayrollAdjustment, type PayrollAttendanceDay, type PayrollEmployee, type PayrollResult, type ResidentTaxHistoryEntry } from "./payroll.ts";
+import { applyFixedPayrollAdjustment, applyPayrollBreakPolicy, calculatePayroll, getPayrollBlockingIssues, isPayrollMonthClosed, resolvePayrollType, summarizePayroll, validatePayrollBreakPolicy, validatePayrollInput, type FixedPayrollAdjustment, type PayrollAttendanceDay, type PayrollEmployee, type PayrollResult, type ResidentTaxHistoryEntry } from "./payroll.ts";
 import { sortPayrollResults } from "./payroll-order.ts";
 import { resolveEffectiveHistory } from "./fulltime-master.ts";
 
@@ -164,7 +164,7 @@ export async function createPayrollDraft(db: FirestoreRest, input: { targetMonth
   const { adjustments: _adjustments, ...period } = input;
   void _adjustments;
   if (!source.breakPolicy && input.targetMonth >= "2026-11") allIssues.unshift({ severity: "error", code: "break_policy_not_configured", message: "一律休憩設定が未保存です。閾値・控除時間・適用開始日を保存してから再計算してください" });
-  const run = { ...period, status: "draft" as const, calculatedAt: now.toISOString(), ...totals, sourceAttendanceVersion: source.sourceAttendanceVersion, breakPolicySnapshot: source.breakPolicy, adjustmentsSnapshot: input.adjustments ?? {}, revision: 2, canConfirm: isPayrollMonthClosed(input.targetMonth) && !allIssues.some((item) => item.severity === "error"), issues: allIssues };
+  const run = { ...period, status: "draft" as const, calculatedAt: now.toISOString(), ...totals, sourceAttendanceVersion: source.sourceAttendanceVersion, breakPolicySnapshot: source.breakPolicy, adjustmentsSnapshot: input.adjustments ?? {}, revision: 2, canConfirm: isPayrollMonthClosed(input.targetMonth) && getPayrollBlockingIssues(allIssues).length === 0, issues: allIssues };
   return { ...run, results };
 }
 
@@ -180,7 +180,7 @@ export async function confirmPayrollRun(db: FirestoreRest, uid: string, input: P
   if (!isPayrollMonthClosed(input.targetMonth)) throw new Error("month_not_closed");
   const recalculated = await createPayrollDraft(db, input);
   if (recalculated.sourceAttendanceVersion !== input.sourceAttendanceVersion) throw new Error("source_changed");
-  if (recalculated.issues.some((item) => item.severity === "error")) throw new Error("blocking_errors");
+  if (getPayrollBlockingIssues(recalculated.issues).length > 0) throw new Error("blocking_errors");
   const totals = summarizePayroll(recalculated.results);
   if (recalculated.results.some((item) => item.netPay < 0 || item.earnings.grossTotal < 0 || item.deductions.total < 0)) throw new Error("invalid_result");
   if (totals.grossTotal - totals.deductionTotal + totals.reimbursementsTotal !== totals.netTotal || totals.bankTransferTotal + recalculated.results.reduce((sum, item) => sum + item.cashPayment, 0) !== totals.netTotal) throw new Error("report_mismatch");
@@ -195,6 +195,7 @@ export async function confirmPayrollRun(db: FirestoreRest, uid: string, input: P
     if (!duplicate.empty) throw new Error("already_confirmed");
     const batch = transaction;
     batch.set(ref, run);
+    batch.set(db.collection("payrollPeriodLocks").doc(input.targetMonth), { targetMonth: input.targetMonth, status: "confirmed", updatedAt: confirmedAt });
     results.forEach((result) => batch.set(ref.collection("employees").doc(result.employeeId), result));
   });
   return { id: ref.id, ...run, calculatedAt: asDate(run.calculatedAt).toISOString(), confirmedAt: confirmedAt.toISOString(), results };
@@ -284,6 +285,8 @@ export async function cancelPayrollRun(db: FirestoreRest, runId: string, cancell
     if (!snap.exists) throw new Error("not_found");
     if (snap.data().status !== "confirmed") throw new Error("not_confirmed");
     transaction.update(ref, { status: "cancelled", cancelledAt: new Date(), cancelledBy, cancellationReason: reason });
+    const targetMonth = String(snap.data().targetMonth ?? "");
+    if (targetMonth) transaction.set(db.collection("payrollPeriodLocks").doc(targetMonth), { targetMonth, status: "cancelled", updatedAt: new Date() });
   });
 }
 
@@ -291,8 +294,15 @@ export async function savePayrollBreakPolicy(db: FirestoreRest, uid: string, val
   const policy = validatePayrollBreakPolicy(value);
   if (!policy) throw new Error("invalid_break_policy");
   const ref = db.collection("payrollSettings").doc("attendanceBreakPolicy");
+  const confirmed = await db.collection("payrollRuns").where("status", "==", "confirmed").get();
+  const initializedAt = new Date();
   await db.runTransaction(async (transaction) => {
-    transaction.set(ref, { ...policy, updatedAt: new Date(), updatedBy: uid });
+    transaction.set(ref, { ...policy, updatedAt: initializedAt, updatedBy: uid });
+    for (const run of confirmed.docs) {
+      const targetMonth = String(run.data().targetMonth ?? "");
+      if (targetMonth) transaction.set(db.collection("payrollPeriodLocks").doc(targetMonth), { targetMonth, status: "confirmed", updatedAt: initializedAt });
+    }
+    transaction.set(db.collection("payrollSettings").doc("attendanceManagementState"), { payrollPeriodLocksInitialized: true, initializedAt });
   });
   return policy;
 }

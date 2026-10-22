@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { applyAttendanceLogOperation, authorizeAttendanceLog, isClosedAttendanceMonth, validateAttendanceLogRequest, type AttendanceLogRequest } from "../lib/attendance-log-management.ts";
+import { applyAttendanceLogOperation, authorizeAttendanceLog, validateAttendanceLogRequest, type AttendanceLogRequest } from "../lib/attendance-log-management.ts";
 import { normalizeAttendanceHistory } from "../lib/attendance-history.ts";
 import type { FirestoreRest } from "../lib/firebase-rest.ts";
 
@@ -20,21 +20,21 @@ test("削除と削除取消はadminだけ、従来修正は担当managerも可�
   assert.equal(authorizeAttendanceLog({ role: "manager", storeId: "store-2" }, "store-1", "correct"), false);
 });
 
-test("managerは当月修正を維持し、給与データを公開せず過去月を本部確認へ送る", () => {
-  const now = new Date("2026-10-22T00:00:00Z");
-  assert.equal(isClosedAttendanceMonth("2026-10-01", now), false);
-  assert.equal(isClosedAttendanceMonth("2026-09-30", now), true);
+test("managerの過去月修正を一律拒否せず非機密の給与確定月索引を参照する", () => {
   const source = readFileSync("lib/attendance-log-management.ts", "utf8");
-  assert.match(source, /!isAdmin && isClosedAttendanceMonth/);
-  assert.match(source, /isAdmin\s*\? transaction\.get\(db\.collection\("payrollRuns"\)/);
+  assert.doesNotMatch(source, /closed_period_requires_admin/);
+  assert.match(source, /collection\("payrollPeriodLocks"\)\.doc\(targetMonth\)/);
+  assert.match(source, /payrollPeriodLocksInitialized/);
 });
 
-function fixture(options: { confirmed?: boolean; deleted?: boolean } = {}) {
+function fixture(options: { confirmed?: boolean; deleted?: boolean; initialized?: boolean; logType?: "clock_in" | "break_start" } = {}) {
   const writes: Array<{ kind: string; path: string; data: Record<string, unknown> }> = [];
   const docs = new Map<string, Record<string, unknown>>([
     ["employees/employee-1", { employeeCode: "1001", name: "テスト", storeId: "store-1" }],
     ["stores/store-1", { storeName: "店舗1" }],
-    ["clockLogs/log-1", { employeeId: "employee-1", storeId: "store-1", type: "clock_in", timestamp: new Date("2026-11-10T00:00:00Z"), ...(options.deleted ? { isDeleted: true, deletionBatchId: "batch-1" } : {}) }],
+    ["clockLogs/log-1", { employeeId: "employee-1", storeId: "store-1", type: options.logType ?? "clock_in", timestamp: new Date("2026-11-10T00:00:00Z"), ...(options.deleted ? { isDeleted: true, deletionBatchId: "batch-1" } : {}) }],
+    ...(options.initialized === false ? [] : [["payrollSettings/attendanceManagementState", { payrollPeriodLocksInitialized: true }]] as [string, Record<string, unknown>][]),
+    ...(options.confirmed ? [["payrollPeriodLocks/2026-11", { targetMonth: "2026-11", status: "confirmed" }]] as [string, Record<string, unknown>][] : []),
   ]);
   const ref = (path: string): any => ({ id: path.split("/").at(-1), _docPath: path, collection: (name: string) => collection(`${path}/${name}`) });
   const collection = (path: string): any => ({ _colPath: path, doc: (id = `generated-${writes.length}`) => ref(`${path}/${id}`), where: () => ({ _colPath: "query", where() { return this; }, limit() { return this; } }) });
@@ -60,12 +60,58 @@ test("削除取消はisDeleted=falseへ戻し監査履歴を追加する", async
   assert.match(validateAttendanceLogRequest({ ...request("restore"), changes: [{ id: "log-1", operation: "create", type: "clock_in" }] }) ?? "", /追加できません/);
 });
 
+test("担当managerは休憩打刻だけをサーバーAPI処理で論理削除できる", async () => {
+  const f = fixture({ logType: "break_start" });
+  const input: AttendanceLogRequest = { ...request("correct"), changes: [{ id: "log-1", operation: "delete", type: "break_start" }] };
+  await applyAttendanceLogOperation(f.db, { uid: "manager-1", profile: { role: "manager", storeId: "store-1" } }, input);
+  assert.equal(f.writes.some((write) => write.path === "clockLogs/log-1" && write.data.isDeleted === true && write.data.deletedBy === "manager-1"), true);
+  assert.equal(f.writes.some((write) => write.path.startsWith("auditLogs/") && write.data.deleteReason === "時刻訂正"), true);
+});
+
+test("managerは出退勤の論理削除と削除取消を実行できない", async () => {
+  const f = fixture();
+  const deletion: AttendanceLogRequest = { ...request("correct"), changes: [{ id: "log-1", operation: "delete", type: "clock_in" }] };
+  await assert.rejects(applyAttendanceLogOperation(f.db, { uid: "manager-1", profile: { role: "manager", storeId: "store-1" } }, deletion), /forbidden/);
+  await assert.rejects(applyAttendanceLogOperation(f.db, { uid: "manager-1", profile: { role: "manager", storeId: "store-1" } }, request("restore")), /forbidden/);
+  assert.equal(f.writes.length, 0);
+});
+
+test("リクエスト上の休憩種別を偽装して出勤打刻を削除できない", async () => {
+  const f = fixture();
+  const spoofed: AttendanceLogRequest = { ...request("correct"), changes: [{ id: "log-1", operation: "delete", type: "break_start" }] };
+  await assert.rejects(applyAttendanceLogOperation(f.db, { uid: "manager-1", profile: { role: "manager", storeId: "store-1" } }, spoofed), /log_type_mismatch/);
+  assert.equal(f.writes.length, 0);
+});
+
+test("初期化済みならmanagerの過去月修正を許可し、確定月だけ全roleで拒否する", async () => {
+  const correction = request("correct");
+  const open = fixture();
+  await applyAttendanceLogOperation(open.db, { uid: "manager-1", profile: { role: "manager", storeId: "store-1" } }, correction);
+  assert.equal(open.writes.some((write) => write.path === "clockLogs/log-1"), true);
+  for (const profile of [{ role: "admin" }, { role: "manager", storeId: "store-1" }]) {
+    const locked = fixture({ confirmed: true });
+    await assert.rejects(applyAttendanceLogOperation(locked.db, { uid: "actor-1", profile }, correction), /payroll_confirmed/);
+    assert.equal(locked.writes.length, 0);
+  }
+});
+
+test("索引初期化前の移行区間はmanagerの過去月だけ安全停止する", async () => {
+  const f = fixture({ initialized: false });
+  const oldMonth = { ...request("correct"), workDate: "2026-09-10" };
+  await assert.rejects(applyAttendanceLogOperation(f.db, { uid: "manager-1", profile: { role: "manager", storeId: "store-1" } }, oldMonth), /payroll_lock_index_pending/);
+  assert.equal(f.writes.length, 0);
+});
+
 test("clockLogs論理削除は給与・現行admin勤怠Excelの入力から除外され物理削除しない", () => {
   const payroll = readFileSync("lib/payroll-server.ts", "utf8");
   const admin = readFileSync("app/admin/page.tsx", "utf8");
   assert.match(payroll, /data\.isDeleted !== true/);
   assert.match(admin, /row\.isDeleted/);
   assert.doesNotMatch(readFileSync("app/api/attendance/clock-logs/route.ts", "utf8"), /deleteDoc|\.delete\(/);
+  const adminPage = readFileSync("app/admin/page.tsx", "utf8");
+  const correctionSave = adminPage.slice(adminPage.indexOf("const saveEdit"), adminPage.indexOf("const downloadExcel"));
+  assert.match(correctionSave, /fetch\("\/api\/attendance\/clock-logs"/);
+  assert.doesNotMatch(correctionSave, /updateDoc\(doc\(db,\s*"clockLogs"/);
 });
 
 test("確定済み勤務月は修正・削除を開始しない", async () => {

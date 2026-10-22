@@ -3,6 +3,7 @@ import { verifyAdminToken } from "@/lib/firebase-admin";
 import { createPayrollDraft, loadPayrollRun } from "@/lib/payroll-server";
 import { isValidDate, isValidMonth, validateAdjustments } from "@/lib/payroll-api-validation";
 import { createPayrollWorkbook, createTransferWorkbook, createUnifiedPayrollWorkbook, createPayslipPdf, createPayslipZip, selectFullTimePayslipResults, selectStorePayslipResults } from "@/lib/payroll-export";
+import { getPayrollBlockingIssues } from "@/lib/payroll";
 
 export const runtime = "nodejs";
 
@@ -31,6 +32,8 @@ export async function POST(request: NextRequest, context: { params: Promise<{ ki
   try {
     run = await createPayrollDraft(admin.db, { targetMonth: input.targetMonth, paymentMonth: input.paymentMonth, paymentDate: input.paymentDate, adjustments: input.adjustmentsSnapshot });
     if (run.sourceAttendanceVersion !== input.sourceAttendanceVersion) return NextResponse.json({ error: "試算後に勤怠または給与設定が変更されました。再試算してください" }, { status: 409 });
+    const blockingIssues = getPayrollBlockingIssues(run.issues);
+    if (blockingIssues.length > 0) return NextResponse.json({ error: `重大なエラーがあるためExcelを出力できません：${[...new Set(blockingIssues.map((issue) => issue.message))].join("／")}`, code: "PAYROLL_BLOCKING_ERRORS", issues: blockingIssues.map((issue) => ({ code: issue.code, message: issue.message })) }, { status: 409 });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error && error.message === "already_confirmed" ? "この対象月は確定済みです。確定済みExcelを使用してください" : "給与を再計算できません" }, { status: 409 });
   }

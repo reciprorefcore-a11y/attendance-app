@@ -168,6 +168,7 @@ test("給与確定はサーバー再計算と勤怠バージョン一致後だ�
   assert.match(fn, /sourceAttendanceVersion !== input\.sourceAttendanceVersion/);
   assert.match(fn, /source_changed/);
   assert.match(fn, /runTransaction/);
+  assert.match(fn, /collection\("payrollPeriodLocks"\)\.doc\(input\.targetMonth\)/);
   assert.doesNotMatch(fn, /input\.results|draft\.results/);
 });
 
@@ -176,7 +177,17 @@ test("未確定給与Excelはクライアントresultsを使わずサーバー�
   const post = route.slice(route.indexOf("export async function POST"), route.indexOf("export async function GET"));
   assert.match(post, /createPayrollDraft/);
   assert.match(post, /sourceAttendanceVersion/);
+  assert.match(post, /getPayrollBlockingIssues\(run\.issues\)/);
+  assert.match(post, /PAYROLL_BLOCKING_ERRORS/);
+  assert.match(post, /blockingIssues\.map\(\(issue\) => issue\.message\)/);
   assert.doesNotMatch(post, /input\.results/);
+});
+
+test("確定と未確定Excelは同じblocking error抽出関数を使う", () => {
+  const server = readFileSync("lib/payroll-server.ts", "utf8");
+  const route = readFileSync("app/api/payroll/export/[kind]/route.ts", "utf8");
+  assert.match(server, /getPayrollBlockingIssues\(recalculated\.issues\)/);
+  assert.match(route, /getPayrollBlockingIssues\(run\.issues\)/);
 });
 
 test("確定取消はtransaction内でconfirmed状態を再確認する", () => {
@@ -187,4 +198,16 @@ test("確定取消はtransaction内でconfirmed状態を再確認する", () => 
   assert.match(fn, /runTransaction/);
   assert.match(fn, /snap\.data\(\)\.status !== "confirmed"/);
   assert.match(fn, /not_confirmed/);
+  assert.match(fn, /collection\("payrollPeriodLocks"\)\.doc\(targetMonth\)/);
+});
+
+test("一律休憩設定保存時に既存確定月の非機密索引を初期化する", () => {
+  const source = readFileSync("lib/payroll-server.ts", "utf8");
+  const start = source.indexOf("export async function savePayrollBreakPolicy");
+  const fn = source.slice(start);
+  assert.match(fn, /where\("status", "==", "confirmed"\)/);
+  assert.match(fn, /payrollPeriodLocks/);
+  assert.match(fn, /payrollPeriodLocksInitialized: true/);
+  const lockWrites = [...source.matchAll(/collection\("payrollPeriodLocks"\)[^\n]+/g)].map((match) => match[0]).join("\n");
+  assert.doesNotMatch(lockWrites, /earnings|deductions|results|employeeId|runId|updatedBy/);
 });

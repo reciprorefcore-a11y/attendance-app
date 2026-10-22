@@ -194,7 +194,7 @@ test("manager can logically cancel own-store clockLogs", async () => {
   }));
 });
 
-test("clockLogsの論理削除フィールドはmanagerを拒否しadminだけ変更できる", async () => {
+test("出勤・退勤の論理削除フィールドはmanagerを拒否しadminだけ変更できる", async () => {
   await environment.withSecurityRulesDisabled(async (context) => {
     await setDoc(doc(context.firestore(), "clockLogs", "logical-delete-target"), { employeeId: "employee-1", storeId: "store-a", type: "clock_in", isDeleted: false });
   });
@@ -202,6 +202,37 @@ test("clockLogsの論理削除フィールドはmanagerを拒否しadminだけ�
   await assertFails(updateDoc(doc(managerDb, "clockLogs", "logical-delete-target"), { isDeleted: true, deletedAt: serverTimestamp(), deletedBy: "manager-user", deleteReason: "fixture" }));
   const adminDb = environment.authenticatedContext("admin-user").firestore();
   await assertSucceeds(updateDoc(doc(adminDb, "clockLogs", "logical-delete-target"), { isDeleted: true, deletedAt: serverTimestamp(), deletedBy: "admin-user", deleteReason: "fixture" }));
+});
+
+test("担当managerは自店舗の休憩打刻を論理削除できる", async () => {
+  await environment.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(context.firestore(), "clockLogs", "break-delete-target"), {
+      employeeId: "employee-1", storeId: "store-a", type: "break_start", isDeleted: false,
+    });
+  });
+  const managerDb = environment.authenticatedContext("manager-user").firestore();
+  await assertSucceeds(updateDoc(doc(managerDb, "clockLogs", "break-delete-target"), {
+    isDeleted: true, deletedAt: serverTimestamp(), deletedBy: "manager-user", deleteReason: "重複休憩",
+  }));
+});
+
+test("managerは他店舗の休憩削除・休憩削除取消を実行できない", async () => {
+  await environment.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(context.firestore(), "clockLogs", "other-break-delete-target"), {
+      employeeId: "employee-2", storeId: "store-b", type: "break_end", isDeleted: false,
+    });
+    await setDoc(doc(context.firestore(), "clockLogs", "break-restore-target"), {
+      employeeId: "employee-1", storeId: "store-a", type: "break_start", isDeleted: true,
+      deletedAt: new Date(), deletedBy: "admin-user", deleteReason: "fixture",
+    });
+  });
+  const managerDb = environment.authenticatedContext("manager-user").firestore();
+  await assertFails(updateDoc(doc(managerDb, "clockLogs", "other-break-delete-target"), {
+    isDeleted: true, deletedAt: serverTimestamp(), deletedBy: "manager-user", deleteReason: "fixture",
+  }));
+  await assertFails(updateDoc(doc(managerDb, "clockLogs", "break-restore-target"), {
+    isDeleted: false, restoredAt: serverTimestamp(), restoredBy: "manager-user", restoreReason: "fixture",
+  }));
 });
 
 test("clockLogsの削除取消メタデータもmanagerは変更できない", async () => {
@@ -285,4 +316,16 @@ test("payroll snapshots are admin-only", async () => {
   await assertSucceeds(setDoc(doc(adminDb, "payrollSettings", "employee-1"), { healthInsurance: 10000 }));
   await assertFails(getDoc(doc(managerDb, "payrollSettings", "employee-1")));
   await assertFails(setDoc(doc(staffDb, "payrollSettings", "employee-1"), { healthInsurance: 0 }));
+});
+
+test("給与確定月索引は管理roleが読めるが、書込みはadminだけ", async () => {
+  const adminDb = environment.authenticatedContext("admin-user").firestore();
+  const managerDb = environment.authenticatedContext("manager-user").firestore();
+  const staffDb = environment.authenticatedContext("staff-user").firestore();
+  await assertSucceeds(setDoc(doc(adminDb, "payrollPeriodLocks", "2026-11"), { targetMonth: "2026-11", status: "confirmed" }));
+  await assertSucceeds(getDoc(doc(managerDb, "payrollPeriodLocks", "2026-11")));
+  await assertFails(getDoc(doc(staffDb, "payrollPeriodLocks", "2026-11")));
+  await assertFails(setDoc(doc(managerDb, "payrollPeriodLocks", "2026-12"), { targetMonth: "2026-12", status: "confirmed" }));
+  await assertSucceeds(setDoc(doc(adminDb, "payrollSettings", "attendanceManagementState"), { payrollPeriodLocksInitialized: true }));
+  await assertSucceeds(getDoc(doc(managerDb, "payrollSettings", "attendanceManagementState")));
 });

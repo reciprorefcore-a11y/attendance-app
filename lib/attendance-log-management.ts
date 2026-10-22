@@ -57,6 +57,14 @@ export function isClosedAttendanceMonth(workDate: string, now = new Date()) {
   return workDate.slice(0, 7) < currentMonth;
 }
 
+function normalizedStoredType(value: unknown) {
+  return ({ clockIn: "clock_in", clockOut: "clock_out", breakStart: "break_start", breakEnd: "break_end" } as Record<string, string>)[String(value ?? "")] ?? String(value ?? "");
+}
+
+function isBreakType(value: unknown) {
+  return normalizedStoredType(value) === "break_start" || normalizedStoredType(value) === "break_end";
+}
+
 function historyLog(snapshot: RestDocSnapshot | null, change: AttendanceLogChange) {
   const data = snapshot?.exists ? snapshot.data() : {};
   const timestamp = data.timestamp instanceof Date ? data.timestamp.toISOString() : data.timestamp ?? null;
@@ -72,30 +80,35 @@ export async function applyAttendanceLogOperation(
   if (validation) throw new Error(`invalid:${validation}`);
   if (!authorizeAttendanceLog(actor.profile, input.storeId, input.action)) throw new Error("forbidden");
   const isAdmin = actor.profile.role === "admin";
-  // payrollRuns は給与額を含みRules上admin専用。非adminへ給与データを公開せず、
-  // 確定し得ない当月だけ従来の担当店舗修正を許可し、過去月はadmin操作へ限定する。
-  if (!isAdmin && isClosedAttendanceMonth(input.workDate)) throw new Error("closed_period_requires_admin");
   const reason = input.reason.trim();
   const employeeRef = db.collection("employees").doc(input.employeeId);
   const storeRef = db.collection("stores").doc(input.storeId);
   const logRefs = input.changes.map((change) => db.collection("clockLogs").doc(change.id));
   const auditRef = db.collection("auditLogs").doc();
+  const targetMonth = input.workDate.slice(0, 7);
+  const periodLockRef = db.collection("payrollPeriodLocks").doc(targetMonth);
+  const managementStateRef = db.collection("payrollSettings").doc("attendanceManagementState");
   const deletionBatchId = input.action === "delete" ? randomUUID() : null;
   const now = new Date();
 
   await db.runTransaction(async (transaction) => {
-    const confirmedRead = isAdmin
-      ? transaction.get(db.collection("payrollRuns").where("targetMonth", "==", input.workDate.slice(0, 7)).where("status", "==", "confirmed").limit(1))
+    // 給与額を含むpayrollRunsはadmin専用のまま維持する。店舗管理者は、確定有無だけを
+    // payrollPeriodLocksから参照する。初期化前のデプロイ移行中だけ従来同様に過去月を安全停止する。
+    const legacyConfirmedRead = isAdmin
+      ? transaction.get(db.collection("payrollRuns").where("targetMonth", "==", targetMonth).where("status", "==", "confirmed").limit(1))
       : Promise.resolve({ empty: true, docs: [] });
-    const [employee, store, confirmed, ...snapshots] = await Promise.all([
+    const [employee, store, periodLock, managementState, legacyConfirmed, ...snapshots] = await Promise.all([
       transaction.get(employeeRef),
       transaction.get(storeRef),
-      confirmedRead,
+      transaction.get(periodLockRef),
+      transaction.get(managementStateRef),
+      legacyConfirmedRead,
       ...logRefs.map((ref) => transaction.get(ref)),
     ]);
     if (!employee.exists) throw new Error("employee_not_found");
     if (!store.exists) throw new Error("store_not_found");
-    if (!confirmed.empty) throw new Error("payroll_confirmed");
+    if ((periodLock.exists && periodLock.data().status === "confirmed") || !legacyConfirmed.empty) throw new Error("payroll_confirmed");
+    if (!isAdmin && managementState.data().payrollPeriodLocksInitialized !== true && isClosedAttendanceMonth(input.workDate)) throw new Error("payroll_lock_index_pending");
     if (!authorizeAttendanceLog(actor.profile, input.storeId, input.action)) throw new Error("forbidden");
 
     const before = input.changes.map((change, index) => historyLog(snapshots[index], change));
@@ -109,6 +122,8 @@ export async function applyAttendanceLogOperation(
         const existing = snapshot.data();
         if (String(existing.employeeId ?? "") !== input.employeeId) throw new Error("employee_mismatch");
         if (!authorizeAttendanceLog(actor.profile, String(existing.storeId ?? ""), input.action)) throw new Error("forbidden");
+        if (normalizedStoredType(existing.type) !== change.type) throw new Error("log_type_mismatch");
+        if (input.action === "correct" && change.operation === "delete" && !isAdmin && !isBreakType(existing.type)) throw new Error("forbidden");
       }
 
       if (input.action === "correct") {
@@ -153,7 +168,7 @@ export async function applyAttendanceLogOperation(
       before,
       after,
       correctionReason: input.action === "correct" ? reason : null,
-      deleteReason: input.action === "delete" ? reason : null,
+      deleteReason: input.action === "delete" || (input.action === "correct" && input.changes.some((change) => change.operation === "delete")) ? reason : null,
       restoreReason: input.action === "restore" ? reason : null,
       deletionBatchId,
       performedBy: actor.uid,

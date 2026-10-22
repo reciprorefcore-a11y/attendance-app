@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import XLSX from "xlsx";
-import { applyPayrollBreakPolicy, calculatePayrollEmployee, type PayrollAttendanceDay, type PayrollBreakPolicy, type PayrollEmployee } from "../lib/payroll.ts";
+import { applyPayrollBreakPolicy, calculatePayrollEmployee, getPayrollBlockingIssues, type PayrollAttendanceDay, type PayrollBreakPolicy, type PayrollEmployee } from "../lib/payroll.ts";
 import { createPayrollWorkbook, createPayslipPdf } from "../lib/payroll-export.ts";
 import { isValidDate, isValidMonth } from "../lib/payroll-api-validation.ts";
 import { buildAttendanceRows, type CalculationClockLog } from "../lib/attendance-calculation.ts";
@@ -10,6 +10,13 @@ import { shouldIncludePayrollClockLog } from "../lib/payroll-server.ts";
 const policy: PayrollBreakPolicy = { enabled: true, thresholdMinutes: 180, deductionMinutes: 15, effectiveFrom: "2026-11-01" };
 const day = (minutes: number, date = "2026-11-01", recordedBreakMinutes = 0): PayrollAttendanceDay => ({ employeeId: "e1", date, workMinutes: minutes, overtimeMinutes: 0, nightMinutes: 0, helpMinutes: 0, breakMinutes: recordedBreakMinutes, recordedBreakMinutes, confirmed: true });
 const employee: PayrollEmployee = { id: "e1", employeeCode: "1001", name: "休憩テスト", storeId: "s1", storeName: "店舗A", payrollType: "hourly", employeeType: "partTime", hourlyWage: 1200, payrollEnabled: true };
+
+test("break_policy_not_configuredを含むerrorだけをExcel・確定共通のblocking対象にする", () => {
+  assert.deepEqual(getPayrollBlockingIssues([
+    { severity: "warning", code: "month_not_closed", message: "締め前" },
+    { severity: "error", code: "break_policy_not_configured", message: "設定未保存" },
+  ]).map((issue) => issue.code), ["break_policy_not_configured"]);
+});
 
 test("一律休憩の境界は179分=0、180分=15、181分=15", () => {
   assert.equal(applyPayrollBreakPolicy(day(179), policy).automaticBreakMinutes, 0);

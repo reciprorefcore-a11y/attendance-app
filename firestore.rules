@@ -39,6 +39,40 @@ service cloud.firestore {
       return profile().storeIds;
     }
 
+    function managesClockLogStoreBeforeAndAfter() {
+      return (isFcManager()
+              && resource.data.storeId in myStoreIds()
+              && request.resource.data.storeId in myStoreIds())
+             || (isAreaManager()
+                 && resource.data.storeId in myStoreIds()
+                 && request.resource.data.storeId in myStoreIds())
+             || (isManager()
+                 && resource.data.storeId == myStoreId()
+                 && request.resource.data.storeId == myStoreId());
+    }
+
+    function changesClockLogDeletionState() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasAny([
+        'isDeleted', 'deletedAt', 'deletedBy', 'deleteReason',
+        'deletionBatchId', 'restoredAt', 'restoredBy', 'restoreReason'
+      ]);
+    }
+
+    function isScopedBreakDeletion() {
+      return managesClockLogStoreBeforeAndAfter()
+             && resource.data.type in ['break_start', 'break_end', 'breakStart', 'breakEnd']
+             && request.resource.data.type == resource.data.type
+             && resource.data.isDeleted != true
+             && request.resource.data.isDeleted == true
+             && request.resource.data.deletedBy == request.auth.uid
+             && request.resource.data.deletedAt is timestamp
+             && request.resource.data.deleteReason is string
+             && request.resource.data.deleteReason.size() > 0
+             && !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+               'deletionBatchId', 'restoredAt', 'restoredBy', 'restoreReason'
+             ]);
+    }
+
     // ── users ────────────────────────────────────────────────────────────────
     // 本人と admin のみ読み書き可
     match /users/{uid} {
@@ -112,13 +146,8 @@ service cloud.firestore {
                     && request.resource.data.storeId.size() > 0;
       allow read: if true;
       allow update: if isAdmin()
-                    || ((isFcManager() && resource.data.storeId in myStoreIds())
-                        || (isAreaManager() && resource.data.storeId in myStoreIds())
-                        || (isManager() && resource.data.storeId == myStoreId()))
-                       && !request.resource.data.diff(resource.data).affectedKeys().hasAny([
-                         'isDeleted', 'deletedAt', 'deletedBy', 'deleteReason',
-                         'deletionBatchId', 'restoredAt', 'restoredBy', 'restoreReason'
-                       ]);
+                    || (managesClockLogStoreBeforeAndAfter()
+                        && (!changesClockLogDeletionState() || isScopedBreakDeletion()));
       allow delete: if false;
     }
 
@@ -153,6 +182,18 @@ service cloud.firestore {
       match /auditLogs/{auditId} {
         allow read, write: if isAdmin();
       }
+    }
+
+    // 給与額を公開せず、打刻修正APIが月の確定有無だけを確認するための索引。
+    match /payrollPeriodLocks/{targetMonth} {
+      allow read: if isAdmin() || isFcManager() || isAreaManager() || isManager();
+      allow write: if isAdmin();
+    }
+
+    // 段階反映時に既存確定月索引の初期化完了だけを管理者画面へ通知する。
+    match /payrollSettings/attendanceManagementState {
+      allow read: if isAdmin() || isFcManager() || isAreaManager() || isManager();
+      allow write: if isAdmin();
     }
 
     match /payrollSettings/{employeeId} {

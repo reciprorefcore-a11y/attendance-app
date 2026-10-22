@@ -131,6 +131,10 @@ export type PayrollIssue = {
   message: string;
 };
 
+export function getPayrollBlockingIssues(issues: PayrollIssue[]) {
+  return issues.filter((issue) => issue.severity === "error");
+}
+
 export type FixedPayrollAdjustment = {
   temporaryAttendanceCount?: number;
   /** 当月だけ使用する休日手当総額。自動額と異なる場合は overrideReason が必須。 */
