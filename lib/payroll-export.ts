@@ -118,11 +118,13 @@ function unifiedRows(results: PayrollResult[]) { return sortPayrollResultsForExc
 export function createUnifiedPayrollWorkbook(results:PayrollResult[],paymentMonth:string,draft=false){
   const included = selectPayrollExportResults(results, !draft);
   const payrollWorkbook = XLSX.read(createPayrollWorkbook(included, paymentMonth, draft), { type: "buffer", cellStyles: true, cellFormula: true });
-  if (payrollWorkbook.SheetNames.length !== 1) throw new Error("給与一覧の対象人数が横型帳票の1シート上限を超えています");
-  const originalPayrollName = payrollWorkbook.SheetNames[0];
-  payrollWorkbook.SheetNames = ["給与一覧"];
-  payrollWorkbook.Sheets["給与一覧"] = payrollWorkbook.Sheets[originalPayrollName];
-  if (originalPayrollName !== "給与一覧") delete payrollWorkbook.Sheets[originalPayrollName];
+  // 1シート上限を超えても落とさず、全シートを「給与一覧」「給与一覧_2」…として残す
+  const originalNames = [...payrollWorkbook.SheetNames];
+  const renamed = originalNames.map((_, index) => index === 0 ? "給与一覧" : `給与一覧_${index + 1}`);
+  const nextSheets: Record<string, unknown> = {};
+  originalNames.forEach((orig, index) => { nextSheets[renamed[index]] = payrollWorkbook.Sheets[orig]; });
+  payrollWorkbook.SheetNames = renamed;
+  payrollWorkbook.Sheets = nextSheets as typeof payrollWorkbook.Sheets;
   const workbook=payrollWorkbook,allRows=unifiedRows(included),fixedRows=allRows.filter(row=>row[3]==="正社員"),hourlyRows=allRows.filter(row=>row[3]==="アルバイト");
   const add=(name:string,rows:unknown[][])=>XLSX.utils.book_append_sheet(workbook,XLSX.utils.aoa_to_sheet(rows),name);
   add("正社員",[[`${paymentLabel(paymentMonth)}支給 正社員`],unifiedHeaders,...fixedRows]); add("アルバイト",[[`${paymentLabel(paymentMonth)}支給 アルバイト`],unifiedHeaders,...hourlyRows]);

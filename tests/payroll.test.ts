@@ -560,6 +560,32 @@ test("統合給与Excelは横型帳票の9名だけを1ブック5シートへ出
   for(const column of [2,3,4,5,6,7,8,9,10]){const code=String(payroll[XLSX.utils.encode_cell({r:2,c:column})]?.v??"");assert.deepEqual([17,18,19,20,21,22,25,26,29,32,33,34].map(row=>Number(payroll[XLSX.utils.encode_cell({r:row,c:column})]?.v??0)),oldValues.get(code),`${code}の金額一致`);}
 });
 
+test("統合給与Excelは34名超（1シート上限）でも複数シートへ出力する", () => {
+  // 40名の正社員は 34 + 6 の 2シートになる。追加の 4 シート（正社員・アルバイト・店舗別集計・振込データ）も生成されること。
+  const results = Array.from({ length: 40 }, (_, index) =>
+    calculatePayrollEmployee(
+      employee(`emp-${index}`, {
+        employeeCode: String(index + 1).padStart(4, "0"),
+        name: `正社員${index + 1}`,
+        employeeType: "fullTime",
+        payrollType: "fixed",
+        fixedBaseSalary: 200000 + index * 100,
+        paymentMethod: index === 0 ? "cash" : "bank",
+      }),
+      [],
+    ),
+  );
+  const book = XLSX.read(createUnifiedPayrollWorkbook(results, "2026-09", false), { type: "buffer", cellStyles: true, cellFormula: true });
+  assert.deepEqual(book.SheetNames, ["給与一覧", "給与一覧_2", "正社員", "アルバイト", "店舗別集計", "振込データ"]);
+  assert.equal(book.Sheets["給与一覧"].AN4.v, "34人");
+  assert.equal(book.Sheets["給与一覧_2"].AN4.v, "6人");
+  // 2シート目のサブ合計位置（group start=2 の 1 人目）に社員コードが入る
+  const page2Code = book.Sheets["給与一覧_2"][XLSX.utils.encode_cell({ r: 2, c: 2 })]?.v;
+  assert.ok(typeof page2Code === "string" && page2Code.length > 0, "2シート目に社員が流し込まれている");
+  const fixed = XLSX.utils.sheet_to_json(book.Sheets["正社員"], { header: 1 }) as unknown[][];
+  assert.equal(fixed.slice(2).length, 40, "正社員シートに40名全員が入る");
+});
+
 test("振込対象の口座未登録・未確認を警告する",()=>{const missing=calculatePayrollEmployee(employee("missing",{bankAccountRegistered:false}),[day("missing","2026-08-01",60)]),unknown={...calculatePayrollEmployee(employee("unknown"),[day("unknown","2026-08-01",60)]),bankAccountRegisteredSnapshot:null};assert.equal(payrollTransferWarnings([missing,unknown]).length,2);});
 
 test("小林彗太へその他臨時支給800,000円を設定すると所得税が再計算され差引支給額が単純に800,000円増にならない", async () => {

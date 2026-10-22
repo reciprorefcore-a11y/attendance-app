@@ -231,3 +231,26 @@ test("hq/payroll UIは確定済みなら統合ExcelをGET、未確定ならPOST�
   assert.match(fn, /method:\s*"POST"/);
   assert.match(fn, /sourceAttendanceVersion/);
 });
+
+test("一律休憩のeffectiveFromは確定済み月以下を保存時に拒否する", () => {
+  const src = readFileSync("lib/payroll-server.ts", "utf8");
+  const fn = src.slice(src.indexOf("export async function savePayrollBreakPolicy"));
+  // 確定済み targetMonth を列挙して effectiveFrom.slice(0,7) 以上を block
+  assert.match(fn, /where\("status", "==", "confirmed"\)/);
+  assert.match(fn, /blockingMonths/);
+  assert.match(fn, /policy\.effectiveFrom\.slice\(0, 7\)/);
+  assert.match(fn, /throw new Error\(`confirmed_month_blocked:/);
+  // 拒否メッセージに「翌月1日以降を指定してください」のヒント
+  assert.match(fn, /は確定済みのため、/);
+  assert.match(fn, /以降を指定してください/);
+});
+
+test("break-policy POSTはconfirmed_month_blockedを画面文言に変換し真因をログへ残す", () => {
+  const route = readFileSync("app/api/payroll/break-policy/route.ts", "utf8");
+  // catchが真因をconsole.errorへ記録
+  assert.match(route, /catch \(error\)/);
+  assert.match(route, /console\.error\("\[break-policy\] save failed:",\s*error\)/);
+  // confirmed_month_blocked: prefix を落として画面文言のみ返す
+  assert.match(route, /confirmed_month_blocked:/);
+  assert.match(route, /slice\("confirmed_month_blocked:"\.length\)/);
+});

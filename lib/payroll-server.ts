@@ -290,11 +290,29 @@ export async function cancelPayrollRun(db: FirestoreRest, runId: string, cancell
   });
 }
 
+function nextMonthStart(targetMonth: string) {
+  const [y, m] = targetMonth.split("-").map(Number);
+  const nextYear = m === 12 ? y + 1 : y;
+  const nextMonth = m === 12 ? 1 : m + 1;
+  return `${nextYear}-${String(nextMonth).padStart(2, "0")}-01`;
+}
+
 export async function savePayrollBreakPolicy(db: FirestoreRest, uid: string, value: unknown) {
   const policy = validatePayrollBreakPolicy(value);
   if (!policy) throw new Error("invalid_break_policy");
   const ref = db.collection("payrollSettings").doc("attendanceBreakPolicy");
   const confirmed = await db.collection("payrollRuns").where("status", "==", "confirmed").get();
+  const confirmedMonths = confirmed.docs
+    .map((run) => String(run.data().targetMonth ?? ""))
+    .filter((targetMonth) => /^\d{4}-\d{2}$/.test(targetMonth));
+  const effectiveMonth = policy.effectiveFrom.slice(0, 7);
+  const blockingMonths = confirmedMonths.filter((targetMonth) => targetMonth >= effectiveMonth).sort();
+  if (blockingMonths.length > 0) {
+    const latest = blockingMonths[blockingMonths.length - 1];
+    const [y, m] = latest.split("-").map(Number);
+    const earliestAllowed = nextMonthStart(latest);
+    throw new Error(`confirmed_month_blocked:${y}年${m}月は確定済みのため、${earliestAllowed}以降を指定してください`);
+  }
   const initializedAt = new Date();
   await db.runTransaction(async (transaction) => {
     transaction.set(ref, { ...policy, updatedAt: initializedAt, updatedBy: uid });
