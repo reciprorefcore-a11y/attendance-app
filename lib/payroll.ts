@@ -109,6 +109,10 @@ export type PayrollAttendanceDay = {
   nightMinutes: number;
   helpMinutes: number;
   breakMinutes: number;
+  /** 実際の休憩打刻から控除した時間。 */
+  recordedBreakMinutes?: number;
+  /** 給与計算時だけ適用する日単位の一律休憩。 */
+  automaticBreakMinutes?: number;
   confirmed?: boolean;
   warnings?: string[];
   kind?: "daily" | "total";
@@ -167,6 +171,8 @@ export type PayrollResult = {
     nightMinutes: number;
     holidayMinutes: number;
     breakMinutes: number;
+    recordedBreakMinutes: number;
+    automaticBreakMinutes: number;
     helpMinutes: number;
   };
   earnings: {
@@ -223,6 +229,40 @@ export type PayrollResult = {
   attendanceDaysDetail: PayrollAttendanceDay[];
   fixedAdjustment?: FixedPayrollAdjustment & { automaticOvertimeAllowance: number; overtimeWithinFixedMinutes: number; excessOvertimeMinutes: number };
 };
+
+export type PayrollBreakPolicy = {
+  enabled: boolean;
+  thresholdMinutes: number;
+  deductionMinutes: number;
+  effectiveFrom: string;
+};
+
+export function validatePayrollBreakPolicy(value: unknown): PayrollBreakPolicy | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  const thresholdMinutes = Number(row.thresholdMinutes);
+  const deductionMinutes = Number(row.deductionMinutes);
+  const effectiveFrom = String(row.effectiveFrom ?? "");
+  if (typeof row.enabled !== "boolean" || !Number.isInteger(thresholdMinutes) || thresholdMinutes < 1 || !Number.isInteger(deductionMinutes) || deductionMinutes < 1 || deductionMinutes >= thresholdMinutes || !/^\d{4}-\d{2}-\d{2}$/.test(effectiveFrom)) return null;
+  const parsed = new Date(`${effectiveFrom}T00:00:00+09:00`);
+  if (Number.isNaN(parsed.getTime()) || new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Tokyo", year: "numeric", month: "2-digit", day: "2-digit" }).format(parsed) !== effectiveFrom) return null;
+  return { enabled: row.enabled, thresholdMinutes, deductionMinutes, effectiveFrom };
+}
+
+export function applyPayrollBreakPolicy(day: PayrollAttendanceDay, policy: PayrollBreakPolicy | null): PayrollAttendanceDay {
+  const recordedBreakMinutes = Math.max(0, Math.trunc(day.recordedBreakMinutes ?? day.breakMinutes ?? 0));
+  const originalWorkMinutes = Math.max(0, Math.trunc(day.workMinutes));
+  const automaticBreakMinutes = policy?.enabled === true && day.date >= policy.effectiveFrom && originalWorkMinutes >= policy.thresholdMinutes
+    ? Math.min(policy.deductionMinutes, originalWorkMinutes)
+    : 0;
+  return {
+    ...day,
+    recordedBreakMinutes,
+    automaticBreakMinutes,
+    breakMinutes: recordedBreakMinutes + automaticBreakMinutes,
+    workMinutes: originalWorkMinutes - automaticBreakMinutes,
+  };
+}
 
 const yen = (value: unknown) => Math.max(0, Math.trunc(Number(value) || 0));
 const FIXED_EMPLOYEE_CODES = new Set(["0002", "0003", "0017", "0064", "0083"]);
@@ -327,7 +367,9 @@ export function calculatePayrollEmployee(employee: PayrollEmployee, allAttendanc
   const totals = days.reduce((sum, day) => ({
     work: sum.work + day.workMinutes, overtime: sum.overtime + day.overtimeMinutes, night: sum.night + day.nightMinutes,
     help: sum.help + day.helpMinutes, break: sum.break + day.breakMinutes,
-  }), { work: 0, overtime: 0, night: 0, help: 0, break: 0 });
+    recordedBreak: sum.recordedBreak + (day.recordedBreakMinutes ?? day.breakMinutes),
+    automaticBreak: sum.automaticBreak + (day.automaticBreakMinutes ?? 0),
+  }), { work: 0, overtime: 0, night: 0, help: 0, break: 0, recordedBreak: 0, automaticBreak: 0 });
   const attendanceDays = new Set(days.filter((day) => day.workMinutes > 0).map((day) => day.date)).size;
   const payrollType = resolvePayrollType(employee);
   const hourlyWage = yen(employee.hourlyWage ?? employee.baseWage);
@@ -391,7 +433,7 @@ export function calculatePayrollEmployee(employee: PayrollEmployee, allAttendanc
     employeeId: employee.id, employeeCode: employee.employeeCode, employeeName: employee.name,
     storeId: payrollType === "fixed" ? "" : (employee.storeId ?? ""), storeName: payrollType === "fixed" ? "所属なし" : (employee.storeName ?? employee.storeId ?? ""), employeeType: payrollType === "fixed" ? "fullTime" : "partTime", payrollType, paymentMethod,
     payrollTransferOrder: employee.payrollTransferOrder ?? null,
-    attendance: { workingDays: yen(employee.workingDays), attendanceDays, absenceDays: yen(employee.absenceDays), paidLeaveDays: yen(employee.paidLeaveDays), workMinutes: totals.work, overtimeMinutes: totals.overtime, nightMinutes: totals.night, holidayMinutes: 0, breakMinutes: totals.break, helpMinutes: totals.help },
+    attendance: { workingDays: yen(employee.workingDays), attendanceDays, absenceDays: yen(employee.absenceDays), paidLeaveDays: yen(employee.paidLeaveDays), workMinutes: totals.work, overtimeMinutes: totals.overtime, nightMinutes: totals.night, holidayMinutes: 0, breakMinutes: totals.break, recordedBreakMinutes: totals.recordedBreak, automaticBreakMinutes: totals.automaticBreak, helpMinutes: totals.help },
     earnings: { baseSalary, directorCompensation: yen(employee.directorCompensation), positionAllowance, skillAllowance, fixedOvertimeAllowance, fixedOvertimeSupplement, holidayAllowance: 0, businessAllowance: 0, otherFixedAllowance, otherFixedAllowanceName: String(employee.otherFixedAllowanceName ?? ""), overtimePremium, nightPremium, otherTaxable: yen(employee.otherAllowance), absenceDeduction, lateEarlyDeduction, taxableTotal, transportation, otherNonTaxable: yen(employee.otherNonTaxableAllowance), nonTaxableTotal, grossTotal },
     deductions: { healthInsurance, childSupportContribution, careInsurance, employeePension, employmentInsurance, socialInsuranceTotal, taxableIncome, incomeTax, residentTax: yen(employee.residentTax), yearEndAdjustment: yen(employee.yearEndAdjustment), otherDeduction: yen(employee.otherDeduction), total: deductionTotal },
     reimbursements, payrollNetPay, netPay, bankTransfer: paymentMethod === "bank" ? netPay : 0, cashPayment: paymentMethod === "cash" ? netPay : 0,

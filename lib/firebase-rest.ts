@@ -98,12 +98,14 @@ async function fsRequest(
 export class RestDocSnapshot {
   readonly id: string;
   readonly exists: boolean;
+  readonly updateTime: string | null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private _data: Record<string, any>;
 
   constructor(raw: Record<string, unknown>, id: string) {
     this.id = id;
     this.exists = !!raw.name;
+    this.updateTime = typeof raw.updateTime === "string" ? raw.updateTime : null;
     this._data = fromFields((raw.fields ?? {}) as FsField);
   }
 
@@ -131,9 +133,10 @@ export class RestDocRef {
     return new RestCollectionRef(this._token, `${this._docPath}/${name}`);
   }
 
-  async get(): Promise<RestDocSnapshot> {
+  async get(transaction?: string): Promise<RestDocSnapshot> {
     try {
-      const raw = await fsRequest(this._token, `${FSBASE()}/${this._docPath}`) as Record<string, unknown>;
+      const suffix = transaction ? `?transaction=${encodeURIComponent(transaction)}` : "";
+      const raw = await fsRequest(this._token, `${FSBASE()}/${this._docPath}${suffix}`) as Record<string, unknown>;
       return new RestDocSnapshot(raw, this.id);
     } catch (e) {
       if (e instanceof Error && (e.message.includes("NOT_FOUND") || e.message.includes("404"))) {
@@ -192,13 +195,14 @@ export class RestCollectionRef {
     return new RestCollectionRef(this._token, this._colPath, [...this._filters], n);
   }
 
-  async get(): Promise<RestQuerySnapshot> {
+  async get(transaction?: string): Promise<RestQuerySnapshot> {
     if (this._filters.length === 0 && !this._limitVal) {
       // Firestore can cap listDocuments below the requested pageSize. Always
       // follow nextPageToken or a payroll calculation may see a clock-in while
       // silently missing its clock-out from a later page.
       const documents = await collectFirestorePages<Record<string, unknown>>(async (pageToken) => {
         const params = new URLSearchParams({ pageSize: "5000" });
+        if (transaction) params.set("transaction", transaction);
         if (pageToken) params.set("pageToken", pageToken);
         const url = `${FSBASE()}/${this._colPath}?${params.toString()}`;
         const raw = await fsRequest(this._token, url).catch((e: Error) => { throw new Error(`${e.message} [list ${this._colPath}]`); }) as Record<string, unknown>;
@@ -241,6 +245,7 @@ export class RestCollectionRef {
         ...(this._filters.length > 0 ? { where: whereClause } : {}),
         ...(this._limitVal != null ? { limit: this._limitVal } : {}),
       },
+      ...(transaction ? { transaction } : {}),
     };
 
     const raw = await fsRequest(this._token, `${parentUrl}:runQuery`, "POST", query).catch((e: Error) => { throw new Error(`${e.message} [query ${this._colPath}]`); }) as unknown[];
@@ -283,12 +288,12 @@ export class RestBatch {
 
 export class RestTransaction {
   _writes: unknown[] = [];
-  constructor(private _token: string) {}
+  constructor(private _token: string, readonly id: string) {}
 
   get(ref: RestDocRef): Promise<RestDocSnapshot>;
   get(col: RestCollectionRef): Promise<RestQuerySnapshot>;
   async get(refOrCol: RestDocRef | RestCollectionRef): Promise<RestDocSnapshot | RestQuerySnapshot> {
-    return refOrCol.get() as Promise<RestDocSnapshot | RestQuerySnapshot>;
+    return refOrCol.get(this.id) as Promise<RestDocSnapshot | RestQuerySnapshot>;
   }
 
   set(ref: RestDocRef, data: object): void {
@@ -314,12 +319,17 @@ export class FirestoreRest {
   }
 
   async runTransaction<T>(fn: (transaction: RestTransaction) => Promise<T>): Promise<T> {
-    const tx = new RestTransaction(this._token);
-    const result = await fn(tx);
-    if (tx._writes.length > 0) {
-      await fsRequest(this._token, `${FSBASE()}:commit`, "POST", { writes: tx._writes });
+    const begun = await fsRequest(this._token, `${FSBASE()}:beginTransaction`, "POST", {}) as { transaction?: string };
+    if (!begun.transaction) throw new Error("Firestore transaction could not be started");
+    const tx = new RestTransaction(this._token, begun.transaction);
+    try {
+      const result = await fn(tx);
+      await fsRequest(this._token, `${FSBASE()}:commit`, "POST", { writes: tx._writes, transaction: tx.id });
+      return result;
+    } catch (error) {
+      await fsRequest(this._token, `${FSBASE()}:rollback`, "POST", { transaction: tx.id }).catch(() => undefined);
+      throw error;
     }
-    return result;
   }
 }
 

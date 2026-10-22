@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useAuthProfile } from "@/lib/auth";
 import { calculateHolidayUnitPay } from "@/lib/payroll";
-import type { FixedPayrollAdjustment, PayrollResult } from "@/lib/payroll";
+import type { FixedPayrollAdjustment, PayrollBreakPolicy, PayrollResult } from "@/lib/payroll";
 import { adjustmentDisabledReason, holidayAllowancePreview, reimbursementPending, resolveHolidayAllowanceBasis } from "@/lib/payroll-adjustment-ui";
 
 type PayrollIssue = { severity: "error" | "warning"; code: string; message: string; employeeId?: string };
@@ -12,6 +12,7 @@ type PayrollRun = {
   id?: string; status: "draft" | "confirmed" | "cancelled"; targetMonth: string; paymentMonth: string; paymentDate: string;
   calculatedAt?: string | { _seconds?: number }; employeeCount: number; grossTotal: number; deductionTotal: number;
   netTotal: number; bankTransferTotal: number; canConfirm?: boolean; issues: PayrollIssue[]; results: PayrollResult[];
+  sourceAttendanceVersion: string; adjustmentsSnapshot?: Record<string, FixedPayrollAdjustment>; breakPolicySnapshot?: PayrollBreakPolicy | null;
 };
 type ConfirmedRunSummary = { id: string; targetMonth: string; paymentMonth: string; paymentDate: string; employeeCount: number };
 type SlipRun = { id: string; targetMonth: string; paymentDate: string; status: string; results: PayrollResult[] };
@@ -93,6 +94,7 @@ export default function PayrollPage() {
   const [unconfirmReason, setUnconfirmReason] = useState("");
   const [showUnconfirmDialog, setShowUnconfirmDialog] = useState(false);
   const [appliedDiffs, setAppliedDiffs] = useState<{ employeeId: string; employeeName: string; before: AppliedDiffSnapshot; after: AppliedDiffSnapshot }[]>([]);
+  const [breakPolicy, setBreakPolicy] = useState<PayrollBreakPolicy | null>(null);
   const payrollFileUrl = useMemo(() => payrollFile ? URL.createObjectURL(payrollFile.blob) : "", [payrollFile]);
   const transferFileUrl = useMemo(() => transferFile ? URL.createObjectURL(transferFile.blob) : "", [transferFile]);
 
@@ -112,6 +114,7 @@ export default function PayrollPage() {
         ]);
         if (!active) return;
         setRun(workspace.run);
+        setBreakPolicy(workspace.breakPolicy ?? null);
         const existingAdj = Object.fromEntries((workspace.run?.results ?? []).filter((item: PayrollResult) => item.payrollType === "fixed" && item.fixedAdjustment).map((item: PayrollResult) => [item.employeeId, item.fixedAdjustment]));
         setAdjustments(existingAdj);
         const existingManualOverrides = Object.fromEntries(Object.entries(existingAdj).map(([employeeId, value]) => [employeeId, (value as FixedPayrollAdjustment).holidayAllowanceOverride != null]));
@@ -166,7 +169,7 @@ export default function PayrollPage() {
     if (!run || !user) return; setBusy(true); setMessage("");
     try {
       const token = await user.getIdToken(true);
-      const file = await generateFile("/api/payroll/export/unified", token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(run) });
+      const file = await generateFile("/api/payroll/export/unified", token, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ targetMonth: run.targetMonth, paymentMonth: run.paymentMonth, paymentDate: run.paymentDate, sourceAttendanceVersion: run.sourceAttendanceVersion, adjustmentsSnapshot: run.adjustmentsSnapshot ?? savedAdjustments }) });
       setPayrollFile(file); setTransferFile(null); setMessage("給与・振込統合Excelを生成しました。下のボタンからダウンロードできます。");
     } catch (e) { setMessage(e instanceof Error ? e.message : "給与Excelの生成に失敗しました"); }
     finally { setBusy(false); }
@@ -283,6 +286,13 @@ export default function PayrollPage() {
           <Link href="/hq/employees" style={s.settingsButton}>正社員マスターを開く</Link>
         </header>
 
+        <section style={s.card}>
+          <h2 style={s.h2}>給与計算の一律休憩設定</h2>
+          <p style={s.sub}>記録済み休憩控除後の実働をJSTの日単位で合算し、閾値以上の日に1日1回だけ追加控除します。勤怠打刻・勤怠Excelには反映しません。</p>
+          {breakPolicy ? <p><b>{breakPolicy.enabled ? "有効" : "無効"}</b>　閾値：{breakPolicy.thresholdMinutes}分　控除：{breakPolicy.deductionMinutes}分　適用開始日：{breakPolicy.effectiveFrom}</p> : <p style={s.warningText}>未保存：一律休憩は計算へ適用されません。</p>}
+          <Link href="/hq/payroll-break-policy" style={s.settingsButton}>一律休憩設定を開く</Link>
+        </section>
+
         {/* ① 今月の給与を試算 */}
         <section style={s.card}>
           <h2 style={s.h2}>① 今月の給与を試算</h2>
@@ -312,6 +322,7 @@ export default function PayrollPage() {
               {errors.length > 0 && <div style={s.issueBox}>{errors.map((e, i) => <p key={i} style={s.errText}>エラー：{e.message}</p>)}</div>}
               {fixedWarningEmployeeIds.length > 0 && <Link href="/hq/employees" style={s.warningButton}>正社員{fixedWarningEmployeeIds.length}名に未設定項目があります（正社員マスターを開く）</Link>}
               {warningGroups.filter(([code]) => code !== "missing_social_insurance_setting" && code !== "missing_transportation_setting").map(([code, items]) => <p key={code} style={s.warningText}>警告：{items[0].message}{items.length > 1 ? `（同種${items.length}件）` : ""}</p>)}
+              <div style={{ overflowX: "auto", marginTop: 16 }}><table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}><thead><tr>{["社員コード", "氏名", "記録休憩", "一律休憩控除", "実働"].map((label) => <th key={label} style={{ textAlign: "left", padding: 8, borderBottom: "1px solid #CBD5E1" }}>{label}</th>)}</tr></thead><tbody>{run.results.map((result) => <tr key={result.employeeId}><td style={{ padding: 8 }}>{result.employeeCode}</td><td style={{ padding: 8 }}>{result.employeeName}</td><td style={{ padding: 8 }}>{result.attendance.recordedBreakMinutes ?? result.attendance.breakMinutes}分</td><td style={{ padding: 8 }}>{result.attendance.automaticBreakMinutes ?? 0}分</td><td style={{ padding: 8 }}>{result.attendance.workMinutes}分</td></tr>)}</tbody></table></div>
             </>
           )}
           {monthMode === "current" && <p style={s.hint}>※ 当月はまだ締まっていないため、試算Excelの確認のみ可能です。確定はできません。</p>}

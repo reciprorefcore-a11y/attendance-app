@@ -1,13 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyAdminToken } from "@/lib/firebase-admin";
-import { loadPayrollRun } from "@/lib/payroll-server";
+import { createPayrollDraft, loadPayrollRun } from "@/lib/payroll-server";
+import { isValidDate, isValidMonth, validateAdjustments } from "@/lib/payroll-api-validation";
 import { createPayrollWorkbook, createTransferWorkbook, createUnifiedPayrollWorkbook, createPayslipPdf, createPayslipZip, selectFullTimePayslipResults, selectStorePayslipResults } from "@/lib/payroll-export";
 
 export const runtime = "nodejs";
 
 type ExportRun = NonNullable<Awaited<ReturnType<typeof loadPayrollRun>>>;
+type ExportableRun = Pick<ExportRun, "targetMonth" | "paymentMonth" | "paymentDate" | "status" | "results">;
 
-function exportResponse(kind: string, run: ExportRun, excludeZero = true) {
+function exportResponse(kind: string, run: ExportableRun, excludeZero = true) {
   const label = `${Number(run.paymentMonth.slice(0, 4))}年${Number(run.paymentMonth.slice(5))}月`;
   const draft = run.status !== "confirmed";
   let buffer: Buffer, filename: string, contentType: string;
@@ -21,8 +23,17 @@ function exportResponse(kind: string, run: ExportRun, excludeZero = true) {
 export async function POST(request: NextRequest, context: { params: Promise<{ kind: string }> }) {
   const admin = await verifyAdminToken(request.headers.get("authorization"));
   if (!admin) return NextResponse.json({ error: "本部管理者権限が必要です" }, { status: 403 });
-  const run = await request.json() as ExportRun;
-  if (!run?.targetMonth || !run?.paymentMonth || !run?.paymentDate || !Array.isArray(run.results)) return NextResponse.json({ error: "給与計算結果が不正です" }, { status: 400 });
+  const input = await request.json() as { targetMonth?: string; paymentMonth?: string; paymentDate?: string; sourceAttendanceVersion?: string; adjustmentsSnapshot?: Record<string, import("@/lib/payroll").FixedPayrollAdjustment> };
+  if (!isValidMonth(input.targetMonth) || !isValidMonth(input.paymentMonth) || !isValidDate(input.paymentDate) || typeof input.sourceAttendanceVersion !== "string") return NextResponse.json({ error: "給与計算条件が不正です" }, { status: 400 });
+  const adjError = validateAdjustments(input.adjustmentsSnapshot);
+  if (adjError) return NextResponse.json({ error: adjError.error }, { status: adjError.status });
+  let run: Awaited<ReturnType<typeof createPayrollDraft>>;
+  try {
+    run = await createPayrollDraft(admin.db, { targetMonth: input.targetMonth, paymentMonth: input.paymentMonth, paymentDate: input.paymentDate, adjustments: input.adjustmentsSnapshot });
+    if (run.sourceAttendanceVersion !== input.sourceAttendanceVersion) return NextResponse.json({ error: "試算後に勤怠または給与設定が変更されました。再試算してください" }, { status: 409 });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error && error.message === "already_confirmed" ? "この対象月は確定済みです。確定済みExcelを使用してください" : "給与を再計算できません" }, { status: 409 });
+  }
   const { kind } = await context.params;
   return exportResponse(kind, run, request.nextUrl.searchParams.get("excludeZero") !== "false") ?? NextResponse.json({ error: "出力種別が不正です" }, { status: 400 });
 }

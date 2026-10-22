@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { validateAdjustments } from "../lib/payroll-api-validation.ts";
+import { isValidDate, isValidMonth, validateAdjustments } from "../lib/payroll-api-validation.ts";
 import { normalizePayrollResult } from "../lib/payroll-server.ts";
 import XLSX from "xlsx";
 import { createPayrollWorkbook, createPayslipPdf } from "../lib/payroll-export.ts";
@@ -90,6 +90,13 @@ test("POST adjustments: 複数社員で一人だけ不正なら 400 を返す", 
   assert.match(err!.error, /emp2/);
 });
 
+test("API年月日は正規表現だけでなく実在年月日を要求する", () => {
+  assert.equal(isValidMonth("2026-00"), false);
+  assert.equal(isValidMonth("2026-12"), true);
+  assert.equal(isValidDate("2026-11-31"), false);
+  assert.equal(isValidDate("2026-11-30"), true);
+});
+
 test("POST adjustments: 休日手当修正額の負数・小数・文字列を400にする", () => {
   for (const value of [-1, 100.5, "30891"]) {
     const result = validateAdjustments({ employee: { holidayAllowanceOverride: value } });
@@ -150,4 +157,34 @@ test("確定済みrunは applyFixedPayrollAdjustment を経由しない（コー
   const loadFnEnd = src.indexOf("\nexport ", loadFnStart + 1);
   const loadFnBody = src.slice(loadFnStart, loadFnEnd > 0 ? loadFnEnd : undefined);
   assert.doesNotMatch(loadFnBody, /applyFixedPayrollAdjustment/, "loadPayrollRun内でapplyFixedPayrollAdjustmentを呼ばない");
+});
+
+test("給与確定はサーバー再計算と勤怠バージョン一致後だけ保存する", () => {
+  const source = readFileSync("lib/payroll-server.ts", "utf8");
+  const start = source.indexOf("export async function confirmPayrollRun");
+  const end = source.indexOf("\n/**", start);
+  const fn = source.slice(start, end);
+  assert.match(fn, /createPayrollDraft\(db, input\)/);
+  assert.match(fn, /sourceAttendanceVersion !== input\.sourceAttendanceVersion/);
+  assert.match(fn, /source_changed/);
+  assert.match(fn, /runTransaction/);
+  assert.doesNotMatch(fn, /input\.results|draft\.results/);
+});
+
+test("未確定給与Excelはクライアントresultsを使わずサーバーで再計算する", () => {
+  const route = readFileSync("app/api/payroll/export/[kind]/route.ts", "utf8");
+  const post = route.slice(route.indexOf("export async function POST"), route.indexOf("export async function GET"));
+  assert.match(post, /createPayrollDraft/);
+  assert.match(post, /sourceAttendanceVersion/);
+  assert.doesNotMatch(post, /input\.results/);
+});
+
+test("確定取消はtransaction内でconfirmed状態を再確認する", () => {
+  const source = readFileSync("lib/payroll-server.ts", "utf8");
+  const start = source.indexOf("export async function cancelPayrollRun");
+  const end = source.indexOf("\nexport async function", start + 1);
+  const fn = source.slice(start, end);
+  assert.match(fn, /runTransaction/);
+  assert.match(fn, /snap\.data\(\)\.status !== "confirmed"/);
+  assert.match(fn, /not_confirmed/);
 });

@@ -194,6 +194,29 @@ test("manager can logically cancel own-store clockLogs", async () => {
   }));
 });
 
+test("clockLogsの論理削除フィールドはmanagerを拒否しadminだけ変更できる", async () => {
+  await environment.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(context.firestore(), "clockLogs", "logical-delete-target"), { employeeId: "employee-1", storeId: "store-a", type: "clock_in", isDeleted: false });
+  });
+  const managerDb = environment.authenticatedContext("manager-user").firestore();
+  await assertFails(updateDoc(doc(managerDb, "clockLogs", "logical-delete-target"), { isDeleted: true, deletedAt: serverTimestamp(), deletedBy: "manager-user", deleteReason: "fixture" }));
+  const adminDb = environment.authenticatedContext("admin-user").firestore();
+  await assertSucceeds(updateDoc(doc(adminDb, "clockLogs", "logical-delete-target"), { isDeleted: true, deletedAt: serverTimestamp(), deletedBy: "admin-user", deleteReason: "fixture" }));
+});
+
+test("clockLogsの削除取消メタデータもmanagerは変更できない", async () => {
+  await environment.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(context.firestore(), "clockLogs", "restore-target"), {
+      employeeId: "employee-1", storeId: "store-a", type: "clock_in", isDeleted: true,
+      deletionBatchId: "batch-1",
+    });
+  });
+  const managerDb = environment.authenticatedContext("manager-user").firestore();
+  await assertFails(updateDoc(doc(managerDb, "clockLogs", "restore-target"), {
+    isDeleted: false, restoredAt: serverTimestamp(), restoredBy: "manager-user", restoreReason: "fixture",
+  }));
+});
+
 test("manager cannot update another store clockLogs", async () => {
   await environment.withSecurityRulesDisabled(async (context) => {
     await setDoc(doc(context.firestore(), "clockLogs", "other-store-target"), {

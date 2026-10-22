@@ -103,7 +103,7 @@ service cloud.firestore {
     // ── clockLogs ────────────────────────────────────────────────────────────
     // 作成：誰でも可（未認証の QR 打刻）。storeId が文字列であることを最低限検証。
     // 読み取り：打刻ページはログイン状態にかかわらず直前打刻を取得するため許可。
-    // 更新（打刻修正・論理削除）：admin・fc_manager・area_manager（担当店舗）、manager（自店舗のみ）
+    // 更新：通常修正は従来の担当範囲、論理削除フィールドは admin のみ変更可。
     // 物理削除：全クライアントで禁止。取消は isCancelled を設定する update だけを使う。
     // Firebase Admin SDK は Rules を迂回するため、将来のCloud Run復元もサーバー側で
     // 書込み先を clockLogs/{documentId} に固定し、任意パスを受け取らないこと。
@@ -112,9 +112,13 @@ service cloud.firestore {
                     && request.resource.data.storeId.size() > 0;
       allow read: if true;
       allow update: if isAdmin()
-                    || (isFcManager() && resource.data.storeId in myStoreIds())
-                    || (isAreaManager() && resource.data.storeId in myStoreIds())
-                    || (isManager() && resource.data.storeId == myStoreId());
+                    || ((isFcManager() && resource.data.storeId in myStoreIds())
+                        || (isAreaManager() && resource.data.storeId in myStoreIds())
+                        || (isManager() && resource.data.storeId == myStoreId()))
+                       && !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+                         'isDeleted', 'deletedAt', 'deletedBy', 'deleteReason',
+                         'deletionBatchId', 'restoredAt', 'restoredBy', 'restoreReason'
+                       ]);
       allow delete: if false;
     }
 

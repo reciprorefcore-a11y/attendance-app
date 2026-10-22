@@ -21,7 +21,6 @@ import {
   setDoc,
   updateDoc,
   where,
-  writeBatch,
 } from "firebase/firestore";
 import type { Employee, Store } from "@/lib/attendance";
 import { isAdminPartTimeEmployee, isFullTimeEmployee } from "@/lib/employee-classification";
@@ -36,7 +35,6 @@ import {
 } from "@/lib/attendance-calculation";
 import {
   buildCorrectionWorkSets,
-  buildCorrectionAudit,
   calculateCorrectionPreview,
   fromJstDateTimeInput,
   openCorrectionEditor,
@@ -48,6 +46,7 @@ import {
 } from "@/lib/attendance-correction";
 import { validateManualAttendance, type ManualAttendanceInput } from "@/lib/manual-attendance";
 import { classifyPartTimeEmployee, EMPLOYEE_REASON_OPTIONS, validateEmployeeReason, type EmployeeAction } from "@/lib/employee-management";
+import { normalizeAttendanceHistory, type AttendanceHistoryRow } from "@/lib/attendance-history";
 
 type TabId =
   | "attendance"
@@ -91,6 +90,18 @@ type TimecardRow = {
   correctedAt?: Timestamp | null;
   correctedBy?: string | null;
   correctionReason?: string | null;
+  deleteReason?: string | null;
+  deletionBatchId?: string | null;
+  restoredAt?: Timestamp | null;
+  restoredBy?: string | null;
+  restoreReason?: string | null;
+  editReason?: string | null;
+  manualEditReason?: string | null;
+  requestedCorrectionReason?: string | null;
+  creationReason?: string | null;
+  cancellationReason?: string | null;
+  cancelledBy?: string | null;
+  cancelledAt?: Timestamp | null;
 };
 
 type EmployeeRow = Employee & { id: string; hourlyWage?: number | null; lateNightHourlyWage?:number|null; hasManagerAccount?: boolean; managerUid?: string | null; accountRole?: "manager" | "area_manager" | "fc_manager" | null; accountStoreIds?: string[] };
@@ -400,6 +411,9 @@ export default function AdminPage() {
   const router = useRouter();
   const { user, profile, isLoading: isAuthLoading, error: authError } = useAuthProfile();
   const [timecards, setTimecards] = useState<TimecardRow[]>([]);
+  const [attendanceAudits, setAttendanceAudits] = useState<Array<{ id: string; data: Record<string, unknown> }>>([]);
+  const [attendanceAuditError, setAttendanceAuditError] = useState("");
+  const [attendanceHistoryDialog, setAttendanceHistoryDialog] = useState<{ title: string; rows: AttendanceHistoryRow[] } | null>(null);
   const [employees, setEmployees] = useState<EmployeeRow[]>([]);
   const [wagesByEmployee, setWagesByEmployee] = useState<Record<string, CalculationWage[]>>({});
   const [wageHistoryStatusByEmployee, setWageHistoryStatusByEmployee] = useState<
@@ -586,6 +600,17 @@ export default function AdminPage() {
       } else {
         setTimecards(nextTimecards);
       }
+      if (isAdmin) {
+        try {
+          const auditSnapshot = await getDocs(collection(db, "auditLogs"));
+          setAttendanceAudits(auditSnapshot.docs.map((item) => ({ id: item.id, data: item.data() })));
+          setAttendanceAuditError("");
+        } catch (auditError) {
+          console.error("attendance audit fetch failed", auditError);
+          setAttendanceAudits([]);
+          setAttendanceAuditError("監査履歴を取得できませんでした。再読み込みしてください。");
+        }
+      } else { setAttendanceAudits([]); setAttendanceAuditError(""); }
     } catch (error) {
       console.error("clockLogs fetch failed", error);
       const detail = error instanceof Error ? error.message : String(error);
@@ -646,6 +671,14 @@ export default function AdminPage() {
     () => buildCorrectionWorkSets(calculationLogs),
     [calculationLogs],
   );
+  const deletedAttendanceGroups = useMemo(() => {
+    const groups = new Map<string, TimecardRow[]>();
+    for (const row of timecards.filter((item) => item.isDeleted === true)) {
+      const key = row.deletionBatchId || row.id;
+      groups.set(key, [...(groups.get(key) ?? []), row]);
+    }
+    return [...groups.entries()].map(([key, logs]) => ({ key, logs, source: logs[0], workDate: logs.map(logDate).filter((date): date is Date => Boolean(date)).sort((a, b) => a.getTime() - b.getTime())[0] })).filter((group) => group.workDate && dateKey(group.workDate).startsWith(targetMonth));
+  }, [timecards, targetMonth]);
   const filteredCorrectionWorkSets = useMemo(
     () => correctionWorkSets.filter((set) =>
       set.workDate.startsWith(targetMonth) &&
@@ -800,6 +833,41 @@ export default function AdminPage() {
     setMessage(`${employeeName}さんの手動登録を取り消しました。履歴は保持されています。`); await load();
   };
 
+  const operationChanges = (logs: Array<TimecardRow | CalculationClockLog>) => logs.map((row) => ({ id: row.id, operation: "update" as const, type: normalizeClockType(row as TimecardRow) as "clock_in" | "clock_out" | "break_start" | "break_end" }));
+
+  const submitAttendanceLogAction = async (action: "delete" | "restore", workDate: string, employeeId: string, storeId: string, logs: TimecardRow[], reason: string) => {
+    if (!user || !reason.trim()) return;
+    setIsSavingCorrection(true); setCorrectionError("");
+    try {
+      const token = await user.getIdToken();
+      const response = await fetch("/api/attendance/clock-logs", { method: "PATCH", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ action, employeeId, storeId, workDate, reason: reason.trim(), changes: operationChanges(logs) }) });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "打刻操作に失敗しました");
+      setMessage(action === "delete" ? "勤務セットを論理削除しました。打刻履歴は保持されています。" : "勤務セットの削除を取り消しました。");
+      await load();
+    } catch (error) { setCorrectionError(error instanceof Error ? error.message : "打刻操作に失敗しました"); }
+    finally { setIsSavingCorrection(false); }
+  };
+
+  const deleteWorkSet = async (workSet: CorrectionWorkSet) => {
+    const reason = window.prompt("削除理由を入力してください。空欄では削除できません。");
+    if (!reason?.trim()) { if (reason !== null) setCorrectionError("削除理由を入力してください"); return; }
+    const ids = new Set([workSet.clockInLog?.id, workSet.clockOutLog?.id, ...workSet.breaks.flatMap((item) => [item.startLog?.id, item.endLog?.id])].filter(Boolean));
+    const logs = timecards.filter((item) => ids.has(item.id));
+    await submitAttendanceLogAction("delete", workSet.workDate, workSet.employeeId, workSet.storeId, logs, reason);
+  };
+
+  const restoreDeletedGroup = async (group: { logs: TimecardRow[]; source: TimecardRow; workDate: Date }) => {
+    const reason = window.prompt("削除取消の理由を入力してください。空欄では取消できません。");
+    if (!reason?.trim()) { if (reason !== null) setCorrectionError("削除取消の理由を入力してください"); return; }
+    await submitAttendanceLogAction("restore", dateKey(group.workDate), group.source.employeeId ?? "", group.source.storeId, group.logs, reason);
+  };
+
+  const openAttendanceHistory = (title: string, logs: Array<TimecardRow | CalculationClockLog>) => {
+    const rows = logs.flatMap((log) => normalizeAttendanceHistory(log.id, log as unknown as Record<string, unknown>, attendanceAudits));
+    setAttendanceHistoryDialog({ title, rows: [...new Map(rows.map((row) => [row.id, row])).values()] });
+  };
+
   const startEditFromAttendance = (row: AttendanceRow) => {
     const ids = new Set(row.logs.map((log) => log.id));
     const workSet = correctionWorkSets.find((item) =>
@@ -830,101 +898,33 @@ export default function AdminPage() {
     setIsSavingCorrection(true);
     setCorrectionError("");
     try {
-      const batch = writeBatch(db);
       const safeKey = editWorkSet.key.replace(/[^a-zA-Z0-9_-]/g, "_");
-      const inRef = editWorkSet.clockInLog
-        ? doc(db, "clockLogs", editWorkSet.clockInLog.id)
-        : doc(db, "clockLogs", `correction_${safeKey}_clock_in`);
-      const outRef = editWorkSet.clockOutLog
-        ? doc(db, "clockLogs", editWorkSet.clockOutLog.id)
-        : doc(db, "clockLogs", `correction_${safeKey}_clock_out`);
-      const common = {
-        employeeId: employee.id,
-        employeeCode: employee.employeeCode ?? "",
-        employeeName: employee.name ?? "",
-        storeId: store.id,
-        workStoreId: store.id,
-        workStoreName: getStoreName(store),
-        homeStoreId: employee.storeId ?? "",
-        homeStoreName: storeNameById(employee.storeId ?? ""),
-        isHelp: Boolean(employee.storeId && employee.storeId !== store.id),
-        isManualEdited: true,
-        isCorrected: true,
-        correctedAt: serverTimestamp(),
-        correctedBy: user?.uid ?? profile?.uid ?? "unknown-admin",
-        correctionReason: editForm.reason.trim(),
-      };
-      const writeLog = (
-        ref: ReturnType<typeof doc>,
-        existing: CalculationClockLog | null,
-        type: "clock_in" | "clock_out" | "break_start" | "break_end",
-        timestamp: Date,
-      ) => {
-        const value = { ...common, type, timestamp: Timestamp.fromDate(timestamp) };
-        if (existing) batch.update(ref, value);
-        else batch.set(ref, { ...value, createdAt: serverTimestamp(), isOutsideGps: false });
-      };
-      if (clockIn) writeLog(inRef, editWorkSet.clockInLog, "clock_in", clockIn);
-      if (clockOut) writeLog(outRef, editWorkSet.clockOutLog, "clock_out", clockOut);
-
-      const breakActions: { targetLogId: string; action: "create" | "update" | "delete"; type: "break_start" | "break_end" }[] = [];
-      const breakTargetIds: string[] = [];
+      const inId = editWorkSet.clockInLog?.id ?? `correction_${safeKey}_clock_in`;
+      const outId = editWorkSet.clockOutLog?.id ?? `correction_${safeKey}_clock_out`;
+      const changes: Array<{ id: string; operation: "create" | "update" | "delete"; type: "clock_in" | "clock_out" | "break_start" | "break_end"; timestamp?: string }> = [];
+      if (clockIn) changes.push({ id: inId, operation: editWorkSet.clockInLog ? "update" : "create", type: "clock_in", timestamp: clockIn.toISOString() });
+      if (clockOut) changes.push({ id: outId, operation: editWorkSet.clockOutLog ? "update" : "create", type: "clock_out", timestamp: clockOut.toISOString() });
       for (const [index, item] of editForm.breaks.entries()) {
         const breakKey = item.key.replace(/[^a-zA-Z0-9_-]/g, "_");
-        const startRef = item.startLogId
-          ? doc(db, "clockLogs", item.startLogId)
-          : doc(db, "clockLogs", `correction_${safeKey}_${breakKey}_${index}_break_start`);
-        const endRef = item.endLogId
-          ? doc(db, "clockLogs", item.endLogId)
-          : doc(db, "clockLogs", `correction_${safeKey}_${breakKey}_${index}_break_end`);
+        const startId = item.startLogId ?? `correction_${safeKey}_${breakKey}_${index}_break_start`;
+        const endId = item.endLogId ?? `correction_${safeKey}_${breakKey}_${index}_break_end`;
         if (item.isDeleted) {
-          if (item.startLogId) {
-            batch.update(startRef, { ...common, isDeleted: true, deletedAt: serverTimestamp(), deletedBy: common.correctedBy });
-            breakActions.push({ targetLogId: startRef.id, action: "delete", type: "break_start" });
-            breakTargetIds.push(startRef.id);
-          }
-          if (item.endLogId) {
-            batch.update(endRef, { ...common, isDeleted: true, deletedAt: serverTimestamp(), deletedBy: common.correctedBy });
-            breakActions.push({ targetLogId: endRef.id, action: "delete", type: "break_end" });
-            breakTargetIds.push(endRef.id);
-          }
+          if (item.startLogId) changes.push({ id: startId, operation: "delete", type: "break_start" });
+          if (item.endLogId) changes.push({ id: endId, operation: "delete", type: "break_end" });
           continue;
         }
         const start = fromJstDateTimeInput(item.start)!;
         const end = fromJstDateTimeInput(item.end)!;
-        writeLog(startRef, item.startLogId ? ({ id: item.startLogId } as CalculationClockLog) : null, "break_start", start);
-        writeLog(endRef, item.endLogId ? ({ id: item.endLogId } as CalculationClockLog) : null, "break_end", end);
-        breakActions.push({ targetLogId: startRef.id, action: item.startLogId ? "update" : "create", type: "break_start" });
-        breakActions.push({ targetLogId: endRef.id, action: item.endLogId ? "update" : "create", type: "break_end" });
-        breakTargetIds.push(startRef.id, endRef.id);
+        changes.push({ id: startId, operation: item.startLogId ? "update" : "create", type: "break_start", timestamp: start.toISOString() });
+        changes.push({ id: endId, operation: item.endLogId ? "update" : "create", type: "break_end", timestamp: end.toISOString() });
       }
-
+      const token = await user!.getIdToken();
+      const response = await fetch("/api/attendance/clock-logs", { method: "PATCH", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ action: "correct", employeeId: employee.id, storeId: store.id, workDate: editForm.workDate, reason: editForm.reason, changes }) });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "打刻修正に失敗しました");
       const editedIds = new Set([editWorkSet.clockInLog?.id, editWorkSet.clockOutLog?.id].filter(Boolean));
-      const latestOtherPunch = calculationLogs
-        .filter((log) => log.employeeId === editWorkSet.employeeId && !editedIds.has(log.id))
-        .reduce((latest, log) => Math.max(latest, log.timestamp.getTime()), 0);
-      if (clockOut && employee.id === editWorkSet.employeeId && clockOut.getTime() >= latestOtherPunch) {
-        batch.set(doc(db, "clockStates", employee.id), {
-          employeeId: employee.id,
-          lastType: "clock_out",
-          lastLogId: outRef.id,
-          storeId: store.id,
-          updatedAt: serverTimestamp(),
-        });
-      }
-
-      const auditRef = doc(collection(db, "auditLogs"));
-      batch.set(auditRef, {
-        ...buildCorrectionAudit(
-          editWorkSet,
-          editForm,
-          [inRef.id, outRef.id, ...breakTargetIds],
-          user?.uid ?? profile?.uid ?? "unknown-admin",
-          breakActions,
-        ),
-        correctedAt: serverTimestamp(),
-      });
-      await batch.commit();
+      const latestOtherPunch = calculationLogs.filter((log) => log.employeeId === editWorkSet.employeeId && !editedIds.has(log.id)).reduce((latest, log) => Math.max(latest, log.timestamp.getTime()), 0);
+      if (clockOut && employee.id === editWorkSet.employeeId && clockOut.getTime() >= latestOtherPunch) await setDoc(doc(db, "clockStates", employee.id), { employeeId: employee.id, lastType: "clock_out", lastLogId: outId, storeId: store.id, updatedAt: serverTimestamp() });
       setMessage("打刻を修正しました。");
       setEditWorkSet(null);
       setEditForm(null);
@@ -933,7 +933,7 @@ export default function AdminPage() {
       console.error("timecard edit failed", error);
       const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
       setCorrectionError(
-        code.includes("permission-denied")
+        error instanceof Error && error.message ? error.message : code.includes("permission-denied")
           ? "権限がないため保存できません。担当店舗と管理者権限を確認してください。"
           : code.includes("unavailable") || code.includes("deadline-exceeded")
             ? "通信エラーで保存できませんでした。通信状態を確認して再試行してください。"
@@ -1543,6 +1543,8 @@ export default function AdminPage() {
                     {row.employeeName || row.employeeKey}
                     {row.isMissingClockOut && <span style={styles.dangerBadge}>未退勤</span>}
                     {row.isWageMissing && <span style={styles.dangerBadge}>時給未設定</span>}
+                    {row.logs.some((log) => log.isCorrected === true || log.isManualEdited === true) && <span style={styles.chainBadge}>修正あり</span>}
+                    {row.logs.some((log) => log.isDeleted === true) && <span style={styles.dangerBadge}>削除あり</span>}
                   </td>
                   <td style={styles.td}>{formatTime(row.clockIn)}</td>
                   <td style={styles.td}>{formatTime(row.clockOut)}</td>
@@ -1568,6 +1570,7 @@ export default function AdminPage() {
                         修正
                       </button>
                     )}
+                    {row.logs.length > 0 && <button type="button" onClick={() => openAttendanceHistory(`${row.employeeName} ${row.date}`, row.logs)} style={{ ...styles.linkButton, marginLeft: 8 }}>履歴</button>}
                   </td>
                 </tr>
               ))}
@@ -1958,16 +1961,32 @@ export default function AdminPage() {
                     <span style={workSet.status === "normal" ? styles.chainBadge : styles.dangerBadge}>
                       {correctionStatusLabels[workSet.status]}
                     </span>
+                    {[workSet.clockInLog, workSet.clockOutLog, ...workSet.breaks.flatMap((item) => [item.startLog, item.endLog])].some((log) => log?.isCorrected === true || log?.isManualEdited === true) && <span style={{ ...styles.chainBadge, marginLeft: 4 }}>修正あり</span>}
                     {workSet.warnings.map((warning) => <div key={warning} style={{ color: "#B91C1C", fontSize: 11, marginTop: 4 }}>{warning}</div>)}
                   </td>
                   <td style={styles.td}>
                     <button type="button" onClick={() => startEdit(workSet)} style={styles.linkButton}>修正</button>
+                    <button type="button" onClick={() => openAttendanceHistory(`${workSet.employeeName} ${workSet.workDate}`, [workSet.clockInLog, workSet.clockOutLog, ...workSet.breaks.flatMap((item) => [item.startLog, item.endLog])].filter((item): item is CalculationClockLog => Boolean(item)))} style={{ ...styles.linkButton, marginLeft: 8 }}>履歴</button>
+                    {isAdmin && <button type="button" disabled={isSavingCorrection} onClick={() => void deleteWorkSet(workSet)} style={{ ...styles.linkButton, marginLeft: 8, color: "#B91C1C" }}>削除</button>}
                     {(() => { const source = timecards.find((item) => item.id === workSet.clockInLog?.id || item.id === workSet.clockOutLog?.id); return source?.manuallyCreated && source.manualRequestId ? <button type="button" onClick={() => cancelManualAttendance(source.manualRequestId!, workSet.employeeName)} style={{ ...styles.linkButton, marginLeft: 8, color: "#B91C1C" }}>手動登録を取消</button> : null; })()}
                   </td>
                 </tr>
               ))}
             </DataTable>
             {filteredCorrectionWorkSets.length === 0 && <p style={styles.empty}>対象の勤務セットがありません</p>}
+            {isAdmin && deletedAttendanceGroups.length > 0 && <>
+              <h3 style={{ ...styles.subTitle, marginTop: 24 }}>削除済み打刻</h3>
+              <DataTable headers={["勤務日", "従業員名", "勤務店舗", "状態", "理由", "操作"]}>
+                {deletedAttendanceGroups.map((group) => <tr key={group.key}>
+                  <td style={styles.td}>{dateKey(group.workDate)}</td>
+                  <td style={styles.td}>{group.source.employeeName || group.source.employeeCode || group.source.employeeId}</td>
+                  <td style={styles.td}>{group.source.workStoreName || group.source.storeName || storeNameById(group.source.storeId)}</td>
+                  <td style={styles.td}><span style={styles.dangerBadge}>削除あり</span></td>
+                  <td style={styles.td}>{group.source.deleteReason || "理由未記録"}</td>
+                  <td style={styles.td}><button type="button" onClick={() => openAttendanceHistory(`${group.source.employeeName ?? "従業員"} ${dateKey(group.workDate)}`, group.logs)} style={styles.linkButton}>履歴</button><button type="button" disabled={isSavingCorrection} onClick={() => void restoreDeletedGroup(group)} style={{ ...styles.linkButton, marginLeft: 8 }}>削除取消</button></td>
+                </tr>)}
+              </DataTable>
+            </>}
             {message && <p style={styles.message}>{message}</p>}
           </section>
         )}
@@ -2137,6 +2156,8 @@ export default function AdminPage() {
           </form>
         </div>
       )}
+
+      {attendanceHistoryDialog && <div style={styles.modalOverlay} onClick={() => setAttendanceHistoryDialog(null)}><div style={{ ...styles.modal, maxWidth: 760, maxHeight: "90vh", overflowY: "auto" }} onClick={(event) => event.stopPropagation()}><h2>{attendanceHistoryDialog.title}の修正履歴</h2>{attendanceAuditError && <p style={styles.error}>{attendanceAuditError}</p>}{attendanceHistoryDialog.rows.length === 0 && !attendanceAuditError ? <p style={styles.empty}>修正履歴はありません</p> : attendanceHistoryDialog.rows.map((row) => <article key={row.id} style={{ borderBottom: "1px solid #E2E8F0", padding: "12px 0" }}><b>{{ attendance_corrected: "修正", attendance_deleted: "削除", attendance_delete_restored: "削除取消", attendance_cancelled: "取消", attendance_created: "手動登録" }[row.action] ?? row.action}　{({ clock_in: "出勤", clock_out: "退勤", break_start: "休憩開始", break_end: "休憩終了" } as Record<string, string>)[row.punchType] ?? row.punchType}</b><p>打刻ID：{row.logId}<br/>修正前：{row.beforeTime ? new Date(row.beforeTime).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" }) : "記録なし"}<br/>修正後：{row.afterTime ? new Date(row.afterTime).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" }) : "記録なし"}</p><p>修正者：{row.performedBy}<br/>修正日時：{row.performedAt ? new Date(row.performedAt).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" }) : "記録なし"}<br/>理由：{row.reason || "理由未記録"}</p></article>)}<button type="button" onClick={() => setAttendanceHistoryDialog(null)} style={styles.secondaryButton}>閉じる</button></div></div>}
 
       {manualForm && (
         <div style={{ ...styles.modalOverlay, padding: 24 }} onClick={() => { if (!isSavingManual) setManualForm(null); }}>

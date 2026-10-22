@@ -5,6 +5,18 @@
 
 export type AdjValidationError = { status: 400; error: string };
 
+export function isValidMonth(value: unknown): value is string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}$/.test(value)) return false;
+  const [, month] = value.split("-").map(Number);
+  return month >= 1 && month <= 12;
+}
+
+export function isValidDate(value: unknown): value is string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
 /** adjustments オブジェクト全体を検証し、不正な場合はエラーを返す。正常なら null。 */
 export function validateAdjustments(adjustments: unknown): AdjValidationError | null {
   if (adjustments === undefined || adjustments === null) return null;

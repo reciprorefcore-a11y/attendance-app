@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { FirestoreRest } from "./firebase-rest.ts";
 import { buildAttendanceRows, getApplicableWage, type CalculationClockLog, type CalculationWage } from "./attendance-calculation.ts";
-import { applyFixedPayrollAdjustment, calculatePayroll, isPayrollMonthClosed, resolvePayrollType, summarizePayroll, validatePayrollInput, type FixedPayrollAdjustment, type PayrollAttendanceDay, type PayrollEmployee, type PayrollResult, type ResidentTaxHistoryEntry } from "./payroll.ts";
+import { applyFixedPayrollAdjustment, applyPayrollBreakPolicy, calculatePayroll, isPayrollMonthClosed, resolvePayrollType, summarizePayroll, validatePayrollBreakPolicy, validatePayrollInput, type FixedPayrollAdjustment, type PayrollAttendanceDay, type PayrollEmployee, type PayrollResult, type ResidentTaxHistoryEntry } from "./payroll.ts";
 import { sortPayrollResults } from "./payroll-order.ts";
 import { resolveEffectiveHistory } from "./fulltime-master.ts";
 
@@ -17,6 +17,11 @@ function asDate(value: unknown) {
   if (value instanceof Date) return value;
   if (value && typeof value === "object" && "toDate" in value && typeof value.toDate === "function") return value.toDate() as Date;
   return new Date(String(value));
+}
+
+export function shouldIncludePayrollClockLog(data: Record<string, unknown>, employeeIds: Set<string>) {
+  const employeeId = typeof data.employeeId === "string" ? data.employeeId : "";
+  return Boolean(employeeId && employeeIds.has(employeeId) && data.isDeleted !== true && data.isCancelled !== true && data.timestamp);
 }
 
 export function resolveResidentTaxForMonth(employee: PayrollEmployee, targetMonth: string): PayrollEmployee {
@@ -58,6 +63,7 @@ export async function loadPayrollSource(db: FirestoreRest, targetMonth: string) 
   ]);
   const stores = new Map(storeSnapshot.docs.map((item) => [item.id, item.data()]));
   const payrollSettings = new Map(payrollSettingsSnapshot.docs.map((item) => [item.id, item.data()]));
+  const breakPolicy = validatePayrollBreakPolicy(payrollSettings.get("attendanceBreakPolicy"));
   const employees: PayrollEmployee[] = employeeSnapshot.docs.map((item) => {
     const data = item.data();
     const settings = payrollSettings.get(item.id) ?? {};
@@ -118,16 +124,15 @@ export async function loadPayrollSource(db: FirestoreRest, targetMonth: string) 
   const wagesByEmployee = Object.fromEntries(wageHistoryEntries) as Record<string, CalculationWage[]>;
   const logs: CalculationClockLog[] = logSnapshot.docs.flatMap((item) => {
     const data = item.data();
-    const employeeId = data.employeeId as string | undefined;
-    if (!employeeId || !employeeIds.has(employeeId) || data.isDeleted === true || data.isCancelled === true || !data.timestamp) return [];
+    if (!shouldIncludePayrollClockLog(data, employeeIds)) return [];
     return [{ id: item.id, ...data, timestamp: asDate(data.timestamp) } as CalculationClockLog];
   });
   const homeStores = Object.fromEntries(employees.filter((employee) => employee.employeeType === "partTime").map((employee) => [employee.id, { storeId: employee.storeId ?? "", storeName: employee.storeName ?? employee.storeId ?? "" }]));
   const baseWages = Object.fromEntries(employees.map((employee) => [employee.id, Number(employee.hourlyWage ?? employee.baseWage) || 0]));
   const rows = buildAttendanceRows(logs, wagesByEmployee, {}, baseWages, homeStores).filter((row) => row.date.startsWith(targetMonth));
-  const attendance: PayrollAttendanceDay[] = rows.map((row) => ({
+  const attendance: PayrollAttendanceDay[] = rows.map((row) => applyPayrollBreakPolicy({
     employeeId: row.employeeKey, date: row.date, workMinutes: row.workMinutes, overtimeMinutes: row.overtimeMinutes,
-    nightMinutes: row.nightMinutes, helpMinutes: row.helpMinutes, breakMinutes: row.breakMinutes,
+    nightMinutes: row.nightMinutes, helpMinutes: row.helpMinutes, breakMinutes: row.breakMinutes, recordedBreakMinutes: row.breakMinutes,
     confirmed: row.diagnostics.length === 0,
     warnings: [...new Set(row.diagnostics.map((item) => item.message))], kind: "daily",
     dailyTransportationUnit: resolveDailyTransportationForDate(employeeById.get(row.employeeKey), wagesByEmployee[row.employeeKey] ?? [], row.date, row.logs),
@@ -136,9 +141,15 @@ export async function loadPayrollSource(db: FirestoreRest, targetMonth: string) 
     clockOut: row.clockOut?.toISOString() ?? null,
     breakPeriods: row.sessions.flatMap((session) => session.breaks.map((item) => ({ start: item.start?.toISOString() ?? null, end: item.end?.toISOString() ?? null }))),
     storeNames: [...new Set(row.sessions.map((session) => session.storeName))],
-  }));
-  const sourceAttendanceVersion = createHash("sha256").update(JSON.stringify(rows.flatMap((row) => row.logs.map((log) => [log.id, log.timestamp.toISOString(), log.type])))).digest("hex");
-  return { employees, attendance, alreadyConfirmed: !confirmedSnapshot.empty, sourceAttendanceVersion };
+  }, breakPolicy));
+  const versionPayload = {
+    logs: rows.flatMap((row) => row.logs.map((log) => [log.id, log.timestamp.toISOString(), log.type, log.storeId, log.employeeId, log.isDeleted === true, log.isCancelled === true])),
+    employees,
+    wagesByEmployee,
+    breakPolicy,
+  };
+  const sourceAttendanceVersion = createHash("sha256").update(JSON.stringify(versionPayload)).digest("hex");
+  return { employees, attendance, alreadyConfirmed: !confirmedSnapshot.empty, sourceAttendanceVersion, breakPolicy };
 }
 
 export async function createPayrollDraft(db: FirestoreRest, input: { targetMonth: string; paymentMonth: string; paymentDate: string; adjustments?: Record<string, FixedPayrollAdjustment> }) {
@@ -151,28 +162,41 @@ export async function createPayrollDraft(db: FirestoreRest, input: { targetMonth
   const totals = summarizePayroll(results);
   const now = new Date();
   const { adjustments: _adjustments, ...period } = input;
-  const run = { ...period, status: "draft" as const, calculatedAt: now.toISOString(), ...totals, sourceAttendanceVersion: source.sourceAttendanceVersion, revision: 1, canConfirm: isPayrollMonthClosed(input.targetMonth) && !allIssues.some((item) => item.severity === "error"), issues: allIssues };
+  void _adjustments;
+  if (!source.breakPolicy && input.targetMonth >= "2026-11") allIssues.unshift({ severity: "error", code: "break_policy_not_configured", message: "一律休憩設定が未保存です。閾値・控除時間・適用開始日を保存してから再計算してください" });
+  const run = { ...period, status: "draft" as const, calculatedAt: now.toISOString(), ...totals, sourceAttendanceVersion: source.sourceAttendanceVersion, breakPolicySnapshot: source.breakPolicy, adjustmentsSnapshot: input.adjustments ?? {}, revision: 2, canConfirm: isPayrollMonthClosed(input.targetMonth) && !allIssues.some((item) => item.severity === "error"), issues: allIssues };
   return { ...run, results };
 }
 
-export async function confirmPayrollRun(db: FirestoreRest, uid: string, draft: Awaited<ReturnType<typeof createPayrollDraft>>) {
-  if (draft.status !== "draft") throw new Error("invalid_status");
-  if (!isPayrollMonthClosed(draft.targetMonth)) throw new Error("month_not_closed");
-  if (draft.issues.some((item) => item.severity === "error")) throw new Error("blocking_errors");
-  const totals = summarizePayroll(draft.results);
-  if (draft.results.some((item) => item.netPay < 0 || item.earnings.grossTotal < 0 || item.deductions.total < 0)) throw new Error("invalid_result");
-  if (totals.grossTotal - totals.deductionTotal + totals.reimbursementsTotal !== totals.netTotal || totals.bankTransferTotal + draft.results.reduce((sum, item) => sum + item.cashPayment, 0) !== totals.netTotal) throw new Error("report_mismatch");
-  const duplicate = await db.collection("payrollRuns").where("targetMonth", "==", draft.targetMonth).where("status", "==", "confirmed").limit(1).get();
-  if (!duplicate.empty) throw new Error("already_confirmed");
+export type PayrollConfirmationInput = {
+  targetMonth: string;
+  paymentMonth: string;
+  paymentDate: string;
+  sourceAttendanceVersion: string;
+  adjustments?: Record<string, FixedPayrollAdjustment>;
+};
+
+export async function confirmPayrollRun(db: FirestoreRest, uid: string, input: PayrollConfirmationInput) {
+  if (!isPayrollMonthClosed(input.targetMonth)) throw new Error("month_not_closed");
+  const recalculated = await createPayrollDraft(db, input);
+  if (recalculated.sourceAttendanceVersion !== input.sourceAttendanceVersion) throw new Error("source_changed");
+  if (recalculated.issues.some((item) => item.severity === "error")) throw new Error("blocking_errors");
+  const totals = summarizePayroll(recalculated.results);
+  if (recalculated.results.some((item) => item.netPay < 0 || item.earnings.grossTotal < 0 || item.deductions.total < 0)) throw new Error("invalid_result");
+  if (totals.grossTotal - totals.deductionTotal + totals.reimbursementsTotal !== totals.netTotal || totals.bankTransferTotal + recalculated.results.reduce((sum, item) => sum + item.cashPayment, 0) !== totals.netTotal) throw new Error("report_mismatch");
 
   const ref = db.collection("payrollRuns").doc();
   const confirmedAt = new Date();
-  const { results, canConfirm: _canConfirm, ...draftFields } = draft;
-  const run = { ...draftFields, ...totals, status: "confirmed", calculatedAt: asDate(draft.calculatedAt), calculatedBy: uid, confirmedAt, confirmedBy: uid };
-  const batch = db.batch();
-  batch.set(ref, run);
-  results.forEach((result) => batch.set(ref.collection("employees").doc(result.employeeId), result));
-  await batch.commit();
+  const { results, canConfirm: _canConfirm, ...draftFields } = recalculated;
+  void _canConfirm;
+  const run = { ...draftFields, ...totals, status: "confirmed", calculatedAt: asDate(recalculated.calculatedAt), calculatedBy: uid, confirmedAt, confirmedBy: uid };
+  await db.runTransaction(async (transaction) => {
+    const duplicate = await transaction.get(db.collection("payrollRuns").where("targetMonth", "==", input.targetMonth).where("status", "==", "confirmed").limit(1));
+    if (!duplicate.empty) throw new Error("already_confirmed");
+    const batch = transaction;
+    batch.set(ref, run);
+    results.forEach((result) => batch.set(ref.collection("employees").doc(result.employeeId), result));
+  });
   return { id: ref.id, ...run, calculatedAt: asDate(run.calculatedAt).toISOString(), confirmedAt: confirmedAt.toISOString(), results };
 }
 
@@ -193,7 +217,8 @@ export function normalizePayrollResult(raw: Record<string, unknown>): PayrollRes
   const payrollNetPay = typed.payrollNetPay ?? netPay;
   const employeeType = typed.employeeType ?? (typed.payrollType === "fixed" ? "fullTime" : "partTime");
   const base = employeeType === "fullTime" ? { storeId: "", storeName: "所属なし" } : {};
-  return { ...typed, ...base, employeeType, earnings, reimbursements, payrollNetPay, netPay, fixedOvertimeHoursSnapshot: typed.fixedOvertimeHoursSnapshot ?? null } as PayrollResult;
+  const attendance = typed.attendance ? { ...typed.attendance, recordedBreakMinutes: typed.attendance.recordedBreakMinutes ?? typed.attendance.breakMinutes ?? 0, automaticBreakMinutes: typed.attendance.automaticBreakMinutes ?? 0 } : typed.attendance;
+  return { ...typed, ...base, employeeType, attendance, earnings, reimbursements, payrollNetPay, netPay, fixedOvertimeHoursSnapshot: typed.fixedOvertimeHoursSnapshot ?? null } as PayrollResult;
 }
 
 export async function loadPayrollRun(db: FirestoreRest, runId: string) {
@@ -225,7 +250,7 @@ export async function loadPayrollWorkspace(db: FirestoreRest, targetMonth: strin
     employmentInsurance: employee.employmentInsurance ?? null, incomeTax: employee.incomeTax ?? null,
     residentTax: employee.residentTax ?? null, transportationType: employee.transportationType ?? "none",
   }));
-  return { run, fixedEmployees };
+  return { run, fixedEmployees, breakPolicy: source.breakPolicy };
 }
 
 export async function saveFixedPayrollMaster(db: FirestoreRest, employeeId: string, values: Record<string, unknown>) {
@@ -254,10 +279,20 @@ export async function listConfirmedRuns(db: FirestoreRest) {
 
 export async function cancelPayrollRun(db: FirestoreRest, runId: string, cancelledBy: string, reason: string) {
   const ref = db.collection("payrollRuns").doc(runId);
-  const snap = await ref.get();
-  if (!snap.exists) throw new Error("not_found");
-  if (snap.data().status !== "confirmed") throw new Error("not_confirmed");
-  const batch = db.batch();
-  batch.update(ref, { status: "cancelled", cancelledAt: new Date(), cancelledBy, cancellationReason: reason });
-  await batch.commit();
+  await db.runTransaction(async (transaction) => {
+    const snap = await transaction.get(ref);
+    if (!snap.exists) throw new Error("not_found");
+    if (snap.data().status !== "confirmed") throw new Error("not_confirmed");
+    transaction.update(ref, { status: "cancelled", cancelledAt: new Date(), cancelledBy, cancellationReason: reason });
+  });
+}
+
+export async function savePayrollBreakPolicy(db: FirestoreRest, uid: string, value: unknown) {
+  const policy = validatePayrollBreakPolicy(value);
+  if (!policy) throw new Error("invalid_break_policy");
+  const ref = db.collection("payrollSettings").doc("attendanceBreakPolicy");
+  await db.runTransaction(async (transaction) => {
+    transaction.set(ref, { ...policy, updatedAt: new Date(), updatedBy: uid });
+  });
+  return policy;
 }
