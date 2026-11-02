@@ -32,6 +32,7 @@ function fixture(options: { confirmed?: boolean; deleted?: boolean; initialized?
   const docs = new Map<string, Record<string, unknown>>([
     ["employees/employee-1", { employeeCode: "1001", name: "テスト", storeId: "store-1" }],
     ["stores/store-1", { storeName: "店舗1" }],
+    ["stores/store-2", { storeName: "店舗2" }],
     ["clockLogs/log-1", { employeeId: "employee-1", storeId: "store-1", type: options.logType ?? "clock_in", timestamp: new Date("2026-11-10T00:00:00Z"), ...(options.deleted ? { isDeleted: true, deletionBatchId: "batch-1" } : {}) }],
     ...(options.initialized === false ? [] : [["payrollSettings/attendanceManagementState", { payrollPeriodLocksInitialized: true }]] as [string, Record<string, unknown>][]),
     ...(options.confirmed ? [["payrollPeriodLocks/2026-11", { targetMonth: "2026-11", status: "confirmed" }]] as [string, Record<string, unknown>][] : []),
@@ -93,6 +94,28 @@ test("初期化済みならmanagerの過去月修正を許可し、確定月だ�
     await assert.rejects(applyAttendanceLogOperation(locked.db, { uid: "actor-1", profile }, correction), /payroll_confirmed/);
     assert.equal(locked.writes.length, 0);
   }
+});
+
+test("勤務セット修正は出退勤・休憩・勤務店舗を同じ原子的処理で更新する", async () => {
+  const f = fixture();
+  const input: AttendanceLogRequest = {
+    action: "correct",
+    employeeId: "employee-1",
+    storeId: "store-2",
+    workDate: "2026-11-10",
+    reason: "時刻と休憩を訂正",
+    changes: [
+      { id: "log-1", operation: "update", type: "clock_in", timestamp: "2026-11-10T00:15:00.000Z" },
+      { id: "log-out", operation: "create", type: "clock_out", timestamp: "2026-11-10T08:15:00.000Z" },
+      { id: "break-start", operation: "create", type: "break_start", timestamp: "2026-11-10T04:00:00.000Z" },
+      { id: "break-end", operation: "create", type: "break_end", timestamp: "2026-11-10T04:30:00.000Z" },
+    ],
+  };
+  await applyAttendanceLogOperation(f.db, { uid: "admin-1", profile: { role: "admin", name: "本部" } }, input);
+  const updatedClockIn = f.writes.find((write) => write.kind === "update" && write.path === "clockLogs/log-1");
+  assert.equal(updatedClockIn?.data.storeId, "store-2");
+  assert.deepEqual(f.writes.filter((write) => write.kind === "set" && write.path.startsWith("clockLogs/")).map((write) => write.data.type), ["clock_out", "break_start", "break_end"]);
+  assert.equal(f.writes.some((write) => write.kind === "set" && write.path.startsWith("auditLogs/") && write.data.correctionReason === input.reason), true);
 });
 
 test("索引初期化前の移行区間はmanagerの過去月だけ安全停止する", async () => {

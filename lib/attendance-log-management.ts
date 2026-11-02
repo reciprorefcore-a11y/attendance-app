@@ -94,17 +94,19 @@ export async function applyAttendanceLogOperation(
   await db.runTransaction(async (transaction) => {
     // 給与額を含むpayrollRunsはadmin専用のまま維持する。店舗管理者は、確定有無だけを
     // payrollPeriodLocksから参照する。初期化前のデプロイ移行中だけ従来同様に過去月を安全停止する。
-    const legacyConfirmedRead = isAdmin
-      ? transaction.get(db.collection("payrollRuns").where("targetMonth", "==", targetMonth).where("status", "==", "confirmed").limit(1))
-      : Promise.resolve({ empty: true, docs: [] });
-    const [employee, store, periodLock, managementState, legacyConfirmed, ...snapshots] = await Promise.all([
-      transaction.get(employeeRef),
-      transaction.get(storeRef),
-      transaction.get(periodLockRef),
-      transaction.get(managementStateRef),
-      legacyConfirmedRead,
-      ...logRefs.map((ref) => transaction.get(ref)),
-    ]);
+    // Firestore REST transactions share one server-side read cursor.  Issuing
+    // reads for the same transaction with Promise.all can race that cursor
+    // and make an otherwise valid commit fail with a generic 500.  Keep every
+    // read in transaction order; the writes below remain one atomic commit.
+    const employee = await transaction.get(employeeRef);
+    const store = await transaction.get(storeRef);
+    const periodLock = await transaction.get(periodLockRef);
+    const managementState = await transaction.get(managementStateRef);
+    const legacyConfirmed = isAdmin
+      ? await transaction.get(db.collection("payrollRuns").where("targetMonth", "==", targetMonth).where("status", "==", "confirmed").limit(1))
+      : { empty: true, docs: [] };
+    const snapshots: RestDocSnapshot[] = [];
+    for (const ref of logRefs) snapshots.push(await transaction.get(ref));
     if (!employee.exists) throw new Error("employee_not_found");
     if (!store.exists) throw new Error("store_not_found");
     if ((periodLock.exists && periodLock.data().status === "confirmed") || !legacyConfirmed.empty) throw new Error("payroll_confirmed");
